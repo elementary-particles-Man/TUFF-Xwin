@@ -42,7 +42,12 @@
 
 ## Next Files To Add
 
-- `docs/ipc-format.md`
-- `docs/crash-loop-policy.md`
 - `examples/resume-failure/`
 - `scripts/run-degraded-mode.sh`
+
+## Code Seeds
+
+- `crates/waybroker-common/src/ipc.rs`
+  - 初期 envelope
+  - service 間 command enum
+  - crash loop や resume hint の共有型

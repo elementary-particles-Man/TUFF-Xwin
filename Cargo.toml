@@ -19,4 +19,6 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 waybroker-common = { path = "crates/waybroker-common" }

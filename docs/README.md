@@ -56,6 +56,8 @@ Apps / Plasma / Xwayland
 - [repo-layout.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/repo-layout.md): repository の階層構造
 - [api-boundary.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/api-boundary.md): service 間の権限境界と初期 API 面
 - [sequence-resume.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/sequence-resume.md): suspend/resume 復帰時の基準シーケンス
+- [ipc-format.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/ipc-format.md): 初期 IPC envelope と JSON message 形状
+- [crash-loop-policy.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/crash-loop-policy.md): watchdog の再起動と degraded mode の基準
 
 ## ひとことで言うと
 

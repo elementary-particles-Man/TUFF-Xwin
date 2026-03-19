@@ -38,6 +38,8 @@ TUFF-Xwin/
 - [docs/repo-layout.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/repo-layout.md)
 - [docs/api-boundary.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/api-boundary.md)
 - [docs/sequence-resume.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/sequence-resume.md)
+- [docs/ipc-format.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/ipc-format.md)
+- [docs/crash-loop-policy.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/crash-loop-policy.md)
 - [CONTRIBUTING.md](/media/flux/THPDOC/Develop/TUFF-Xwin/CONTRIBUTING.md)
 
 ## Quick Start
