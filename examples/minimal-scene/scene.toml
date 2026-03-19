@@ -1,0 +1,33 @@
+version = 1
+
+[output]
+name = "eDP-1"
+width = 1920
+height = 1080
+refresh_hz = 60
+
+[focus]
+surface = "terminal-1"
+
+[lock]
+active = false
+
+[[surface]]
+id = "terminal-1"
+app_id = "org.kde.konsole"
+x = 80
+y = 64
+width = 1280
+height = 800
+z = 10
+visible = true
+
+[[surface]]
+id = "panel-1"
+app_id = "org.kde.plasmashell.panel"
+x = 0
+y = 0
+width = 1920
+height = 36
+z = 100
+visible = true

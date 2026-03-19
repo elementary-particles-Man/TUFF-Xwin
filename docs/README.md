@@ -54,6 +54,8 @@ Apps / Plasma / Xwayland
 - [roadmap.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/roadmap.md): 段階計画、工数、到達条件
 - [design-memo.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/design-memo.md): リポジトリ方針と初期 API 境界
 - [repo-layout.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/repo-layout.md): repository の階層構造
+- [api-boundary.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/api-boundary.md): service 間の権限境界と初期 API 面
+- [sequence-resume.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/sequence-resume.md): suspend/resume 復帰時の基準シーケンス
 
 ## ひとことで言うと
 

@@ -36,6 +36,8 @@ TUFF-Xwin/
 - [docs/README.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/README.md)
 - [docs/design-memo.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/design-memo.md)
 - [docs/repo-layout.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/repo-layout.md)
+- [docs/api-boundary.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/api-boundary.md)
+- [docs/sequence-resume.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/sequence-resume.md)
 - [CONTRIBUTING.md](/media/flux/THPDOC/Develop/TUFF-Xwin/CONTRIBUTING.md)
 
 ## Quick Start
@@ -43,6 +45,7 @@ TUFF-Xwin/
 ```bash
 cargo check
 ./scripts/dev-check.sh
+./scripts/run-stack.sh
 ```
 
 現時点では設計骨格と Rust workspace の初期化までです。実装はまだ入っていません。

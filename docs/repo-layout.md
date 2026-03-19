@@ -33,9 +33,16 @@
 - `crates/watchdog`
   - recovery control の実装入口
 
-## Next Files To Add
+## Current Seeds
 
 - `docs/api-boundary.md`
 - `docs/sequence-resume.md`
 - `examples/minimal-scene/`
 - `scripts/run-stack.sh`
+
+## Next Files To Add
+
+- `docs/ipc-format.md`
+- `docs/crash-loop-policy.md`
+- `examples/resume-failure/`
+- `scripts/run-degraded-mode.sh`
