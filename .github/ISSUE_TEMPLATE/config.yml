@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Design discussion
+    url: https://github.com/elementary-particles-Man/TUFF-Xwin/discussions
+    about: Use Discussions for broader architecture debate that is not yet an actionable issue

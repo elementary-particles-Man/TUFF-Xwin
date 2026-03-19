@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a design or implementation addition
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What failure mode, recovery gap, or architectural limit are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the change at the boundary and service level
+      placeholder: Split clipboard ownership out of waylandd into a dedicated broker
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Isolation impact
+      description: How does this reduce fault radius or improve recovery?
+    validations:
+      required: true
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: Tradeoffs
+      description: Complexity, performance, compatibility, or migration costs
+  - type: textarea
+    id: docs
+    attributes:
+      label: Documentation changes
+      description: Which `docs/` files would need to change?

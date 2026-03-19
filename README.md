@@ -36,6 +36,7 @@ TUFF-Xwin/
 - [docs/README.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/README.md)
 - [docs/design-memo.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/design-memo.md)
 - [docs/repo-layout.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/repo-layout.md)
+- [CONTRIBUTING.md](/media/flux/THPDOC/Develop/TUFF-Xwin/CONTRIBUTING.md)
 
 ## Quick Start
 
@@ -49,3 +50,10 @@ cargo check
 ## Local Build Note
 
 repository は `CIFS` 共有上にあるため、`cargo target-dir` は `.cargo/config.toml` で `/home/flux/.cache/tuff-xwin-target` に逃がしています。source tree は共有上に置いたまま、build artifact だけローカル実行可能領域を使う想定です。
+
+## License
+
+この repository は `MIT OR Apache-2.0` の dual license です。
+
+- [LICENSE-MIT](/media/flux/THPDOC/Develop/TUFF-Xwin/LICENSE-MIT)
+- [LICENSE-APACHE](/media/flux/THPDOC/Develop/TUFF-Xwin/LICENSE-APACHE)

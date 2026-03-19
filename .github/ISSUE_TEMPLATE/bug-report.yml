@@ -1,0 +1,62 @@
+name: Bug report
+description: Report a defect, crash, regression, or recovery failure
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What broke, and why is it a fault-isolation problem?
+      placeholder: compd crash forced a full session stop instead of degrading cleanly
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Hardware, distro, kernel, compositor path, and relevant runtime context
+      placeholder: Debian + Plasma Wayland, Intel AX200, AMD GPU, suspend/resume after lid open
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Exact steps to reproduce
+      placeholder: |
+        1. Start session
+        2. Suspend or trigger restart path
+        3. Observe crash or unrecoverable hang
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs and evidence
+      description: Paste logs, crash output, or traces that identify the first failing layer
+      render: shell
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Suspected layer
+      options:
+        - displayd
+        - waylandd
+        - compd
+        - lockd
+        - sessiond
+        - watchdog
+        - xwayland
+        - kernel or driver
+        - unknown
+    validations:
+      required: true
