@@ -52,12 +52,28 @@ impl DesktopComponentRole {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DesktopLauncher {
+    System,
+    RepoScript,
+    RepoBinary,
+}
+
+impl Default for DesktopLauncher {
+    fn default() -> Self {
+        Self::System
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesktopComponent {
     pub id: String,
     pub role: DesktopComponentRole,
     pub command: Vec<String>,
     pub critical: bool,
+    #[serde(default)]
+    pub launcher: DesktopLauncher,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,7 +239,9 @@ pub struct SessionProfileTransition {
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopComponent, DesktopComponentRole, DesktopProfile, DesktopProtocol};
+    use super::{
+        DesktopComponent, DesktopComponentRole, DesktopLauncher, DesktopProfile, DesktopProtocol,
+    };
     use crate::ServiceRole;
 
     #[test]
@@ -244,6 +262,7 @@ mod tests {
                 role: DesktopComponentRole::WindowManager,
                 command: vec!["xfwm4".into(), "--replace".into()],
                 critical: true,
+                launcher: DesktopLauncher::System,
             }],
         };
 

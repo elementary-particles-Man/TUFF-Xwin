@@ -14,14 +14,16 @@
     {
       "id": "crashy-wm",
       "role": "window-manager",
-      "command": ["./scripts/mock-desktop-component.sh", "--component", "crashy-wm", "--hold-seconds", "1", "--exit-code", "1"],
-      "critical": true
+      "command": ["scripts/mock-desktop-component.sh", "--component", "crashy-wm", "--hold-seconds", "1", "--exit-code", "1"],
+      "critical": true,
+      "launcher": "repo-script"
     },
     {
       "id": "steady-panel",
       "role": "panel",
-      "command": ["./scripts/mock-desktop-component.sh", "--component", "steady-panel", "--hold-seconds", "8", "--exit-code", "0"],
-      "critical": false
+      "command": ["scripts/mock-desktop-component.sh", "--component", "steady-panel", "--hold-seconds", "8", "--exit-code", "0"],
+      "critical": false,
+      "launcher": "repo-script"
     }
   ]
 }

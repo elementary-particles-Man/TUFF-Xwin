@@ -15,7 +15,8 @@
       "id": "x11bridge",
       "role": "compat-layer",
       "command": ["x11bridge", "--commit-demo"],
-      "critical": true
+      "critical": true,
+      "launcher": "repo-binary"
     },
     {
       "id": "openbox",

@@ -14,20 +14,23 @@
     {
       "id": "demo-x11bridge",
       "role": "compat-layer",
-      "command": ["./scripts/mock-desktop-component.sh", "--component", "demo-x11bridge", "--hold-seconds", "20"],
-      "critical": true
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-x11bridge", "--hold-seconds", "20"],
+      "critical": true,
+      "launcher": "repo-script"
     },
     {
       "id": "demo-wm",
       "role": "window-manager",
-      "command": ["./scripts/mock-desktop-component.sh", "--component", "demo-wm", "--hold-seconds", "20"],
-      "critical": true
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-wm", "--hold-seconds", "20"],
+      "critical": true,
+      "launcher": "repo-script"
     },
     {
       "id": "demo-panel",
       "role": "panel",
-      "command": ["./scripts/mock-desktop-component.sh", "--component", "demo-panel", "--hold-seconds", "20"],
-      "critical": false
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-panel", "--hold-seconds", "20"],
+      "critical": false,
+      "launcher": "repo-script"
     }
   ]
 }

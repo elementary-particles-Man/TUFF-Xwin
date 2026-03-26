@@ -9,9 +9,9 @@ pub use ipc::{
 };
 pub use profile::{
     DesktopComponent, DesktopComponentRole, DesktopComponentState, DesktopHealthStatus,
-    DesktopProfile, DesktopProtocol, DesktopRecoveryAction, SessionLaunchComponentState,
-    SessionLaunchDelta, SessionLaunchPlan, SessionLaunchState, SessionProfileTransition,
-    SessionWatchdogComponentReport, SessionWatchdogReport,
+    DesktopLauncher, DesktopProfile, DesktopProtocol, DesktopRecoveryAction,
+    SessionLaunchComponentState, SessionLaunchDelta, SessionLaunchPlan, SessionLaunchState,
+    SessionProfileTransition, SessionWatchdogComponentReport, SessionWatchdogReport,
 };
 pub use transport::{
     bind_service_socket, connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir,

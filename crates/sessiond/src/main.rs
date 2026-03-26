@@ -115,6 +115,7 @@ fn main() -> Result<()> {
 
 #[derive(Debug)]
 struct Config {
+    repo_root: Option<PathBuf>,
     profiles_dir: Option<PathBuf>,
     list_profiles: bool,
     selected_profile_id: Option<String>,
@@ -136,6 +137,7 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            repo_root: None,
             profiles_dir: None,
             list_profiles: false,
             selected_profile_id: None,
@@ -162,6 +164,10 @@ impl Config {
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--repo-root" => {
+                    let dir = args.next().context("--repo-root requires a path")?;
+                    config.repo_root = Some(PathBuf::from(dir));
+                }
                 "--profiles-dir" => {
                     let dir = args.next().context("--profiles-dir requires a path")?;
                     config.profiles_dir = Some(PathBuf::from(dir));
@@ -202,7 +208,7 @@ impl Config {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: sessiond [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N] [--apply-watchdog-active] [--watchdog-report PATH] [--serve-ipc] [--once] [--manage-active] [--notify-watchdog]"
+                        "usage: sessiond [--repo-root PATH] [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N] [--apply-watchdog-active] [--watchdog-report PATH] [--serve-ipc] [--once] [--manage-active] [--notify-watchdog]"
                     );
                     std::process::exit(0);
                 }
@@ -213,13 +219,21 @@ impl Config {
         Ok(config)
     }
 
+    fn repo_root(&self) -> PathBuf {
+        self.repo_root.clone().unwrap_or_else(default_repo_root)
+    }
+
     fn profiles_dir(&self) -> PathBuf {
-        self.profiles_dir.clone().unwrap_or_else(default_profiles_dir)
+        self.profiles_dir.clone().unwrap_or_else(|| self.repo_root().join("profiles"))
     }
 }
 
-fn default_profiles_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../profiles")
+fn default_repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn load_profiles(dir: &Path) -> Result<Vec<DesktopProfile>> {
@@ -415,20 +429,20 @@ fn launch_state_for_profile(
     config: &Config,
 ) -> Result<SessionLaunchState> {
     if config.supervise_seconds > 0 {
-        return supervise_launch_state(profile, config.supervise_seconds, config.restart_limit);
+        return supervise_launch_state(profile, config);
     }
 
-    build_launch_state(profile, config.spawn_components)
+    build_launch_state(profile, config)
 }
 
 fn build_launch_state(
     profile: &DesktopProfile,
-    spawn_components: bool,
+    config: &Config,
 ) -> Result<SessionLaunchState> {
     let mut components = Vec::with_capacity(profile.session_components.len());
 
     for component in &profile.session_components {
-        components.push(resolve_component_state(component, &profile.id, spawn_components)?);
+        components.push(resolve_component_state(component, &profile.id, config)?);
     }
 
     Ok(SessionLaunchState {
@@ -444,25 +458,24 @@ fn build_launch_state(
 
 fn supervise_launch_state(
     profile: &DesktopProfile,
-    supervise_seconds: u64,
-    restart_limit: u32,
+    config: &Config,
 ) -> Result<SessionLaunchState> {
     let mut components = Vec::with_capacity(profile.session_components.len());
 
     for component in &profile.session_components {
-        components.push(RuntimeComponent::new(component)?);
+        components.push(RuntimeComponent::new(component, config)?);
     }
 
     for component in &mut components {
         component.spawn(&profile.id)?;
     }
 
-    let deadline = Instant::now() + Duration::from_secs(supervise_seconds);
+    let deadline = Instant::now() + Duration::from_secs(config.supervise_seconds);
     while Instant::now() < deadline {
         let mut had_event = false;
 
         for component in &mut components {
-            if component.poll_and_restart(&profile.id, restart_limit)? {
+            if component.poll_and_restart(&profile.id, config.restart_limit)? {
                 had_event = true;
             }
         }
@@ -486,9 +499,10 @@ fn supervise_launch_state(
 fn resolve_component_state(
     component: &DesktopComponent,
     profile_id: &str,
-    spawn_components: bool,
+    config: &Config,
 ) -> Result<SessionLaunchComponentState> {
-    let mut state = base_component_state(component);
+    let spawn_components = config.spawn_components;
+    let mut state = base_component_state(component, config);
 
     if spawn_components {
         if let Some(command_path) = state.resolved_command.as_ref() {
@@ -496,6 +510,7 @@ fn resolve_component_state(
                 .args(component.command.iter().skip(1))
                 .env("WAYBROKER_PROFILE_ID", profile_id)
                 .env("WAYBROKER_COMPONENT_ID", &component.id)
+                .env("WAYBROKER_REPO_ROOT", config.repo_root())
                 .spawn();
 
             match child {
@@ -514,9 +529,9 @@ fn resolve_component_state(
     Ok(state)
 }
 
-fn base_component_state(component: &DesktopComponent) -> SessionLaunchComponentState {
+fn base_component_state(component: &DesktopComponent, config: &Config) -> SessionLaunchComponentState {
     let resolved_command =
-        resolve_command_path(&component.command).map(|path| path.display().to_string());
+        resolve_command_path(component, config).map(|path| path.display().to_string());
     let state = if resolved_command.is_some() {
         DesktopComponentState::Ready
     } else {
@@ -536,23 +551,59 @@ fn base_component_state(component: &DesktopComponent) -> SessionLaunchComponentS
     }
 }
 
-fn resolve_command_path(command: &[String]) -> Option<PathBuf> {
-    let executable = command.first()?;
-    let candidate = PathBuf::from(executable);
+fn resolve_command_path(component: &DesktopComponent, config: &Config) -> Option<PathBuf> {
+    let executable = component.command.first()?;
+    
+    match component.launcher {
+        waybroker_common::DesktopLauncher::System => {
+            let candidate = PathBuf::from(executable);
+            if candidate.components().count() > 1 {
+                return is_executable(&candidate).then_some(candidate);
+            }
 
-    if candidate.components().count() > 1 {
-        return is_executable(&candidate).then_some(candidate);
-    }
+            let path = env::var_os("PATH")?;
+            for dir in env::split_paths(&path) {
+                let candidate = dir.join(executable);
+                if is_executable(&candidate) {
+                    return Some(candidate);
+                }
+            }
+            None
+        }
+        waybroker_common::DesktopLauncher::RepoScript => {
+            let repo_root = config.repo_root();
+            let candidate = repo_root.join(executable);
+            is_executable(&candidate).then_some(candidate)
+        }
+        waybroker_common::DesktopLauncher::RepoBinary => {
+            // 1. Check same directory as current executable (useful for custom target-dir)
+            if let Ok(current_exe) = env::current_exe() {
+                if let Some(exe_dir) = current_exe.parent() {
+                    let candidate = exe_dir.join(executable);
+                    if is_executable(&candidate) {
+                        return Some(candidate);
+                    }
+                }
+            }
 
-    let path = env::var_os("PATH")?;
-    for dir in env::split_paths(&path) {
-        let candidate = dir.join(executable);
-        if is_executable(&candidate) {
-            return Some(candidate);
+            // 2. Check for cargo target dir env var
+            if let Some(path) = env::var_os("CARGO_TARGET_DIR") {
+                let candidate = PathBuf::from(path).join("debug").join(executable);
+                if is_executable(&candidate) {
+                    return Some(candidate);
+                }
+            }
+            
+            // 3. Fallback to project root target/debug
+            let repo_root = config.repo_root();
+            let candidate = repo_root.join("target").join("debug").join(executable);
+            if is_executable(&candidate) {
+                return Some(candidate);
+            }
+            
+            None
         }
     }
-
-    None
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -880,7 +931,7 @@ struct SessionSupervisor {
 impl SessionSupervisor {
     fn bootstrap(config: &Config, profiles: &[DesktopProfile]) -> Result<Self> {
         let profile = read_active_profile()?;
-        let mut supervisor = Self::new(profile, profiles.to_vec(), 1)?;
+        let mut supervisor = Self::new(profile, profiles.to_vec(), 1, config)?;
         supervisor.activate(config)?;
         Ok(supervisor)
     }
@@ -889,10 +940,11 @@ impl SessionSupervisor {
         profile: DesktopProfile,
         profiles: Vec<DesktopProfile>,
         stream_generation: u64,
+        config: &Config,
     ) -> Result<Self> {
         let mut components = Vec::with_capacity(profile.session_components.len());
         for component in &profile.session_components {
-            components.push(RuntimeComponent::new(component)?);
+            components.push(RuntimeComponent::new(component, config)?);
         }
 
         Ok(Self {
@@ -923,7 +975,7 @@ impl SessionSupervisor {
         self.stop_all()?;
         let profiles = self.profiles.clone();
         let next_generation = self.stream_generation.saturating_add(1);
-        *self = Self::new(profile, profiles, next_generation)?;
+        *self = Self::new(profile, profiles, next_generation, config)?;
         self.activate(config)?;
         println!("sessiond auto_launched_profile={}", self.profile.id);
         Ok(())
@@ -1023,10 +1075,10 @@ struct RuntimeComponent {
 }
 
 impl RuntimeComponent {
-    fn new(component: &DesktopComponent) -> Result<Self> {
+    fn new(component: &DesktopComponent, config: &Config) -> Result<Self> {
         Ok(Self {
             component: component.clone(),
-            state: base_component_state(component),
+            state: base_component_state(component, config),
             child: None,
         })
     }
@@ -1130,8 +1182,18 @@ mod tests {
         fs::set_permissions(&executable, permissions).expect("chmod");
 
         assert!(is_executable(&executable));
+        
+        let component = DesktopComponent {
+            id: "test".into(),
+            role: DesktopComponentRole::WindowManager,
+            command: vec![executable.display().to_string()],
+            critical: true,
+            launcher: waybroker_common::DesktopLauncher::System,
+        };
+        let config = super::Config::default();
+        
         assert_eq!(
-            resolve_command_path(&[executable.display().to_string()]).as_deref(),
+            resolve_command_path(&component, &config).as_deref(),
             Some(executable.as_path())
         );
 
@@ -1153,14 +1215,51 @@ mod tests {
                 role: DesktopComponentRole::Shell,
                 command: vec!["definitely-not-a-real-command-waybroker".into()],
                 critical: true,
+                launcher: waybroker_common::DesktopLauncher::System,
             }],
         };
 
-        let state = build_launch_state(&profile, false).expect("build launch state");
+        let config = super::Config::default();
+        let state = build_launch_state(&profile, &config).expect("build launch state");
 
         assert_eq!(state.components.len(), 1);
         assert_eq!(state.components[0].state, waybroker_common::DesktopComponentState::Missing);
         assert_eq!(state.components[0].restart_count, 0);
+    }
+
+    #[test]
+    fn resolves_repo_script_path() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "sessiond-repo-test-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let scripts_dir = temp_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+
+        let script = scripts_dir.join("mock.sh");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write script");
+        let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("chmod");
+
+        let component = DesktopComponent {
+            id: "mock".into(),
+            role: DesktopComponentRole::WindowManager,
+            command: vec!["scripts/mock.sh".into()],
+            critical: true,
+            launcher: waybroker_common::DesktopLauncher::RepoScript,
+        };
+        let mut config = super::Config::default();
+        config.repo_root = Some(temp_dir.clone());
+        
+        assert_eq!(
+            resolve_command_path(&component, &config).as_deref(),
+            Some(script.as_path())
+        );
+
+        let _ = fs::remove_file(&script);
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

@@ -14,20 +14,23 @@
     {
       "id": "demo-x11bridge-fallback",
       "role": "compat-layer",
-      "command": ["./scripts/mock-desktop-component.sh", "--component", "demo-x11bridge-fallback", "--hold-seconds", "20"],
-      "critical": true
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-x11bridge-fallback", "--hold-seconds", "20"],
+      "critical": true,
+      "launcher": "repo-script"
     },
     {
       "id": "demo-fallback-wm",
       "role": "window-manager",
-      "command": ["./scripts/mock-desktop-component.sh", "--component", "demo-fallback-wm", "--hold-seconds", "20"],
-      "critical": true
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-fallback-wm", "--hold-seconds", "20"],
+      "critical": true,
+      "launcher": "repo-script"
     },
     {
       "id": "demo-fallback-panel",
       "role": "panel",
-      "command": ["./scripts/mock-desktop-component.sh", "--component", "demo-fallback-panel", "--hold-seconds", "20"],
-      "critical": false
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-fallback-panel", "--hold-seconds", "20"],
+      "critical": false,
+      "launcher": "repo-script"
     }
   ]
 }
