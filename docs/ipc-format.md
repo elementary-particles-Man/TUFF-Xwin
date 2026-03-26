@@ -104,4 +104,4 @@
 
 初期の message type は [lib.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/lib.rs) と [ipc.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/ipc.rs) に置きます。
 
-初期の transport helper は [transport.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/transport.rs) に置き、`displayd <-> waylandd` と `watchdog <-> sessiond` の間で 1 行 1 message の Unix socket 通信を行います。`sessiond` は IPC request を受けたあと、必要なら degraded fallback の launch-state 更新と component 起動まで連続で行います。
+初期の transport helper は [transport.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/transport.rs) に置き、`displayd <-> waylandd` と `watchdog <-> sessiond` の間で 1 行 1 message の Unix socket 通信を行います。`sessiond` は `--manage-active` 時に active profile runtime を持ち続け、IPC request を受けたあと必要なら degraded fallback の launch-state 更新と component 起動まで連続で行います。

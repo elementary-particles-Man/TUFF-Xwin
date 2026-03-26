@@ -38,20 +38,30 @@ echo "==> cargo run -p sessiond -- --select-profile demo-x11-crashy --write-sele
 cargo run -p sessiond -- --select-profile demo-x11-crashy --write-selection
 
 echo
-echo "==> cargo run -p sessiond -- --launch-active --spawn-components --supervise-seconds 4 --restart-limit 2"
-cargo run -p sessiond -- --launch-active --spawn-components --supervise-seconds 4 --restart-limit 2
-
-echo
-echo "==> cargo run -p sessiond -- --serve-ipc --once --spawn-components"
-cargo run -p sessiond -- --serve-ipc --once --spawn-components &
+echo "==> cargo run -p sessiond -- --serve-ipc --spawn-components --manage-active"
+cargo run -p sessiond -- --serve-ipc --spawn-components --manage-active &
 sessiond_pid=$!
 sleep 1
 
 echo
+echo "==> waiting for crash-loop state in $crashy_launch_state"
+crash_loop_ready=0
+for _ in $(seq 1 30); do
+  if [[ -f "$crashy_launch_state" ]] && rg -q '"restart_count": 3' "$crashy_launch_state" && rg -q '"state": "failed"' "$crashy_launch_state"; then
+    crash_loop_ready=1
+    break
+  fi
+  sleep 1
+done
+
+if [[ "$crash_loop_ready" -ne 1 ]]; then
+  echo "crash-loop state was not reached in time" >&2
+  exit 1
+fi
+
+echo
 echo "==> cargo run -p watchdog -- --profile-id demo-x11-crashy --write-reports --notify-sessiond"
 cargo run -p watchdog -- --profile-id demo-x11-crashy --write-reports --notify-sessiond
-wait "$sessiond_pid"
-sessiond_pid=""
 
 echo
 echo "==> cargo run -p watchdog -- --profile-id demo-x11-degraded --write-reports"

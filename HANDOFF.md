@@ -139,6 +139,7 @@
   - `ProfileUnchanged`
 - `sessiond`
   - `--serve-ipc [--once]` で Unix socket server として待受
+  - `--manage-active` で active profile runtime を常駐 supervisor として保持
 - `watchdog`
   - `--notify-sessiond` で report を IPC 送信し、切替結果を応答として受ける
 - `scripts/run-degraded-mode.sh`
