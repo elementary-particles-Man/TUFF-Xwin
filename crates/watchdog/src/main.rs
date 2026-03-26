@@ -1,13 +1,15 @@
 use std::{
     env, fs,
+    io::BufReader,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 use waybroker_common::{
-    DesktopComponentState, DesktopHealthStatus, DesktopRecoveryAction, ServiceBanner, ServiceRole,
-    SessionLaunchComponentState, SessionLaunchState, SessionWatchdogComponentReport,
-    SessionWatchdogReport, ensure_runtime_dir, runtime_dir,
+    DesktopComponentState, DesktopHealthStatus, DesktopRecoveryAction, IpcEnvelope, MessageKind,
+    ServiceBanner, ServiceRole, SessionCommand, SessionLaunchComponentState, SessionLaunchState,
+    SessionWatchdogComponentReport, SessionWatchdogReport, connect_service_socket,
+    ensure_runtime_dir, read_json_line, runtime_dir, send_json_line,
 };
 
 fn main() -> Result<()> {
@@ -29,6 +31,11 @@ fn main() -> Result<()> {
             let report_path = write_report(&report)?;
             println!("watchdog wrote_report={}", report_path.display());
         }
+
+        if config.notify_sessiond {
+            let response = notify_sessiond(&report)?;
+            print_sessiond_response(&response);
+        }
     }
 
     Ok(())
@@ -40,6 +47,7 @@ struct Config {
     profile_id: Option<String>,
     inspect_all: bool,
     write_reports: bool,
+    notify_sessiond: bool,
 }
 
 impl Config {
@@ -58,9 +66,10 @@ impl Config {
                 }
                 "--inspect-all" => config.inspect_all = true,
                 "--write-reports" => config.write_reports = true,
+                "--notify-sessiond" => config.notify_sessiond = true,
                 "--help" | "-h" => {
                     println!(
-                        "usage: watchdog [--launch-state PATH] [--profile-id ID] [--inspect-all] [--write-reports]"
+                        "usage: watchdog [--launch-state PATH] [--profile-id ID] [--inspect-all] [--write-reports] [--notify-sessiond]"
                     );
                     std::process::exit(0);
                 }
@@ -246,6 +255,44 @@ fn print_report(report: &SessionWatchdogReport) {
             component.action.as_str(),
             component.reason
         );
+    }
+}
+
+fn notify_sessiond(report: &SessionWatchdogReport) -> Result<IpcEnvelope> {
+    let mut stream = connect_service_socket(ServiceRole::Sessiond)?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Watchdog,
+        ServiceRole::Sessiond,
+        MessageKind::SessionCommand(SessionCommand::ApplyWatchdogReport { report: report.clone() }),
+    );
+
+    send_json_line(&mut stream, &request)?;
+
+    let mut reader = BufReader::new(stream);
+    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    Ok(response)
+}
+
+fn print_sessiond_response(response: &IpcEnvelope) {
+    match &response.kind {
+        MessageKind::SessionCommand(SessionCommand::ProfileTransition { transition }) => {
+            println!(
+                "watchdog sessiond_response from={} to={} reason={} triggers={}",
+                transition.source_profile_id,
+                transition.target_profile_id,
+                transition.reason,
+                transition.trigger_component_ids.join(",")
+            );
+        }
+        MessageKind::SessionCommand(SessionCommand::ProfileUnchanged { profile_id, reason }) => {
+            println!(
+                "watchdog sessiond_response profile={} unchanged_reason={}",
+                profile_id, reason
+            );
+        }
+        other => {
+            println!("watchdog sessiond_response unexpected={other:?}");
+        }
     }
 }
 

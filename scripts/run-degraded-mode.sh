@@ -7,6 +7,7 @@ cd "$repo_root"
 runtime_dir="${WAYBROKER_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/waybroker}"
 crashy_launch_state="$runtime_dir/launch-state-demo-x11-crashy.json"
 degraded_launch_state="$runtime_dir/launch-state-demo-x11-degraded.json"
+sessiond_pid=""
 
 cleanup_state() {
   local launch_state="$1"
@@ -19,6 +20,11 @@ cleanup_state() {
 }
 
 cleanup() {
+  if [[ -n "$sessiond_pid" ]] && kill -0 "$sessiond_pid" 2>/dev/null; then
+    kill "$sessiond_pid" 2>/dev/null || true
+    wait "$sessiond_pid" 2>/dev/null || true
+  fi
+
   cleanup_state "$crashy_launch_state"
   cleanup_state "$degraded_launch_state"
 }
@@ -36,12 +42,16 @@ echo "==> cargo run -p sessiond -- --launch-active --spawn-components --supervis
 cargo run -p sessiond -- --launch-active --spawn-components --supervise-seconds 4 --restart-limit 2
 
 echo
-echo "==> cargo run -p watchdog -- --profile-id demo-x11-crashy --write-reports"
-cargo run -p watchdog -- --profile-id demo-x11-crashy --write-reports
+echo "==> cargo run -p sessiond -- --serve-ipc --once"
+cargo run -p sessiond -- --serve-ipc --once &
+sessiond_pid=$!
+sleep 1
 
 echo
-echo "==> cargo run -p sessiond -- --apply-watchdog-active"
-cargo run -p sessiond -- --apply-watchdog-active
+echo "==> cargo run -p watchdog -- --profile-id demo-x11-crashy --write-reports --notify-sessiond"
+cargo run -p watchdog -- --profile-id demo-x11-crashy --write-reports --notify-sessiond
+wait "$sessiond_pid"
+sessiond_pid=""
 
 echo
 echo "==> cargo run -p sessiond -- --launch-active --spawn-components"

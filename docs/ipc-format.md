@@ -69,6 +69,8 @@
   - suspend request
   - resume hint
   - degraded mode hint
+  - watchdog report apply
+  - profile transition / unchanged response
 - `WatchdogCommand`
   - restart
   - escalate
@@ -102,4 +104,4 @@
 
 初期の message type は [lib.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/lib.rs) と [ipc.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/ipc.rs) に置きます。
 
-初期の transport helper は [transport.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/transport.rs) に置き、`displayd` と `waylandd` の間で 1 行 1 message の Unix socket 通信を行います。
+初期の transport helper は [transport.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/transport.rs) に置き、`displayd <-> waylandd` と `watchdog <-> sessiond` の間で 1 行 1 message の Unix socket 通信を行います。

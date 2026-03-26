@@ -131,6 +131,19 @@
 - `scripts/run-degraded-mode.sh`
   - crash-loop 検知から degraded profile 切替まで確認する導線
 
+### 11. watchdog -> sessiond IPC
+
+- `SessionCommand`
+  - `ApplyWatchdogReport`
+  - `ProfileTransition`
+  - `ProfileUnchanged`
+- `sessiond`
+  - `--serve-ipc [--once]` で Unix socket server として待受
+- `watchdog`
+  - `--notify-sessiond` で report を IPC 送信し、切替結果を応答として受ける
+- `scripts/run-degraded-mode.sh`
+  - file 経由ではなく `watchdog -> sessiond` IPC で degraded fallback を自動適用する
+
 ## 現在のコード上の要点
 
 ### 共有型

@@ -165,4 +165,38 @@ mod tests {
         assert!(json.contains("\"kind\":\"display-event\""));
         assert!(json.contains("\"op\":\"output-inventory\""));
     }
+
+    #[test]
+    fn roundtrips_session_watchdog_report_command() {
+        let envelope = IpcEnvelope::new(
+            ServiceRole::Watchdog,
+            ServiceRole::Sessiond,
+            MessageKind::SessionCommand(super::SessionCommand::ApplyWatchdogReport {
+                report: super::SessionWatchdogReport {
+                    profile_id: "demo-x11-crashy".into(),
+                    display_name: "Crashy Demo".into(),
+                    protocol: super::DesktopProtocol::LayerX11,
+                    healthy_components: 1,
+                    unhealthy_components: 1,
+                    inactive_components: 0,
+                    components: vec![super::SessionWatchdogComponentReport {
+                        id: "crashy-wm".into(),
+                        role: super::DesktopComponentRole::WindowManager,
+                        critical: true,
+                        status: super::DesktopHealthStatus::Unhealthy,
+                        pid: None,
+                        crash_loop_count: 3,
+                        action: super::DesktopRecoveryAction::DegradedProfile,
+                        reason: "component spawn failed or supervisor gave up".into(),
+                    }],
+                },
+            }),
+        );
+
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let decoded: IpcEnvelope = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded, envelope);
+        assert!(json.contains("\"op\":\"apply-watchdog-report\""));
+    }
 }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::ServiceRole;
+use crate::{ServiceRole, SessionProfileTransition, SessionWatchdogReport};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IpcEnvelope {
@@ -58,6 +58,9 @@ pub enum SessionCommand {
     SuspendRequested,
     ResumeHint { stage: ResumeStage, output: Option<OutputMode> },
     DegradedMode { reason: String },
+    ApplyWatchdogReport { report: SessionWatchdogReport },
+    ProfileTransition { transition: SessionProfileTransition },
+    ProfileUnchanged { profile_id: String, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
