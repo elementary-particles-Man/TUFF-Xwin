@@ -351,10 +351,7 @@ fn run_resume_demo(_config: &Config) -> Result<()> {
             }),
         }),
     )?;
-    println!(
-        "sessiond resume_sequence=compd_outputs_recovered response={:?}",
-        response.kind
-    );
+    println!("sessiond resume_sequence=compd_outputs_recovered response={:?}", response.kind);
 
     // 4. sessiond -> lockd (AuthPrompt)
     let response = send_ipc_and_wait(
@@ -516,10 +513,7 @@ fn launch_state_for_profile(
     build_launch_state(profile, config)
 }
 
-fn build_launch_state(
-    profile: &DesktopProfile,
-    config: &Config,
-) -> Result<SessionLaunchState> {
+fn build_launch_state(profile: &DesktopProfile, config: &Config) -> Result<SessionLaunchState> {
     let mut components = Vec::with_capacity(profile.session_components.len());
 
     for component in &profile.session_components {
@@ -538,10 +532,7 @@ fn build_launch_state(
     })
 }
 
-fn supervise_launch_state(
-    profile: &DesktopProfile,
-    config: &Config,
-) -> Result<SessionLaunchState> {
+fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<SessionLaunchState> {
     let mut components = Vec::with_capacity(profile.session_components.len());
 
     for component in &profile.session_components {
@@ -612,7 +603,10 @@ fn resolve_component_state(
     Ok(state)
 }
 
-fn base_component_state(component: &DesktopComponent, config: &Config) -> SessionLaunchComponentState {
+fn base_component_state(
+    component: &DesktopComponent,
+    config: &Config,
+) -> SessionLaunchComponentState {
     let resolved_command =
         resolve_command_path(component, config).map(|path| path.display().to_string());
     let state = if resolved_command.is_some() {
@@ -636,7 +630,7 @@ fn base_component_state(component: &DesktopComponent, config: &Config) -> Sessio
 
 fn resolve_command_path(component: &DesktopComponent, config: &Config) -> Option<PathBuf> {
     let executable = component.command.first()?;
-    
+
     match component.launcher {
         waybroker_common::DesktopLauncher::System => {
             let candidate = PathBuf::from(executable);
@@ -676,14 +670,14 @@ fn resolve_command_path(component: &DesktopComponent, config: &Config) -> Option
                     return Some(candidate);
                 }
             }
-            
+
             // 3. Fallback to project root target/debug
             let repo_root = config.repo_root();
             let candidate = repo_root.join("target").join("debug").join(executable);
             if is_executable(&candidate) {
                 return Some(candidate);
             }
-            
+
             None
         }
     }
@@ -835,8 +829,14 @@ fn persist_watchdog_apply_outcome(
             let transition_path = write_profile_transition(transition)?;
 
             print_profile_transition(transition);
-            println!("service=sessiond op=persist_outcome event=write_active_profile path={}", active_path.display());
-            println!("service=sessiond op=persist_outcome event=write_profile_transition path={}", transition_path.display());
+            println!(
+                "service=sessiond op=persist_outcome event=write_active_profile path={}",
+                active_path.display()
+            );
+            println!(
+                "service=sessiond op=persist_outcome event=write_profile_transition path={}",
+                transition_path.display()
+            );
 
             if let Some(supervisor) = supervisor {
                 supervisor.switch_to(target_profile.clone(), config)?;
@@ -844,8 +844,14 @@ fn persist_watchdog_apply_outcome(
                 let launch_state = launch_state_for_profile(target_profile, config)?;
                 let state_path = write_launch_state(&launch_state)?;
                 print_launch_state(&launch_state);
-                println!("service=sessiond op=persist_outcome event=auto_launch_profile id={}", target_profile.id);
-                println!("service=sessiond op=persist_outcome event=write_launch_state path={}", state_path.display());
+                println!(
+                    "service=sessiond op=persist_outcome event=auto_launch_profile id={}",
+                    target_profile.id
+                );
+                println!(
+                    "service=sessiond op=persist_outcome event=write_launch_state path={}",
+                    state_path.display()
+                );
             }
 
             Ok(SessionCommand::ProfileTransition { transition: transition.clone() })
@@ -1064,7 +1070,10 @@ impl SessionSupervisor {
         let next_generation = self.stream_generation.saturating_add(1);
         *self = Self::new(profile, profiles, next_generation, config)?;
         self.activate(config)?;
-        println!("service=sessiond op=profile_transition event=transition_complete profile={} generation={}", self.profile.id, self.stream_generation);
+        println!(
+            "service=sessiond op=profile_transition event=transition_complete profile={} generation={}",
+            self.profile.id, self.stream_generation
+        );
         Ok(())
     }
 
@@ -1111,7 +1120,10 @@ impl SessionSupervisor {
         let launch_state = self.snapshot();
         let state_path = write_launch_state(&launch_state)?;
         print_launch_state(&launch_state);
-        println!("service=sessiond op=snapshot event={} profile={} timestamp={}", label, self.profile.id, launch_state.unix_timestamp);
+        println!(
+            "service=sessiond op=snapshot event={} profile={} timestamp={}",
+            label, self.profile.id, launch_state.unix_timestamp
+        );
         println!("service=sessiond op=snapshot path={}", state_path.display());
 
         if should_notify_watchdog(config) {
@@ -1270,7 +1282,7 @@ mod tests {
         fs::set_permissions(&executable, permissions).expect("chmod");
 
         assert!(is_executable(&executable));
-        
+
         let component = DesktopComponent {
             id: "test".into(),
             role: DesktopComponentRole::WindowManager,
@@ -1279,7 +1291,7 @@ mod tests {
             launcher: waybroker_common::DesktopLauncher::System,
         };
         let config = super::Config::default();
-        
+
         assert_eq!(
             resolve_command_path(&component, &config).as_deref(),
             Some(executable.as_path())
@@ -1340,11 +1352,8 @@ mod tests {
         };
         let mut config = super::Config::default();
         config.repo_root = Some(temp_dir.clone());
-        
-        assert_eq!(
-            resolve_command_path(&component, &config).as_deref(),
-            Some(script.as_path())
-        );
+
+        assert_eq!(resolve_command_path(&component, &config).as_deref(), Some(script.as_path()));
 
         let _ = fs::remove_file(&script);
         let _ = fs::remove_dir_all(&temp_dir);
@@ -1387,6 +1396,7 @@ mod tests {
                 action: DesktopRecoveryAction::DegradedProfile,
                 reason: "component spawn failed or supervisor gave up".into(),
             }],
+            unix_timestamp: 0,
         };
 
         let outcome = apply_watchdog_report(
@@ -1437,6 +1447,7 @@ mod tests {
                 action: DesktopRecoveryAction::None,
                 reason: "component process is alive".into(),
             }],
+            unix_timestamp: 0,
         };
 
         let outcome = apply_watchdog_report(&active_profile, &[active_profile.clone()], &report)

@@ -96,10 +96,7 @@ fn build_response(request: IpcEnvelope, current_state: &mut LockState) -> IpcEnv
             MessageKind::LockCommand(LockCommand::AuthPrompt { reason })
         }
         MessageKind::LockCommand(_) => MessageKind::LockCommand(LockCommand::AuthPrompt {
-            reason: format!(
-                "lockd received message addressed to {}",
-                request.destination.as_str()
-            ),
+            reason: format!("lockd received message addressed to {}", request.destination.as_str()),
         }),
         other => MessageKind::LockCommand(LockCommand::AuthPrompt {
             reason: format!("lockd does not handle {other:?}"),

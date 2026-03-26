@@ -2,6 +2,16 @@
 
 `TUFF-Xwin` はリポジトリ名であり、表示系アーキテクチャの正式名は `Waybroker` です。狙いは `Debian Linux kernel` を置き換えることではなく、`KDE Plasma` や `GNOME` の display stack を `displayd / waylandd / compd / lockd / sessiond` に分割し、単一障害点を細くすることです。
 
+## Current Component Status
+
+- **compd**: (P1 - Minimal runtime) Composition service. Manages scene graph, focus, and policies. Can commit mock scenes to `displayd`.
+- **displayd**: (P0 - Baseline) Hardware broker for DRM/KMS and libinput. Stub but functional IPC.
+- **waylandd**: (P0 - Baseline) Wayland protocol endpoint and surface broker.
+- **sessiond**: (P0 - Baseline) Session and desktop profile policy manager.
+- **watchdog**: (P0 - Baseline) Recovery orchestrator and crash-loop supervisor.
+- **lockd**: (Stub) Lockscreen and authentication UI service.
+- **x11bridge**: (Demo) Rootless X11 compatibility island (LeyerX11).
+
 ## Repository Layout
 
 ```text

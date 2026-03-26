@@ -603,8 +603,7 @@ fn print_sessiond_response(response: &IpcEnvelope) {
         MessageKind::SessionCommand(SessionCommand::ProfileUnchanged { profile_id, reason }) => {
             println!(
                 "service=watchdog op=sessiond_response event=profile_unchanged profile={} reason=\"{}\"",
-                profile_id,
-                reason
+                profile_id, reason
             );
         }
         other => println!("service=watchdog op=sessiond_response event=unknown kind={:?}", other),

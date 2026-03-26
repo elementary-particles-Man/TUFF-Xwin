@@ -19,10 +19,7 @@ pub use transport::{
 };
 
 pub fn now_unix_timestamp() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("time")
-        .as_secs()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("time").as_secs()
 }
 
 use serde::{Deserialize, Serialize};
@@ -196,6 +193,7 @@ mod tests {
                         action: super::DesktopRecoveryAction::DegradedProfile,
                         reason: "component spawn failed or supervisor gave up".into(),
                     }],
+                    unix_timestamp: 0,
                 },
             }),
         );
