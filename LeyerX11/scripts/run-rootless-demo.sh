@@ -1,21 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
 runtime_dir="${WAYBROKER_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/waybroker}"
 displayd_socket="$runtime_dir/displayd.sock"
-
-packages=(
-  compd
-  lockd
-  sessiond
-  watchdog
-)
-
-echo "Running Waybroker stack stubs from $repo_root"
-echo "Using runtime dir: $runtime_dir"
+scene_path="$repo_root/LeyerX11/examples/minimal-rootless-scene.json"
 
 cleanup() {
   if [[ -n "${displayd_pid:-}" ]]; then
@@ -27,6 +18,9 @@ cleanup() {
 trap cleanup EXIT
 
 rm -f "$displayd_socket"
+
+echo "Running LeyerX11 rootless demo from $repo_root"
+echo "Using runtime dir: $runtime_dir"
 
 echo
 echo "==> cargo run -p displayd -- --once"
@@ -46,14 +40,8 @@ if [[ ! -S "$displayd_socket" ]]; then
 fi
 
 echo
-echo "==> cargo run -p waylandd -- --require-displayd"
-cargo run -p waylandd -- --require-displayd
+echo "==> cargo run -p x11bridge -- --scene $scene_path --commit-demo"
+cargo run -p x11bridge -- --scene "$scene_path" --commit-demo
 
 wait "$displayd_pid"
 unset displayd_pid
-
-for pkg in "${packages[@]}"; do
-  echo
-  echo "==> cargo run -p $pkg"
-  cargo run -p "$pkg"
-done

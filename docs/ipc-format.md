@@ -56,6 +56,12 @@
   - mode set
   - scene commit
   - secure blank
+- `DisplayEvent`
+  - output inventory
+  - mode applied
+  - scene committed
+  - secure blank applied
+  - rejected
 - `LockCommand`
   - lock state transition
   - auth prompt
@@ -95,3 +101,5 @@
 ## Rust Mapping
 
 初期の message type は [lib.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/lib.rs) と [ipc.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/ipc.rs) に置きます。
+
+初期の transport helper は [transport.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/transport.rs) に置き、`displayd` と `waylandd` の間で 1 行 1 message の Unix socket 通信を行います。

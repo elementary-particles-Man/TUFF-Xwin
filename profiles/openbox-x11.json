@@ -1,0 +1,38 @@
+{
+  "id": "openbox-x11",
+  "display_name": "Openbox Minimal on LeyerX11",
+  "protocol": "layer-x11",
+  "summary": "最小構成の X11 desktop profile。rootless X11 と軽量 WM を組み合わせる。",
+  "broker_services": [
+    "displayd",
+    "sessiond",
+    "watchdog",
+    "x11bridge"
+  ],
+  "session_components": [
+    {
+      "id": "x11bridge",
+      "role": "compat-layer",
+      "command": ["x11bridge", "--commit-demo"],
+      "critical": true
+    },
+    {
+      "id": "openbox",
+      "role": "window-manager",
+      "command": ["openbox", "--replace"],
+      "critical": true
+    },
+    {
+      "id": "tint2",
+      "role": "panel",
+      "command": ["tint2"],
+      "critical": false
+    },
+    {
+      "id": "pcmanfm-desktop",
+      "role": "shell",
+      "command": ["pcmanfm", "--desktop"],
+      "critical": false
+    }
+  ]
+}

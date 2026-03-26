@@ -9,6 +9,7 @@
 ## Top-Level Directories
 
 - `docs/`: 設計文書、障害モデル、統合メモ
+- `profiles/`: ユーザーが選択する GUI profile manifest
 - `crates/`: Rust workspace members
 - `examples/`: 将来の動作検証や playground
 - `scripts/`: 開発補助スクリプト

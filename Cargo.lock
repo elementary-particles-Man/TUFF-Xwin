@@ -31,6 +31,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
+name = "layerx11-common"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "waybroker-common",
+]
+
+[[package]]
 name = "lockd"
 version = "0.1.0"
 dependencies = [
@@ -110,6 +118,7 @@ name = "sessiond"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde_json",
  "waybroker-common",
 ]
 
@@ -142,6 +151,7 @@ dependencies = [
 name = "waybroker-common"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "serde",
  "serde_json",
 ]
@@ -151,6 +161,16 @@ name = "waylandd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "waybroker-common",
+]
+
+[[package]]
+name = "x11bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "layerx11-common",
+ "serde_json",
  "waybroker-common",
 ]
 

@@ -1,5 +1,5 @@
 [package]
-name = "waybroker-common"
+name = "x11bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,5 +7,6 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-serde.workspace = true
+layerx11-common = { path = "../layerx11-common" }
 serde_json.workspace = true
+waybroker-common.workspace = true

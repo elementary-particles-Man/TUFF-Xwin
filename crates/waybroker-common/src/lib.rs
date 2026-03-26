@@ -1,9 +1,18 @@
 mod ipc;
+mod profile;
+mod transport;
 
 pub use ipc::{
-    CommitTarget, DisplayCommand, FocusTarget, HealthState, IpcEnvelope, LockCommand, LockState,
-    MessageKind, OutputMode, ResumeStage, SessionCommand, SurfacePlacement, SurfaceSnapshot,
-    WatchdogCommand,
+    CommitTarget, DisplayCommand, DisplayEvent, FocusTarget, HealthState, IpcEnvelope, LockCommand,
+    LockState, MessageKind, OutputMode, ResumeStage, SessionCommand, SurfacePlacement,
+    SurfaceSnapshot, WatchdogCommand,
+};
+pub use profile::{
+    DesktopComponent, DesktopComponentRole, DesktopProfile, DesktopProtocol, SessionLaunchPlan,
+};
+pub use transport::{
+    bind_service_socket, connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir,
+    send_json_line, service_socket_path,
 };
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +26,8 @@ pub enum ServiceRole {
     Lockd,
     Sessiond,
     Watchdog,
+    #[serde(rename = "x11bridge")]
+    X11Bridge,
 }
 
 impl ServiceRole {
@@ -28,6 +39,7 @@ impl ServiceRole {
             Self::Lockd => "lockd",
             Self::Sessiond => "sessiond",
             Self::Watchdog => "watchdog",
+            Self::X11Bridge => "x11bridge",
         }
     }
 }
@@ -51,8 +63,8 @@ impl ServiceBanner {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitTarget, DisplayCommand, FocusTarget, IpcEnvelope, MessageKind, OutputMode,
-        ServiceBanner, ServiceRole, SurfacePlacement, SurfaceSnapshot,
+        CommitTarget, DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope, MessageKind,
+        OutputMode, ServiceBanner, ServiceRole, SurfacePlacement, SurfaceSnapshot,
     };
 
     #[test]
@@ -128,5 +140,26 @@ mod tests {
         let decoded: IpcEnvelope = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn serializes_display_output_inventory() {
+        let envelope = IpcEnvelope::new(
+            ServiceRole::Displayd,
+            ServiceRole::Waylandd,
+            MessageKind::DisplayEvent(DisplayEvent::OutputInventory {
+                outputs: vec![OutputMode {
+                    name: "eDP-1".into(),
+                    width: 1920,
+                    height: 1080,
+                    refresh_hz: 60,
+                }],
+            }),
+        );
+
+        let json = serde_json::to_string(&envelope).expect("serialize");
+
+        assert!(json.contains("\"kind\":\"display-event\""));
+        assert!(json.contains("\"op\":\"output-inventory\""));
     }
 }

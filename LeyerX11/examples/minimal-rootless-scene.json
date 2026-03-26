@@ -1,0 +1,49 @@
+{
+  "output": {
+    "name": "eDP-1",
+    "width": 1920,
+    "height": 1080
+  },
+  "focus_window": "xterm-1",
+  "windows": [
+    {
+      "id": "xterm-1",
+      "app_id": "org.x.term",
+      "title": "xterm",
+      "kind": "normal",
+      "x": 96,
+      "y": 72,
+      "width": 1120,
+      "height": 720,
+      "z": 10,
+      "mapped": true,
+      "override_redirect": false
+    },
+    {
+      "id": "xclock-1",
+      "app_id": "org.x.clock",
+      "title": "xclock",
+      "kind": "utility",
+      "x": 1320,
+      "y": 88,
+      "width": 240,
+      "height": 240,
+      "z": 20,
+      "mapped": true,
+      "override_redirect": false
+    },
+    {
+      "id": "dock-1",
+      "app_id": "org.x.panel",
+      "title": "legacy dock",
+      "kind": "dock",
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 32,
+      "z": 100,
+      "mapped": true,
+      "override_redirect": true
+    }
+  ]
+}

@@ -58,6 +58,7 @@ Apps / Plasma / Xwayland
 - [sequence-resume.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/sequence-resume.md): suspend/resume 復帰時の基準シーケンス
 - [ipc-format.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/ipc-format.md): 初期 IPC envelope と JSON message 形状
 - [crash-loop-policy.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/crash-loop-policy.md): watchdog の再起動と degraded mode の基準
+- [desktop-profiles.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/desktop-profiles.md): GUI を broker 本体から分離し、profile として選択する方針
 
 ## ひとことで言うと
 

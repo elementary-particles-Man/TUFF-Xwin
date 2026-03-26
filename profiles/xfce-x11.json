@@ -1,0 +1,44 @@
+{
+  "id": "xfce-x11",
+  "display_name": "XFCE Classic on LeyerX11",
+  "protocol": "layer-x11",
+  "summary": "軽量な X11 desktop profile。x11bridge の上に xfwm4 と panel 群を載せる。",
+  "broker_services": [
+    "displayd",
+    "sessiond",
+    "watchdog",
+    "x11bridge"
+  ],
+  "session_components": [
+    {
+      "id": "x11bridge",
+      "role": "compat-layer",
+      "command": ["x11bridge", "--commit-demo"],
+      "critical": true
+    },
+    {
+      "id": "xfwm4",
+      "role": "window-manager",
+      "command": ["xfwm4", "--replace"],
+      "critical": true
+    },
+    {
+      "id": "xfce4-panel",
+      "role": "panel",
+      "command": ["xfce4-panel"],
+      "critical": false
+    },
+    {
+      "id": "xfsettingsd",
+      "role": "settings-daemon",
+      "command": ["xfsettingsd", "--daemon"],
+      "critical": false
+    },
+    {
+      "id": "xfdesktop",
+      "role": "shell",
+      "command": ["xfdesktop"],
+      "critical": false
+    }
+  ]
+}

@@ -19,6 +19,7 @@ impl IpcEnvelope {
 #[serde(tag = "kind", content = "payload", rename_all = "kebab-case")]
 pub enum MessageKind {
     DisplayCommand(DisplayCommand),
+    DisplayEvent(DisplayEvent),
     LockCommand(LockCommand),
     SessionCommand(SessionCommand),
     WatchdogCommand(WatchdogCommand),
@@ -32,6 +33,16 @@ pub enum DisplayCommand {
     SetMode { output: String, mode: OutputMode },
     CommitScene { target: CommitTarget, focus: FocusTarget, surfaces: Vec<SurfaceSnapshot> },
     SecureBlank { output: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "kebab-case")]
+pub enum DisplayEvent {
+    OutputInventory { outputs: Vec<OutputMode> },
+    ModeApplied { output: String, mode: OutputMode },
+    SceneCommitted { target: CommitTarget, focus: FocusTarget, surface_count: usize },
+    BlankApplied { output: Option<String> },
+    Rejected { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

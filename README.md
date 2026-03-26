@@ -7,6 +7,8 @@
 ```text
 TUFF-Xwin/
 ├── Cargo.toml
+├── LeyerX11/
+├── profiles/
 ├── crates/
 │   ├── waybroker-common/
 │   ├── displayd/
@@ -28,8 +30,11 @@ TUFF-Xwin/
 - `waylandd`: Wayland 接続口と object lifetime 管理
 - `compd`: scene、focus、composition policy
 - `lockd`: lockscreen と認証 UI
-- `sessiond`: lid、idle、power、polkit policy
+- `sessiond`: lid、idle、power、polkit policy、desktop profile manager
 - `watchdog`: display stack の監視と再起動制御
+- `LeyerX11/layerx11-common`: rootless `X11` scene の共通型
+- `LeyerX11/x11bridge`: optional な `X11` 互換レイヤ実験
+- `profiles/`: 選択可能な GUI profile manifest
 
 ## Documentation
 
@@ -40,6 +45,9 @@ TUFF-Xwin/
 - [docs/sequence-resume.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/sequence-resume.md)
 - [docs/ipc-format.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/ipc-format.md)
 - [docs/crash-loop-policy.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/crash-loop-policy.md)
+- [docs/desktop-profiles.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/desktop-profiles.md)
+- [LeyerX11/README.md](/media/flux/THPDOC/Develop/TUFF-Xwin/LeyerX11/README.md)
+- [profiles/README.md](/media/flux/THPDOC/Develop/TUFF-Xwin/profiles/README.md)
 - [CONTRIBUTING.md](/media/flux/THPDOC/Develop/TUFF-Xwin/CONTRIBUTING.md)
 
 ## Quick Start
@@ -48,9 +56,11 @@ TUFF-Xwin/
 cargo check
 ./scripts/dev-check.sh
 ./scripts/run-stack.sh
+./scripts/run-profile-demo.sh
+./LeyerX11/scripts/run-rootless-demo.sh
 ```
 
-現時点では設計骨格と Rust workspace の初期化までです。実装はまだ入っていません。
+現時点では `displayd` / `waylandd` の最小 IPC、ならびに `LeyerX11` の rootless `X11` commit デモまで入っています。本物の `DRM` / `Wayland` / `X11` 実装はこれからです。
 
 ## Local Build Note
 

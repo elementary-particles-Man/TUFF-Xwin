@@ -1,6 +1,6 @@
 # HANDOFF
 
-更新日: `2026-03-20`  
+更新日: `2026-03-27`  
 対象 repository: `/media/flux/THPDOC/Develop/TUFF-Xwin`
 
 ## 前提
@@ -71,7 +71,53 @@
   - `cargo check --workspace`
   - `cargo test --workspace`
 - `./scripts/run-stack.sh`
-  - 現在の stub services を順番に起動確認する
+  - `displayd` と `waylandd` の Unix socket stub 通信を含めて起動確認する
+
+### 6. 最小 IPC transport
+
+- `crates/waybroker-common/src/transport.rs`
+  - runtime dir 解決
+  - service socket path 解決
+  - Unix socket bind/connect
+  - 1 行 JSON framing helper
+
+### 7. displayd / waylandd stub 通信
+
+- `displayd`
+  - Unix socket server として待受
+  - `DisplayCommand` を受信
+  - `DisplayEvent` を返す
+- `waylandd`
+  - startup 時に `displayd` へ `EnumerateOutputs` を送る
+  - `OutputInventory` を受けて表示する
+
+### 8. LeyerX11 最小互換レイヤ
+
+- `LeyerX11/`
+  - optional な `X11` compatibility island の実験ツリー
+- `LeyerX11/crates/layerx11-common`
+  - rootless `X11` scene 型
+  - `Waybroker` surface への変換
+- `LeyerX11/crates/x11bridge`
+  - sample rootless scene を読み、`displayd` へ `CommitScene` を送る
+- `LeyerX11/scripts/run-rootless-demo.sh`
+  - `displayd` と `x11bridge` の往復確認
+
+### 9. Desktop profile manager
+
+- `profiles/`
+  - GUI profile manifest 置き場
+- `profiles/xfce-x11.json`
+  - `LeyerX11` 上の `XFCE` profile
+- `profiles/openbox-x11.json`
+  - `LeyerX11` 上の最小 `Openbox` profile
+- `crates/sessiond`
+  - profile の列挙
+  - profile 選択
+  - launch plan の表示
+  - active profile の JSON 書き出し
+- `scripts/run-profile-demo.sh`
+  - profile manager の確認導線
 
 ## 現在のコード上の要点
 
@@ -94,7 +140,7 @@
 
 ### 現在の stub binary
 
-各 binary はまだ本処理を持っておらず、service 名と責務を表示する程度です。
+各 binary はまだ本処理を持っていませんが、`displayd` と `waylandd` は最小 IPC 往復、`x11bridge` は rootless `X11` scene の commit デモまで実装済みです。
 
 - `displayd`
 - `waylandd`
@@ -102,6 +148,7 @@
 - `lockd`
 - `sessiond`
 - `watchdog`
+- `x11bridge`
 
 ## 直近のコミット
 
@@ -114,10 +161,10 @@
 
 優先順はこのあたりです。
 
-1. `examples/resume-failure/` を追加して失敗系 state も固定する
-2. `scripts/run-degraded-mode.sh` を追加して watchdog 観点の実行導線を作る
-3. `waylandd` と `displayd` の間に Unix socket の最小 stub 通信を入れる
-4. `watchdog` に health report と restart request の最小実装を生やす
+1. `sessiond` から実際に selected profile を起動する launcher stub を足す
+2. `compd` と `displayd` の scene commit stub を足して policy と hardware broker を分ける
+3. `watchdog` に health report と restart request の最小実装を生やす
+4. `LeyerX11` に clipboard / selection の最小橋渡しを足す
 
 ## 注意点
 
