@@ -65,6 +65,7 @@ TUFF-Xwin/
 ```bash
 cargo check
 ./scripts/dev-check.sh
+./scripts/run-integration-smoke.sh
 ./scripts/run-stack.sh
 ./scripts/run-profile-demo.sh
 ./LeyerX11/scripts/run-rootless-demo.sh
