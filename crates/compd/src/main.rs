@@ -1,9 +1,4 @@
-use std::{
-    env, fs,
-    io::BufReader,
-    os::unix::net::UnixStream,
-    path::PathBuf,
-};
+use std::{env, fs, io::BufReader, os::unix::net::UnixStream, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use waybroker_common::{
