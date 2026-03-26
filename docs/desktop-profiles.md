@@ -54,6 +54,8 @@ launch state は次の用途に使います。
 
 `watchdog` は `launch-state-<profile>.json` を読み、各 component を `healthy / unhealthy / inactive` で分類します。これにより、`xfwm4` が落ちたのか、単に未導入なのか、まだ起動していないだけなのかを分けられます。
 
+`sessiond` の supervisor stub は critical component に restart counter を持ちます。`watchdog` はその値を見て、`restart-component` で済む段階か、`degraded-profile` へ落とす段階かを判断します。
+
 ## Failure Boundary
 
 - `xfce4-panel` が死んでも kernel は死なない

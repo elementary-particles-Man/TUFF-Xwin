@@ -12,10 +12,13 @@
 ## 現在の profile
 
 - `demo-x11.json`
+- `demo-x11-crashy.json`
 - `xfce-x11.json`
 - `openbox-x11.json`
 
 - `demo-x11`
   - repo 内の mock component を使う launch / watchdog 検証用 profile
+- `demo-x11-crashy`
+  - critical component の再起動と crash-loop 判定を確認する profile
 - `xfce-x11`, `openbox-x11`
   - 実際の package 導入を前提にする rootless `X11` profile

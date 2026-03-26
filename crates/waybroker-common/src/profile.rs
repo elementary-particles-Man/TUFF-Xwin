@@ -112,6 +112,8 @@ pub struct SessionLaunchComponentState {
     pub resolved_command: Option<String>,
     pub state: DesktopComponentState,
     pub pid: Option<u32>,
+    pub restart_count: u32,
+    pub last_exit_status: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +143,24 @@ impl DesktopHealthStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DesktopRecoveryAction {
+    None,
+    RestartComponent,
+    DegradedProfile,
+}
+
+impl DesktopRecoveryAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::RestartComponent => "restart-component",
+            Self::DegradedProfile => "degraded-profile",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionWatchdogComponentReport {
     pub id: String,
@@ -148,6 +168,8 @@ pub struct SessionWatchdogComponentReport {
     pub critical: bool,
     pub status: DesktopHealthStatus,
     pub pid: Option<u32>,
+    pub crash_loop_count: u32,
+    pub action: DesktopRecoveryAction,
     pub reason: String,
 }
 

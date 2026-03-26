@@ -1,0 +1,26 @@
+{
+  "id": "demo-x11-crashy",
+  "display_name": "Crashy Demo Desktop on LeyerX11",
+  "protocol": "layer-x11",
+  "summary": "critical component の再起動と crash-loop 判定を確認する demo profile。",
+  "broker_services": [
+    "displayd",
+    "sessiond",
+    "watchdog",
+    "x11bridge"
+  ],
+  "session_components": [
+    {
+      "id": "crashy-wm",
+      "role": "window-manager",
+      "command": ["./scripts/mock-desktop-component.sh", "--component", "crashy-wm", "--hold-seconds", "1", "--exit-code", "1"],
+      "critical": true
+    },
+    {
+      "id": "steady-panel",
+      "role": "panel",
+      "command": ["./scripts/mock-desktop-component.sh", "--component", "steady-panel", "--hold-seconds", "8", "--exit-code", "0"],
+      "critical": false
+    }
+  ]
+}

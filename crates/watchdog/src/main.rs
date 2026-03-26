@@ -5,8 +5,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use waybroker_common::{
-    DesktopComponentState, DesktopHealthStatus, ServiceBanner, ServiceRole, SessionLaunchState,
-    SessionWatchdogComponentReport, SessionWatchdogReport, ensure_runtime_dir, runtime_dir,
+    DesktopComponentState, DesktopHealthStatus, DesktopRecoveryAction, ServiceBanner, ServiceRole,
+    SessionLaunchComponentState, SessionLaunchState, SessionWatchdogComponentReport,
+    SessionWatchdogReport, ensure_runtime_dir, runtime_dir,
 };
 
 fn main() -> Result<()> {
@@ -147,26 +148,41 @@ fn inspect_launch_state(state: &SessionLaunchState) -> SessionWatchdogReport {
     }
 }
 
-fn inspect_component(
-    component: &waybroker_common::SessionLaunchComponentState,
-) -> SessionWatchdogComponentReport {
-    let (status, reason) = match component.state {
-        DesktopComponentState::Missing => {
-            (DesktopHealthStatus::Unhealthy, "component command is not installed".to_string())
-        }
-        DesktopComponentState::Failed => {
-            (DesktopHealthStatus::Unhealthy, "component spawn failed".to_string())
-        }
-        DesktopComponentState::Ready => {
-            (DesktopHealthStatus::Inactive, "component is installed but not launched".to_string())
-        }
+fn inspect_component(component: &SessionLaunchComponentState) -> SessionWatchdogComponentReport {
+    let (status, action, reason) = match component.state {
+        DesktopComponentState::Missing => (
+            DesktopHealthStatus::Unhealthy,
+            if component.critical {
+                DesktopRecoveryAction::DegradedProfile
+            } else {
+                DesktopRecoveryAction::None
+            },
+            "component command is not installed".to_string(),
+        ),
+        DesktopComponentState::Failed => (
+            DesktopHealthStatus::Unhealthy,
+            component_action(component),
+            "component spawn failed or supervisor gave up".to_string(),
+        ),
+        DesktopComponentState::Ready => (
+            DesktopHealthStatus::Inactive,
+            DesktopRecoveryAction::None,
+            "component is installed but not launched".to_string(),
+        ),
         DesktopComponentState::Spawned => match component.pid {
-            Some(pid) if process_exists(pid) => {
-                (DesktopHealthStatus::Healthy, "component process is alive".to_string())
-            }
-            Some(_) => (DesktopHealthStatus::Unhealthy, "component process is missing".to_string()),
+            Some(pid) if process_exists(pid) => (
+                DesktopHealthStatus::Healthy,
+                DesktopRecoveryAction::None,
+                "component process is alive".to_string(),
+            ),
+            Some(_) => (
+                DesktopHealthStatus::Unhealthy,
+                component_action(component),
+                "component process is missing".to_string(),
+            ),
             None => (
                 DesktopHealthStatus::Unhealthy,
+                component_action(component),
                 "component was marked spawned without pid".to_string(),
             ),
         },
@@ -178,7 +194,21 @@ fn inspect_component(
         critical: component.critical,
         status,
         pid: component.pid,
+        crash_loop_count: component.restart_count,
+        action,
         reason,
+    }
+}
+
+fn component_action(component: &SessionLaunchComponentState) -> DesktopRecoveryAction {
+    if !component.critical {
+        return DesktopRecoveryAction::None;
+    }
+
+    if component.restart_count >= 3 {
+        DesktopRecoveryAction::DegradedProfile
+    } else {
+        DesktopRecoveryAction::RestartComponent
     }
 }
 
@@ -206,12 +236,14 @@ fn print_report(report: &SessionWatchdogReport) {
 
     for component in &report.components {
         println!(
-            "watchdog component id={} role={} critical={} status={} pid={} reason={}",
+            "watchdog component id={} role={} critical={} status={} pid={} crashes={} action={} reason={}",
             component.id,
             component.role.as_str(),
             component.critical,
             component.status.as_str(),
             component.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("none"),
+            component.crash_loop_count,
+            component.action.as_str(),
             component.reason
         );
     }
@@ -226,7 +258,7 @@ mod tests {
     use super::inspect_launch_state;
     use waybroker_common::{
         DesktopComponentRole, DesktopComponentState, DesktopHealthStatus, DesktopProtocol,
-        ServiceRole, SessionLaunchComponentState, SessionLaunchState,
+        DesktopRecoveryAction, ServiceRole, SessionLaunchComponentState, SessionLaunchState,
     };
 
     #[test]
@@ -244,6 +276,8 @@ mod tests {
                 resolved_command: None,
                 state: DesktopComponentState::Missing,
                 pid: None,
+                restart_count: 0,
+                last_exit_status: None,
             }],
         };
 
@@ -251,6 +285,7 @@ mod tests {
 
         assert_eq!(report.unhealthy_components, 1);
         assert_eq!(report.components[0].status, DesktopHealthStatus::Unhealthy);
+        assert_eq!(report.components[0].action, DesktopRecoveryAction::DegradedProfile);
     }
 
     #[test]
@@ -268,6 +303,8 @@ mod tests {
                 resolved_command: Some("/usr/bin/panel".into()),
                 state: DesktopComponentState::Ready,
                 pid: None,
+                restart_count: 0,
+                last_exit_status: None,
             }],
         };
 
@@ -275,5 +312,6 @@ mod tests {
 
         assert_eq!(report.inactive_components, 1);
         assert_eq!(report.components[0].status, DesktopHealthStatus::Inactive);
+        assert_eq!(report.components[0].action, DesktopRecoveryAction::None);
     }
 }

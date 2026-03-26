@@ -2,7 +2,9 @@ use std::{
     env, fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -76,7 +78,7 @@ fn main() -> Result<()> {
             .iter()
             .find(|profile| profile.id == profile_id)
             .with_context(|| format!("unknown launch profile id: {profile_id}"))?;
-        let launch_state = build_launch_state(profile, config.spawn_components)?;
+        let launch_state = launch_state_for_profile(profile, &config)?;
         let state_path = write_launch_state(&launch_state)?;
 
         print_launch_state(&launch_state);
@@ -85,7 +87,7 @@ fn main() -> Result<()> {
 
     if config.launch_active {
         let profile = read_active_profile()?;
-        let launch_state = build_launch_state(&profile, config.spawn_components)?;
+        let launch_state = launch_state_for_profile(&profile, &config)?;
         let state_path = write_launch_state(&launch_state)?;
 
         print_launch_state(&launch_state);
@@ -95,7 +97,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Config {
     profiles_dir: Option<PathBuf>,
     list_profiles: bool,
@@ -105,6 +107,25 @@ struct Config {
     launch_profile_id: Option<String>,
     launch_active: bool,
     spawn_components: bool,
+    supervise_seconds: u64,
+    restart_limit: u32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            profiles_dir: None,
+            list_profiles: false,
+            selected_profile_id: None,
+            print_launch_plan: false,
+            write_selection: false,
+            launch_profile_id: None,
+            launch_active: false,
+            spawn_components: false,
+            supervise_seconds: 0,
+            restart_limit: 2,
+        }
+    }
 }
 
 impl Config {
@@ -130,9 +151,21 @@ impl Config {
                 }
                 "--launch-active" => config.launch_active = true,
                 "--spawn-components" => config.spawn_components = true,
+                "--supervise-seconds" => {
+                    let value = args.next().context("--supervise-seconds requires a number")?;
+                    config.supervise_seconds = value
+                        .parse()
+                        .with_context(|| format!("invalid --supervise-seconds value: {value}"))?;
+                }
+                "--restart-limit" => {
+                    let value = args.next().context("--restart-limit requires a number")?;
+                    config.restart_limit = value
+                        .parse()
+                        .with_context(|| format!("invalid --restart-limit value: {value}"))?;
+                }
                 "--help" | "-h" => {
                     println!(
-                        "usage: sessiond [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components]"
+                        "usage: sessiond [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N]"
                     );
                     std::process::exit(0);
                 }
@@ -206,6 +239,17 @@ fn read_active_profile() -> Result<DesktopProfile> {
         .with_context(|| format!("failed to decode active profile {}", path.display()))
 }
 
+fn launch_state_for_profile(
+    profile: &DesktopProfile,
+    config: &Config,
+) -> Result<SessionLaunchState> {
+    if config.supervise_seconds > 0 {
+        return supervise_launch_state(profile, config.supervise_seconds, config.restart_limit);
+    }
+
+    build_launch_state(profile, config.spawn_components)
+}
+
 fn build_launch_state(
     profile: &DesktopProfile,
     spawn_components: bool,
@@ -225,36 +269,55 @@ fn build_launch_state(
     })
 }
 
+fn supervise_launch_state(
+    profile: &DesktopProfile,
+    supervise_seconds: u64,
+    restart_limit: u32,
+) -> Result<SessionLaunchState> {
+    let mut components = Vec::with_capacity(profile.session_components.len());
+
+    for component in &profile.session_components {
+        components.push(RuntimeComponent::new(component)?);
+    }
+
+    for component in &mut components {
+        component.spawn(&profile.id)?;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(supervise_seconds);
+    while Instant::now() < deadline {
+        let mut had_event = false;
+
+        for component in &mut components {
+            if component.poll_and_restart(&profile.id, restart_limit)? {
+                had_event = true;
+            }
+        }
+
+        if !had_event {
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    Ok(SessionLaunchState {
+        profile_id: profile.id.clone(),
+        display_name: profile.display_name.clone(),
+        protocol: profile.protocol,
+        broker_services: profile.broker_services.clone(),
+        components: components.into_iter().map(|component| component.state).collect(),
+    })
+}
+
 fn resolve_component_state(
     component: &DesktopComponent,
     profile_id: &str,
     spawn_components: bool,
 ) -> Result<SessionLaunchComponentState> {
-    let resolved_command = resolve_command_path(&component.command);
-    let mut state = match resolved_command.as_ref() {
-        Some(path) => SessionLaunchComponentState {
-            id: component.id.clone(),
-            role: component.role,
-            critical: component.critical,
-            command: component.command.clone(),
-            resolved_command: Some(path.display().to_string()),
-            state: DesktopComponentState::Ready,
-            pid: None,
-        },
-        None => SessionLaunchComponentState {
-            id: component.id.clone(),
-            role: component.role,
-            critical: component.critical,
-            command: component.command.clone(),
-            resolved_command: None,
-            state: DesktopComponentState::Missing,
-            pid: None,
-        },
-    };
+    let mut state = base_component_state(component);
 
     if spawn_components {
-        if let Some(command_path) = resolved_command {
-            let child = Command::new(&command_path)
+        if let Some(command_path) = state.resolved_command.as_ref() {
+            let child = Command::new(command_path)
                 .args(component.command.iter().skip(1))
                 .env("WAYBROKER_PROFILE_ID", profile_id)
                 .env("WAYBROKER_COMPONENT_ID", &component.id)
@@ -267,12 +330,35 @@ fn resolve_component_state(
                 }
                 Err(_) => {
                     state.state = DesktopComponentState::Failed;
+                    state.last_exit_status = Some(-1);
                 }
             }
         }
     }
 
     Ok(state)
+}
+
+fn base_component_state(component: &DesktopComponent) -> SessionLaunchComponentState {
+    let resolved_command =
+        resolve_command_path(&component.command).map(|path| path.display().to_string());
+    let state = if resolved_command.is_some() {
+        DesktopComponentState::Ready
+    } else {
+        DesktopComponentState::Missing
+    };
+
+    SessionLaunchComponentState {
+        id: component.id.clone(),
+        role: component.role,
+        critical: component.critical,
+        command: component.command.clone(),
+        resolved_command,
+        state,
+        pid: None,
+        restart_count: 0,
+        last_exit_status: None,
+    }
 }
 
 fn resolve_command_path(command: &[String]) -> Option<PathBuf> {
@@ -326,14 +412,89 @@ fn print_launch_state(state: &SessionLaunchState) {
     for component in &state.components {
         let resolved = component.resolved_command.as_deref().unwrap_or("missing");
         println!(
-            "sessiond launch component id={} role={} critical={} state={} resolved={} pid={}",
+            "sessiond launch component id={} role={} critical={} state={} resolved={} pid={} restarts={} last_exit={}",
             component.id,
             component.role.as_str(),
             component.critical,
             component.state.as_str(),
             resolved,
-            component.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("none")
+            component.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("none"),
+            component.restart_count,
+            component
+                .last_exit_status
+                .map(|status| status.to_string())
+                .as_deref()
+                .unwrap_or("none")
         );
+    }
+}
+
+struct RuntimeComponent {
+    component: DesktopComponent,
+    state: SessionLaunchComponentState,
+    child: Option<Child>,
+}
+
+impl RuntimeComponent {
+    fn new(component: &DesktopComponent) -> Result<Self> {
+        Ok(Self {
+            component: component.clone(),
+            state: base_component_state(component),
+            child: None,
+        })
+    }
+
+    fn spawn(&mut self, profile_id: &str) -> Result<()> {
+        let Some(command_path) = self.state.resolved_command.as_ref() else {
+            self.state.state = DesktopComponentState::Missing;
+            self.state.pid = None;
+            return Ok(());
+        };
+
+        let child = Command::new(command_path)
+            .args(self.component.command.iter().skip(1))
+            .env("WAYBROKER_PROFILE_ID", profile_id)
+            .env("WAYBROKER_COMPONENT_ID", &self.component.id)
+            .spawn();
+
+        match child {
+            Ok(child) => {
+                self.state.state = DesktopComponentState::Spawned;
+                self.state.pid = Some(child.id());
+                self.child = Some(child);
+            }
+            Err(_) => {
+                self.state.state = DesktopComponentState::Failed;
+                self.state.pid = None;
+                self.state.last_exit_status = Some(-1);
+                self.child = None;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn poll_and_restart(&mut self, profile_id: &str, restart_limit: u32) -> Result<bool> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(false);
+        };
+
+        let Some(status) = child.try_wait()? else {
+            return Ok(false);
+        };
+
+        self.state.pid = None;
+        self.state.last_exit_status = status.code();
+        self.state.restart_count += 1;
+        self.child = None;
+
+        if self.component.critical && self.state.restart_count <= restart_limit {
+            self.spawn(profile_id)?;
+        } else {
+            self.state.state = DesktopComponentState::Failed;
+        }
+
+        Ok(true)
     }
 }
 
@@ -393,5 +554,6 @@ mod tests {
 
         assert_eq!(state.components.len(), 1);
         assert_eq!(state.components[0].state, waybroker_common::DesktopComponentState::Missing);
+        assert_eq!(state.components[0].restart_count, 0);
     }
 }
