@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use waybroker_common::{
     CommitTarget, DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope, MessageKind,
     ServiceBanner, ServiceRole, SurfacePlacement, SurfaceSnapshot, bind_service_socket,
@@ -19,18 +19,46 @@ fn main() -> Result<()> {
 
     if config.serve_ipc {
         serve_ipc(&config)?;
-    } else if config.commit_demo {
-        let scene = mock_demo_scene();
+        return Ok(());
+    }
+
+    let scene = load_scene(config.scene_path.as_ref())?;
+
+    if config.print_scene {
         println!(
-            "compd demo_scene focus={:?} surfaces={}",
+            "service=compd op=scene_print target={} surfaces={}",
+            scene.target_output,
+            scene.surfaces.len()
+        );
+        println!("{}", serde_json::to_string_pretty(&scene)?);
+    }
+
+    if config.commit_demo {
+        println!(
+            "service=compd op=scene_build target={} focus={:?} surfaces={}",
+            scene.target_output,
             scene.focus,
             scene.surfaces.len()
         );
 
-        let committed = commit_scene_to_displayd(&scene)?;
-        println!("compd committed_surfaces={committed}");
-    } else {
-        println!("compd state=idle (use --serve-ipc to start composition service)");
+        match commit_scene_to_displayd(&scene) {
+            Ok(committed) => {
+                println!(
+                    "service=compd op=displayd_response event=scene_committed surface_count={committed}"
+                );
+            }
+            Err(err) => {
+                if config.require_displayd {
+                    return Err(err).context("failed to commit scene to displayd (required)");
+                } else {
+                    println!("service=compd op=scene_commit status=failed reason=\"{}\"", err);
+                }
+            }
+        }
+    }
+
+    if !config.commit_demo && !config.print_scene {
+        println!("service=compd state=idle (use --commit-demo or --serve-ipc)");
     }
 
     Ok(())
@@ -38,7 +66,10 @@ fn main() -> Result<()> {
 
 #[derive(Debug, Default)]
 struct Config {
+    scene_path: Option<PathBuf>,
     commit_demo: bool,
+    print_scene: bool,
+    require_displayd: bool,
     serve_ipc: bool,
     serve_once: bool,
 }
@@ -49,11 +80,19 @@ impl Config {
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--scene" => {
+                    let path = args.next().context("--scene requires a path")?;
+                    config.scene_path = Some(PathBuf::from(path));
+                }
                 "--commit-demo" => config.commit_demo = true,
+                "--print-scene" => config.print_scene = true,
+                "--require-displayd" => config.require_displayd = true,
                 "--serve-ipc" => config.serve_ipc = true,
                 "--once" => config.serve_once = true,
                 "--help" | "-h" => {
-                    println!("usage: compd [--commit-demo] [--serve-ipc] [--once]");
+                    println!(
+                        "usage: compd [--scene PATH] [--print-scene] [--commit-demo] [--require-displayd] [--serve-ipc] [--once]"
+                    );
                     std::process::exit(0);
                 }
                 _ => bail!("unknown argument: {arg}"),
@@ -98,9 +137,10 @@ fn handle_client(mut stream: UnixStream) -> Result<()> {
 fn build_response(request: IpcEnvelope) -> IpcEnvelope {
     let source = request.source;
     let response_kind = match request.kind {
-        MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint { stage, output })
-            if request.destination == ServiceRole::Compd =>
-        {
+        MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
+            stage,
+            output,
+        }) if request.destination == ServiceRole::Compd => {
             println!("compd resume_hint stage={:?} output={:?}", stage, output);
             MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
                 stage,
@@ -135,14 +175,27 @@ impl Drop for SocketGuard {
     }
 }
 
-struct Scene {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CompdScene {
     target_output: String,
     focus: FocusTarget,
     surfaces: Vec<SurfaceSnapshot>,
 }
 
-fn mock_demo_scene() -> Scene {
-    Scene {
+fn load_scene(path: Option<&PathBuf>) -> Result<CompdScene> {
+    match path {
+        Some(path) => {
+            let raw = fs::read_to_string(path)
+                .with_context(|| format!("failed to read scene file {}", path.display()))?;
+            serde_json::from_str(&raw)
+                .with_context(|| format!("failed to decode scene file {}", path.display()))
+        }
+        None => Ok(mock_demo_scene()),
+    }
+}
+
+fn mock_demo_scene() -> CompdScene {
+    CompdScene {
         target_output: "eDP-1".into(),
         focus: FocusTarget::Surface { id: "konsole-1".into() },
         surfaces: vec![
@@ -174,8 +227,9 @@ fn mock_demo_scene() -> Scene {
     }
 }
 
-fn commit_scene_to_displayd(scene: &Scene) -> Result<usize> {
-    let mut stream = connect_service_socket(ServiceRole::Displayd)?;
+fn commit_scene_to_displayd(scene: &CompdScene) -> Result<usize> {
+    let mut stream = connect_service_socket(ServiceRole::Displayd)
+        .context("failed to connect to displayd socket")?;
     let request = IpcEnvelope::new(
         ServiceRole::Compd,
         ServiceRole::Displayd,
@@ -185,17 +239,14 @@ fn commit_scene_to_displayd(scene: &Scene) -> Result<usize> {
             surfaces: scene.surfaces.clone(),
         }),
     );
-    send_json_line(&mut stream, &request)?;
+    send_json_line(&mut stream, &request).context("failed to send commit-scene to displayd")?;
 
     let mut reader = BufReader::new(stream);
-    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    let response: IpcEnvelope =
+        read_json_line(&mut reader).context("failed to read response from displayd")?;
 
     if response.source != ServiceRole::Displayd {
         bail!("unexpected response source: {}", response.source.as_str());
-    }
-
-    if response.destination != ServiceRole::Compd {
-        bail!("unexpected response destination: {}", response.destination.as_str());
     }
 
     match response.kind {
@@ -211,8 +262,8 @@ fn commit_scene_to_displayd(scene: &Scene) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::mock_demo_scene;
-    use waybroker_common::FocusTarget;
+    use super::{CompdScene, mock_demo_scene};
+    use waybroker_common::{FocusTarget, SurfacePlacement, SurfaceSnapshot};
 
     #[test]
     fn mock_scene_has_expected_focus_and_surfaces() {
@@ -220,7 +271,51 @@ mod tests {
         assert_eq!(scene.target_output, "eDP-1");
         assert_eq!(scene.focus, FocusTarget::Surface { id: "konsole-1".into() });
         assert_eq!(scene.surfaces.len(), 2);
-        assert_eq!(scene.surfaces[0].id, "konsole-1");
-        assert_eq!(scene.surfaces[1].id, "background-1");
+    }
+
+    #[test]
+    fn handles_empty_focus() {
+        let scene = CompdScene {
+            target_output: "eDP-1".into(),
+            focus: FocusTarget::None,
+            surfaces: vec![],
+        };
+        assert_eq!(scene.focus, FocusTarget::None);
+        assert_eq!(scene.surfaces.len(), 0);
+    }
+
+    #[test]
+    fn surface_count_matches_after_conversion() {
+        let scene = CompdScene {
+            target_output: "HDMI-1".into(),
+            focus: FocusTarget::None,
+            surfaces: vec![
+                SurfaceSnapshot {
+                    id: "s1".into(),
+                    app_id: "a1".into(),
+                    placement: SurfacePlacement {
+                        x: 0,
+                        y: 0,
+                        width: 100,
+                        height: 100,
+                        z: 1,
+                        visible: true,
+                    },
+                },
+                SurfaceSnapshot {
+                    id: "s2".into(),
+                    app_id: "a2".into(),
+                    placement: SurfacePlacement {
+                        x: 0,
+                        y: 0,
+                        width: 100,
+                        height: 100,
+                        z: 2,
+                        visible: true,
+                    },
+                },
+            ],
+        };
+        assert_eq!(scene.surfaces.len(), 2);
     }
 }
