@@ -57,7 +57,7 @@ launch state は次の用途に使います。
 
 `sessiond` の supervisor stub は critical component に restart counter を持ちます。`watchdog` はその値を見て、`restart-component` で済む段階か、`degraded-profile` へ落とす段階かを判断します。
 
-profile manifest は `degraded_profile_id` を持てます。`watchdog` は launch state から `watchdog-report-<profile>.json` を作るだけでなく、必要なら Unix socket で `sessiond` に report を送れます。`sessiond` は active profile に対応する report を評価し、`degraded-profile` action が含まれていれば `active-profile.json` を fallback profile に差し替え、結果を `profile-transition-<from>-to-<to>.json` として記録します。
+profile manifest は `degraded_profile_id` を持てます。`watchdog` は launch state から `watchdog-report-<profile>.json` を作るだけでなく、必要なら Unix socket で `sessiond` に report を送れます。`sessiond` は active profile に対応する report を評価し、`degraded-profile` action が含まれていれば `active-profile.json` を fallback profile に差し替え、結果を `profile-transition-<from>-to-<to>.json` として記録します。`sessiond --serve-ipc --spawn-components` で動かしていれば、切替直後に fallback profile の `launch-state` を書いて component 起動まで進めます。
 
 ## Failure Boundary
 

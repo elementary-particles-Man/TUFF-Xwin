@@ -102,7 +102,7 @@ fn main() -> Result<()> {
         let active_profile = read_active_profile()?;
         let report = read_watchdog_report(&config, &active_profile)?;
         let outcome = apply_watchdog_report(&active_profile, &profiles, &report)?;
-        let _ = persist_watchdog_apply_outcome(&outcome)?;
+        let _ = persist_watchdog_apply_outcome(&outcome, &config)?;
     }
 
     if config.serve_ipc {
@@ -295,7 +295,7 @@ fn serve_ipc(config: &Config, profiles: &[DesktopProfile]) -> Result<()> {
     let mut served = 0usize;
     for stream in listener.incoming() {
         let stream = stream?;
-        handle_client(stream, profiles)?;
+        handle_client(stream, profiles, config)?;
         served += 1;
 
         if config.serve_once {
@@ -307,22 +307,30 @@ fn serve_ipc(config: &Config, profiles: &[DesktopProfile]) -> Result<()> {
     Ok(())
 }
 
-fn handle_client(mut stream: UnixStream, profiles: &[DesktopProfile]) -> Result<()> {
+fn handle_client(
+    mut stream: UnixStream,
+    profiles: &[DesktopProfile],
+    config: &Config,
+) -> Result<()> {
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
     };
 
-    let response = build_response(request, profiles);
+    let response = build_response(request, profiles, config);
     send_json_line(&mut stream, &response)?;
     Ok(())
 }
 
-fn build_response(request: IpcEnvelope, profiles: &[DesktopProfile]) -> IpcEnvelope {
+fn build_response(
+    request: IpcEnvelope,
+    profiles: &[DesktopProfile],
+    config: &Config,
+) -> IpcEnvelope {
     let source = request.source;
     let response_kind = match request.kind {
         MessageKind::SessionCommand(command) if request.destination == ServiceRole::Sessiond => {
-            match handle_session_command(command, profiles) {
+            match handle_session_command(command, profiles, config) {
                 Ok(command) => MessageKind::SessionCommand(command),
                 Err(err) => MessageKind::SessionCommand(SessionCommand::ProfileUnchanged {
                     profile_id: "unknown".into(),
@@ -351,12 +359,13 @@ fn build_response(request: IpcEnvelope, profiles: &[DesktopProfile]) -> IpcEnvel
 fn handle_session_command(
     command: SessionCommand,
     profiles: &[DesktopProfile],
+    config: &Config,
 ) -> Result<SessionCommand> {
     match command {
         SessionCommand::ApplyWatchdogReport { report } => {
             let active_profile = read_active_profile()?;
             let outcome = apply_watchdog_report(&active_profile, profiles, &report)?;
-            persist_watchdog_apply_outcome(&outcome)
+            persist_watchdog_apply_outcome(&outcome, config)
         }
         other => Ok(SessionCommand::ProfileUnchanged {
             profile_id: "unknown".into(),
@@ -637,7 +646,10 @@ fn degraded_trigger_component_ids(report: &SessionWatchdogReport) -> Vec<String>
         .collect()
 }
 
-fn persist_watchdog_apply_outcome(outcome: &WatchdogApplyOutcome) -> Result<SessionCommand> {
+fn persist_watchdog_apply_outcome(
+    outcome: &WatchdogApplyOutcome,
+    config: &Config,
+) -> Result<SessionCommand> {
     match outcome {
         WatchdogApplyOutcome::Transition { target_profile, transition } => {
             let active_path = write_active_profile(target_profile)?;
@@ -646,6 +658,14 @@ fn persist_watchdog_apply_outcome(outcome: &WatchdogApplyOutcome) -> Result<Sess
             print_profile_transition(transition);
             println!("sessiond wrote_active_profile={}", active_path.display());
             println!("sessiond wrote_profile_transition={}", transition_path.display());
+
+            if should_auto_launch_transition(config) {
+                let launch_state = launch_state_for_profile(target_profile, config)?;
+                let state_path = write_launch_state(&launch_state)?;
+                print_launch_state(&launch_state);
+                println!("sessiond auto_launched_profile={}", target_profile.id);
+                println!("sessiond wrote_launch_state={}", state_path.display());
+            }
 
             Ok(SessionCommand::ProfileTransition { transition: transition.clone() })
         }
@@ -660,6 +680,10 @@ fn persist_watchdog_apply_outcome(outcome: &WatchdogApplyOutcome) -> Result<Sess
             })
         }
     }
+}
+
+fn should_auto_launch_transition(config: &Config) -> bool {
+    config.spawn_components || config.supervise_seconds > 0
 }
 
 enum WatchdogApplyOutcome {

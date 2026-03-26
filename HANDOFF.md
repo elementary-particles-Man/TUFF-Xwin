@@ -142,7 +142,7 @@
 - `watchdog`
   - `--notify-sessiond` で report を IPC 送信し、切替結果を応答として受ける
 - `scripts/run-degraded-mode.sh`
-  - file 経由ではなく `watchdog -> sessiond` IPC で degraded fallback を自動適用する
+  - file 経由ではなく `watchdog -> sessiond` IPC で degraded fallback を自動適用し、そのまま fallback component 起動まで確認する
 
 ## 現在のコード上の要点
 

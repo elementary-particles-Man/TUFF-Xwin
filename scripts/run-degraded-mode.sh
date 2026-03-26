@@ -42,8 +42,8 @@ echo "==> cargo run -p sessiond -- --launch-active --spawn-components --supervis
 cargo run -p sessiond -- --launch-active --spawn-components --supervise-seconds 4 --restart-limit 2
 
 echo
-echo "==> cargo run -p sessiond -- --serve-ipc --once"
-cargo run -p sessiond -- --serve-ipc --once &
+echo "==> cargo run -p sessiond -- --serve-ipc --once --spawn-components"
+cargo run -p sessiond -- --serve-ipc --once --spawn-components &
 sessiond_pid=$!
 sleep 1
 
@@ -52,10 +52,6 @@ echo "==> cargo run -p watchdog -- --profile-id demo-x11-crashy --write-reports 
 cargo run -p watchdog -- --profile-id demo-x11-crashy --write-reports --notify-sessiond
 wait "$sessiond_pid"
 sessiond_pid=""
-
-echo
-echo "==> cargo run -p sessiond -- --launch-active --spawn-components"
-cargo run -p sessiond -- --launch-active --spawn-components
 
 echo
 echo "==> cargo run -p watchdog -- --profile-id demo-x11-degraded --write-reports"
