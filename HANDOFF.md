@@ -72,6 +72,8 @@
   - `cargo test --workspace`
 - `./scripts/run-stack.sh`
   - `displayd` と `waylandd` の Unix socket stub 通信を含めて起動確認する
+- `./scripts/run-watchdog-resync-demo.sh`
+  - `watchdog` を再起動しても `sessiond` が full state を再送し、監視と degraded fallback が継続することを確認する
 
 ### 6. 最小 IPC transport
 
@@ -161,6 +163,8 @@
   - watchdog の応答 report をその場で評価し、degraded fallback を自前で適用
 - `scripts/run-degraded-mode.sh`
   - `watchdog` を background server として起動し、manual pull なしで degraded switch と fallback health report 収束まで確認する
+- `scripts/run-watchdog-resync-demo.sh`
+  - `watchdog` 再起動直後の cache miss に対して `sessiond` が `ResyncLaunchState` を受けて full launch-state を再送することを確認する
 
 ## 現在のコード上の要点
 
