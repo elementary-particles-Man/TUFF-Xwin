@@ -50,8 +50,14 @@ echo "==> cargo run -p waylandd -- --require-displayd"
 cargo run -p waylandd -- --require-displayd
 
 echo
-echo "==> cargo run -p compd -- --commit-demo"
-cargo run -p compd -- --commit-demo
+echo "==> Starting displayd for compd"
+cargo run -p displayd -- --once &
+displayd_pid=$!
+sleep 1
+
+echo
+echo "==> cargo run -p compd -- --commit-demo --require-displayd"
+cargo run -p compd -- --commit-demo --require-displayd
 
 wait "$displayd_pid"
 unset displayd_pid
