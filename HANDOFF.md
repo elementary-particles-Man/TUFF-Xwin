@@ -149,11 +149,15 @@
 
 - `WatchdogCommand`
   - `InspectLaunchState`
+  - `UpdateLaunchState`
+  - `ResyncLaunchState`
   - `InspectionResult`
 - `watchdog`
-  - `--serve-ipc [--once]` で Unix socket server として sessiond から launch-state snapshot を受け取る
+  - `--serve-ipc [--once]` で Unix socket server として sessiond から full launch-state / delta update を受け取る
 - `sessiond`
   - `--notify-watchdog` で managed active profile の launch-state 更新を watchdog へ stream
+  - 初回は full launch-state、以後は component 差分だけを送る
+  - watchdog が cache miss した場合は `ResyncLaunchState` を受け、full launch-state を再送する
   - watchdog の応答 report をその場で評価し、degraded fallback を自前で適用
 - `scripts/run-degraded-mode.sh`
   - `watchdog` を background server として起動し、manual pull なしで degraded switch と fallback health report 収束まで確認する

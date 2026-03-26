@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ServiceRole, SessionLaunchState, SessionProfileTransition, SessionWatchdogReport};
+use crate::{
+    ServiceRole, SessionLaunchDelta, SessionLaunchState, SessionProfileTransition,
+    SessionWatchdogReport,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IpcEnvelope {
@@ -69,6 +72,8 @@ pub enum WatchdogCommand {
     Restart { role: ServiceRole, reason: String },
     Escalate { level: u8, reason: String },
     InspectLaunchState { state: SessionLaunchState },
+    UpdateLaunchState { delta: SessionLaunchDelta },
+    ResyncLaunchState { profile_id: String, reason: String },
     InspectionResult { report: SessionWatchdogReport },
 }
 

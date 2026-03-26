@@ -10,7 +10,7 @@ pub use ipc::{
 pub use profile::{
     DesktopComponent, DesktopComponentRole, DesktopComponentState, DesktopHealthStatus,
     DesktopProfile, DesktopProtocol, DesktopRecoveryAction, SessionLaunchComponentState,
-    SessionLaunchPlan, SessionLaunchState, SessionProfileTransition,
+    SessionLaunchDelta, SessionLaunchPlan, SessionLaunchState, SessionProfileTransition,
     SessionWatchdogComponentReport, SessionWatchdogReport,
 };
 pub use transport::{
@@ -231,5 +231,57 @@ mod tests {
 
         assert_eq!(decoded, envelope);
         assert!(json.contains("\"op\":\"inspect-launch-state\""));
+    }
+
+    #[test]
+    fn roundtrips_watchdog_launch_state_delta() {
+        let envelope = IpcEnvelope::new(
+            ServiceRole::Sessiond,
+            ServiceRole::Watchdog,
+            MessageKind::WatchdogCommand(super::WatchdogCommand::UpdateLaunchState {
+                delta: super::SessionLaunchDelta {
+                    profile_id: "demo-x11".into(),
+                    display_name: "Demo".into(),
+                    protocol: super::DesktopProtocol::LayerX11,
+                    broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+                    replace: false,
+                    components: vec![super::SessionLaunchComponentState {
+                        id: "demo-wm".into(),
+                        role: super::DesktopComponentRole::WindowManager,
+                        critical: true,
+                        command: vec!["demo-wm".into()],
+                        resolved_command: Some("/usr/bin/demo-wm".into()),
+                        state: super::DesktopComponentState::Failed,
+                        pid: None,
+                        restart_count: 3,
+                        last_exit_status: Some(1),
+                    }],
+                },
+            }),
+        );
+
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let decoded: IpcEnvelope = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded, envelope);
+        assert!(json.contains("\"op\":\"update-launch-state\""));
+    }
+
+    #[test]
+    fn roundtrips_watchdog_resync_request() {
+        let envelope = IpcEnvelope::new(
+            ServiceRole::Watchdog,
+            ServiceRole::Sessiond,
+            MessageKind::WatchdogCommand(super::WatchdogCommand::ResyncLaunchState {
+                profile_id: "demo-x11".into(),
+                reason: "cache miss".into(),
+            }),
+        );
+
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let decoded: IpcEnvelope = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded, envelope);
+        assert!(json.contains("\"op\":\"resync-launch-state\""));
     }
 }

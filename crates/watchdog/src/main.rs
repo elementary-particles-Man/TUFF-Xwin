@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env, fs,
     io::BufReader,
     os::unix::net::UnixStream,
@@ -8,9 +9,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use waybroker_common::{
     DesktopComponentState, DesktopHealthStatus, DesktopRecoveryAction, IpcEnvelope, MessageKind,
-    ServiceBanner, ServiceRole, SessionCommand, SessionLaunchComponentState, SessionLaunchState,
-    SessionWatchdogComponentReport, SessionWatchdogReport, WatchdogCommand, bind_service_socket,
-    connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir, send_json_line,
+    ServiceBanner, ServiceRole, SessionCommand, SessionLaunchComponentState, SessionLaunchDelta,
+    SessionLaunchState, SessionWatchdogComponentReport, SessionWatchdogReport, WatchdogCommand,
+    bind_service_socket, connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir,
+    send_json_line,
 };
 
 fn main() -> Result<()> {
@@ -99,11 +101,12 @@ fn serve_ipc(config: &Config) -> Result<()> {
     let (listener, socket_path) = bind_service_socket(ServiceRole::Watchdog)?;
     let _socket_guard = SocketGuard::new(socket_path.clone());
     println!("watchdog listening socket={}", socket_path.display());
+    let mut server = WatchdogServer::default();
 
     let mut served = 0usize;
     for stream in listener.incoming() {
         let stream = stream?;
-        handle_client(stream, config)?;
+        handle_client(stream, config, &mut server)?;
         served += 1;
 
         if config.serve_once {
@@ -115,22 +118,30 @@ fn serve_ipc(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn handle_client(mut stream: UnixStream, config: &Config) -> Result<()> {
+fn handle_client(
+    mut stream: UnixStream,
+    config: &Config,
+    server: &mut WatchdogServer,
+) -> Result<()> {
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
     };
 
-    let response = build_response(request, config)?;
+    let response = build_response(request, config, server)?;
     send_json_line(&mut stream, &response)?;
     Ok(())
 }
 
-fn build_response(request: IpcEnvelope, config: &Config) -> Result<IpcEnvelope> {
+fn build_response(
+    request: IpcEnvelope,
+    config: &Config,
+    server: &mut WatchdogServer,
+) -> Result<IpcEnvelope> {
     let source = request.source;
     let response_kind = match request.kind {
         MessageKind::WatchdogCommand(command) if request.destination == ServiceRole::Watchdog => {
-            MessageKind::WatchdogCommand(handle_watchdog_command(command, source, config)?)
+            MessageKind::WatchdogCommand(handle_watchdog_command(command, source, config, server)?)
         }
         MessageKind::WatchdogCommand(_) => {
             MessageKind::WatchdogCommand(WatchdogCommand::Escalate {
@@ -154,9 +165,11 @@ fn handle_watchdog_command(
     command: WatchdogCommand,
     source: ServiceRole,
     config: &Config,
+    server: &mut WatchdogServer,
 ) -> Result<WatchdogCommand> {
     match command {
         WatchdogCommand::InspectLaunchState { state } => {
+            server.cache_full_state(&state);
             let report = inspect_launch_state(&state);
             print_report(&report);
 
@@ -172,10 +185,89 @@ fn handle_watchdog_command(
 
             Ok(WatchdogCommand::InspectionResult { report })
         }
+        WatchdogCommand::UpdateLaunchState { delta } => {
+            let profile_id = delta.profile_id.clone();
+            match server.apply_delta(delta) {
+                Ok(state) => {
+                    let report = inspect_launch_state(&state);
+                    print_report(&report);
+
+                    if config.write_reports {
+                        let report_path = write_report(&report)?;
+                        println!("watchdog wrote_report={}", report_path.display());
+                    }
+
+                    if config.notify_sessiond && source != ServiceRole::Sessiond {
+                        let response = notify_sessiond(&report)?;
+                        print_sessiond_response(&response);
+                    }
+
+                    Ok(WatchdogCommand::InspectionResult { report })
+                }
+                Err(reason) => Ok(WatchdogCommand::ResyncLaunchState { profile_id, reason }),
+            }
+        }
         other => Ok(WatchdogCommand::Escalate {
             level: 1,
             reason: format!("watchdog IPC does not apply {other:?}"),
         }),
+    }
+}
+
+#[derive(Default)]
+struct WatchdogServer {
+    cached_states: HashMap<String, SessionLaunchState>,
+}
+
+impl WatchdogServer {
+    fn cache_full_state(&mut self, state: &SessionLaunchState) {
+        self.cached_states.insert(state.profile_id.clone(), state.clone());
+    }
+
+    fn apply_delta(&mut self, delta: SessionLaunchDelta) -> Result<SessionLaunchState, String> {
+        let SessionLaunchDelta {
+            profile_id,
+            display_name,
+            protocol,
+            broker_services,
+            replace,
+            components,
+        } = delta;
+
+        let state = if replace {
+            SessionLaunchState {
+                profile_id: profile_id.clone(),
+                display_name,
+                protocol,
+                broker_services,
+                components,
+            }
+        } else {
+            let Some(mut state) = self.cached_states.remove(&profile_id) else {
+                return Err(format!(
+                    "watchdog cache miss for profile {profile_id}; full launch-state resend required"
+                ));
+            };
+
+            state.display_name = display_name;
+            state.protocol = protocol;
+            state.broker_services = broker_services;
+
+            for component in components {
+                if let Some(existing) =
+                    state.components.iter_mut().find(|existing| existing.id == component.id)
+                {
+                    *existing = component;
+                } else {
+                    state.components.push(component);
+                }
+            }
+
+            state
+        };
+
+        self.cached_states.insert(profile_id, state.clone());
+        Ok(state)
     }
 }
 
@@ -412,10 +504,11 @@ impl Drop for SocketGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::inspect_launch_state;
+    use super::{Config, WatchdogServer, handle_watchdog_command, inspect_launch_state};
     use waybroker_common::{
         DesktopComponentRole, DesktopComponentState, DesktopHealthStatus, DesktopProtocol,
-        DesktopRecoveryAction, ServiceRole, SessionLaunchComponentState, SessionLaunchState,
+        DesktopRecoveryAction, ServiceRole, SessionLaunchComponentState, SessionLaunchDelta,
+        SessionLaunchState, WatchdogCommand,
     };
 
     #[test]
@@ -470,5 +563,110 @@ mod tests {
         assert_eq!(report.inactive_components, 1);
         assert_eq!(report.components[0].status, DesktopHealthStatus::Inactive);
         assert_eq!(report.components[0].action, DesktopRecoveryAction::None);
+    }
+
+    #[test]
+    fn merges_delta_into_cached_launch_state() {
+        let state = SessionLaunchState {
+            profile_id: "demo".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            components: vec![
+                SessionLaunchComponentState {
+                    id: "wm".into(),
+                    role: DesktopComponentRole::WindowManager,
+                    critical: true,
+                    command: vec!["wm".into()],
+                    resolved_command: Some("/usr/bin/wm".into()),
+                    state: DesktopComponentState::Spawned,
+                    pid: Some(10),
+                    restart_count: 0,
+                    last_exit_status: None,
+                },
+                SessionLaunchComponentState {
+                    id: "panel".into(),
+                    role: DesktopComponentRole::Panel,
+                    critical: false,
+                    command: vec!["panel".into()],
+                    resolved_command: Some("/usr/bin/panel".into()),
+                    state: DesktopComponentState::Spawned,
+                    pid: Some(11),
+                    restart_count: 0,
+                    last_exit_status: None,
+                },
+            ],
+        };
+        let mut server = WatchdogServer::default();
+        server.cache_full_state(&state);
+
+        let merged = server
+            .apply_delta(SessionLaunchDelta {
+                profile_id: "demo".into(),
+                display_name: "Demo".into(),
+                protocol: DesktopProtocol::LayerX11,
+                broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+                replace: false,
+                components: vec![SessionLaunchComponentState {
+                    id: "wm".into(),
+                    role: DesktopComponentRole::WindowManager,
+                    critical: true,
+                    command: vec!["wm".into()],
+                    resolved_command: Some("/usr/bin/wm".into()),
+                    state: DesktopComponentState::Failed,
+                    pid: None,
+                    restart_count: 3,
+                    last_exit_status: Some(1),
+                }],
+            })
+            .expect("merge delta");
+
+        assert_eq!(merged.components.len(), 2);
+        assert_eq!(merged.components[0].id, "wm");
+        assert_eq!(merged.components[0].state, DesktopComponentState::Failed);
+        assert_eq!(merged.components[0].restart_count, 3);
+        assert_eq!(merged.components[1].id, "panel");
+        assert_eq!(merged.components[1].state, DesktopComponentState::Spawned);
+    }
+
+    #[test]
+    fn requests_resync_when_delta_arrives_without_cached_state() {
+        let mut server = WatchdogServer::default();
+        let config = Config::default();
+
+        let response = handle_watchdog_command(
+            WatchdogCommand::UpdateLaunchState {
+                delta: SessionLaunchDelta {
+                    profile_id: "demo".into(),
+                    display_name: "Demo".into(),
+                    protocol: DesktopProtocol::LayerX11,
+                    broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+                    replace: false,
+                    components: vec![SessionLaunchComponentState {
+                        id: "wm".into(),
+                        role: DesktopComponentRole::WindowManager,
+                        critical: true,
+                        command: vec!["wm".into()],
+                        resolved_command: Some("/usr/bin/wm".into()),
+                        state: DesktopComponentState::Failed,
+                        pid: None,
+                        restart_count: 3,
+                        last_exit_status: Some(1),
+                    }],
+                },
+            },
+            ServiceRole::Sessiond,
+            &config,
+            &mut server,
+        )
+        .expect("handle watchdog delta");
+
+        match response {
+            WatchdogCommand::ResyncLaunchState { profile_id, reason } => {
+                assert_eq!(profile_id, "demo");
+                assert!(reason.contains("cache miss"));
+            }
+            other => panic!("expected resync request, got {other:?}"),
+        }
     }
 }

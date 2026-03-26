@@ -13,9 +13,9 @@ use anyhow::{Context, Result, bail};
 use waybroker_common::{
     DesktopComponent, DesktopComponentState, DesktopProfile, DesktopRecoveryAction, IpcEnvelope,
     MessageKind, ServiceBanner, ServiceRole, SessionCommand, SessionLaunchComponentState,
-    SessionLaunchState, SessionProfileTransition, SessionWatchdogReport, WatchdogCommand,
-    bind_service_socket, connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir,
-    send_json_line,
+    SessionLaunchDelta, SessionLaunchState, SessionProfileTransition, SessionWatchdogReport,
+    WatchdogCommand, bind_service_socket, connect_service_socket, ensure_runtime_dir,
+    read_json_line, runtime_dir, send_json_line,
 };
 
 fn main() -> Result<()> {
@@ -729,22 +729,100 @@ fn should_notify_watchdog(config: &Config) -> bool {
     config.notify_watchdog
 }
 
-fn notify_watchdog(state: &SessionLaunchState) -> Result<SessionWatchdogReport> {
+fn notify_watchdog(
+    state: &SessionLaunchState,
+    previous: Option<&SessionLaunchState>,
+) -> Result<SessionWatchdogReport> {
+    let command = watchdog_stream_command(state, previous);
+    let response = send_watchdog_command(command)?;
+
+    match response.kind {
+        MessageKind::WatchdogCommand(WatchdogCommand::InspectionResult { report }) => Ok(report),
+        MessageKind::WatchdogCommand(WatchdogCommand::ResyncLaunchState { profile_id, reason }) => {
+            if profile_id != state.profile_id {
+                bail!(
+                    "watchdog requested resync for profile {} while sessiond sent {}",
+                    profile_id,
+                    state.profile_id
+                );
+            }
+
+            println!("sessiond watchdog_resync_required profile={} reason={}", profile_id, reason);
+
+            let retry = send_watchdog_command(WatchdogCommand::InspectLaunchState {
+                state: state.clone(),
+            })?;
+
+            match retry.kind {
+                MessageKind::WatchdogCommand(WatchdogCommand::InspectionResult { report }) => {
+                    Ok(report)
+                }
+                other => bail!("watchdog returned unexpected resync response: {other:?}"),
+            }
+        }
+        other => bail!("watchdog returned unexpected response: {other:?}"),
+    }
+}
+
+fn send_watchdog_command(command: WatchdogCommand) -> Result<IpcEnvelope> {
     let mut stream = connect_service_socket(ServiceRole::Watchdog)?;
     let request = IpcEnvelope::new(
         ServiceRole::Sessiond,
         ServiceRole::Watchdog,
-        MessageKind::WatchdogCommand(WatchdogCommand::InspectLaunchState { state: state.clone() }),
+        MessageKind::WatchdogCommand(command),
     );
 
     send_json_line(&mut stream, &request)?;
 
     let mut reader = BufReader::new(stream);
-    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    read_json_line(&mut reader)
+}
 
-    match response.kind {
-        MessageKind::WatchdogCommand(WatchdogCommand::InspectionResult { report }) => Ok(report),
-        other => bail!("watchdog returned unexpected response: {other:?}"),
+fn watchdog_stream_command(
+    state: &SessionLaunchState,
+    previous: Option<&SessionLaunchState>,
+) -> WatchdogCommand {
+    let Some(previous) = previous else {
+        return WatchdogCommand::InspectLaunchState { state: state.clone() };
+    };
+
+    if previous.profile_id != state.profile_id
+        || previous.components.len() != state.components.len()
+    {
+        return WatchdogCommand::UpdateLaunchState {
+            delta: SessionLaunchDelta {
+                profile_id: state.profile_id.clone(),
+                display_name: state.display_name.clone(),
+                protocol: state.protocol,
+                broker_services: state.broker_services.clone(),
+                replace: true,
+                components: state.components.clone(),
+            },
+        };
+    }
+
+    let changed_components: Vec<SessionLaunchComponentState> = state
+        .components
+        .iter()
+        .filter(|component| {
+            previous
+                .components
+                .iter()
+                .find(|previous_component| previous_component.id == component.id)
+                != Some(*component)
+        })
+        .cloned()
+        .collect();
+
+    WatchdogCommand::UpdateLaunchState {
+        delta: SessionLaunchDelta {
+            profile_id: state.profile_id.clone(),
+            display_name: state.display_name.clone(),
+            protocol: state.protocol,
+            broker_services: state.broker_services.clone(),
+            replace: false,
+            components: changed_components,
+        },
     }
 }
 
@@ -783,6 +861,7 @@ struct SessionSupervisor {
     profiles: Vec<DesktopProfile>,
     profile: DesktopProfile,
     components: Vec<RuntimeComponent>,
+    last_streamed_state: Option<SessionLaunchState>,
 }
 
 impl SessionSupervisor {
@@ -799,7 +878,7 @@ impl SessionSupervisor {
             components.push(RuntimeComponent::new(component)?);
         }
 
-        Ok(Self { profiles, profile, components })
+        Ok(Self { profiles, profile, components, last_streamed_state: None })
     }
 
     fn profile(&self) -> DesktopProfile {
@@ -867,9 +946,10 @@ impl SessionSupervisor {
         println!("sessiond wrote_launch_state={}", state_path.display());
 
         if should_notify_watchdog(config) {
-            match notify_watchdog(&launch_state) {
+            match notify_watchdog(&launch_state, self.last_streamed_state.as_ref()) {
                 Ok(report) => {
                     print_watchdog_stream_report(&report);
+                    self.last_streamed_state = Some(launch_state.clone());
                     self.apply_watchdog_stream_report(&report, config)?;
                 }
                 Err(err) => {
@@ -990,16 +1070,20 @@ impl RuntimeComponent {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_watchdog_report, build_launch_state, is_executable, resolve_command_path};
+    use super::{
+        apply_watchdog_report, build_launch_state, is_executable, resolve_command_path,
+        watchdog_stream_command,
+    };
     use std::{
         fs,
         os::unix::fs::PermissionsExt,
         time::{SystemTime, UNIX_EPOCH},
     };
     use waybroker_common::{
-        DesktopComponent, DesktopComponentRole, DesktopHealthStatus, DesktopProfile,
-        DesktopProtocol, DesktopRecoveryAction, ServiceRole, SessionWatchdogComponentReport,
-        SessionWatchdogReport,
+        DesktopComponent, DesktopComponentRole, DesktopComponentState, DesktopHealthStatus,
+        DesktopProfile, DesktopProtocol, DesktopRecoveryAction, ServiceRole,
+        SessionLaunchComponentState, SessionLaunchState, SessionWatchdogComponentReport,
+        SessionWatchdogReport, WatchdogCommand,
     };
 
     #[test]
@@ -1150,6 +1234,106 @@ mod tests {
                 assert_eq!(profile_id, "demo-x11");
                 assert_eq!(reason, "watchdog report did not request degraded profile switch");
             }
+        }
+    }
+
+    #[test]
+    fn emits_delta_stream_for_component_change() {
+        let previous = SessionLaunchState {
+            profile_id: "demo-x11".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            components: vec![SessionLaunchComponentState {
+                id: "demo-wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                command: vec!["demo-wm".into()],
+                resolved_command: Some("/usr/bin/demo-wm".into()),
+                state: DesktopComponentState::Spawned,
+                pid: Some(42),
+                restart_count: 0,
+                last_exit_status: None,
+            }],
+        };
+        let next = SessionLaunchState {
+            profile_id: "demo-x11".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            components: vec![SessionLaunchComponentState {
+                id: "demo-wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                command: vec!["demo-wm".into()],
+                resolved_command: Some("/usr/bin/demo-wm".into()),
+                state: DesktopComponentState::Failed,
+                pid: None,
+                restart_count: 3,
+                last_exit_status: Some(1),
+            }],
+        };
+
+        let command = watchdog_stream_command(&next, Some(&previous));
+
+        match command {
+            WatchdogCommand::UpdateLaunchState { delta } => {
+                assert!(!delta.replace);
+                assert_eq!(delta.components.len(), 1);
+                assert_eq!(delta.components[0].state, DesktopComponentState::Failed);
+                assert_eq!(delta.components[0].restart_count, 3);
+            }
+            other => panic!("expected delta update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emits_replace_delta_when_profile_changes() {
+        let previous = SessionLaunchState {
+            profile_id: "demo-x11".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond],
+            components: vec![SessionLaunchComponentState {
+                id: "demo-wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                command: vec!["demo-wm".into()],
+                resolved_command: Some("/usr/bin/demo-wm".into()),
+                state: DesktopComponentState::Spawned,
+                pid: Some(42),
+                restart_count: 0,
+                last_exit_status: None,
+            }],
+        };
+        let next = SessionLaunchState {
+            profile_id: "demo-x11-degraded".into(),
+            display_name: "Degraded Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond],
+            components: vec![SessionLaunchComponentState {
+                id: "openbox".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                command: vec!["openbox".into()],
+                resolved_command: Some("/usr/bin/openbox".into()),
+                state: DesktopComponentState::Spawned,
+                pid: Some(84),
+                restart_count: 0,
+                last_exit_status: None,
+            }],
+        };
+
+        let command = watchdog_stream_command(&next, Some(&previous));
+
+        match command {
+            WatchdogCommand::UpdateLaunchState { delta } => {
+                assert!(delta.replace);
+                assert_eq!(delta.profile_id, "demo-x11-degraded");
+                assert_eq!(delta.components.len(), 1);
+                assert_eq!(delta.components[0].id, "openbox");
+            }
+            other => panic!("expected replace delta, got {other:?}"),
         }
     }
 }

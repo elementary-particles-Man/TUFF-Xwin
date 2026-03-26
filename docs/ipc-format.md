@@ -75,6 +75,8 @@
   - restart
   - escalate
   - launch-state inspect
+  - launch-state delta update
+  - launch-state resync request
   - inspection result
 - `HealthState`
   - healthy
@@ -90,7 +92,7 @@
 - PAM conversation secrets
 - kernel / driver internal state
 
-境界を越えてよいのは「意図」と「最小 state snapshot」だけです。
+境界を越えてよいのは「意図」と「最小 state snapshot / delta」だけです。
 
 ## Versioning
 
@@ -106,4 +108,4 @@
 
 初期の message type は [lib.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/lib.rs) と [ipc.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/ipc.rs) に置きます。
 
-初期の transport helper は [transport.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/transport.rs) に置き、`displayd <-> waylandd` と `sessiond <-> watchdog` の間で 1 行 1 message の Unix socket 通信を行います。`sessiond` は `--manage-active` 時に active profile runtime を持ち続け、launch-state 更新ごとに watchdog へ snapshot を stream し、必要なら degraded fallback の launch-state 更新と component 起動まで連続で行います。
+初期の transport helper は [transport.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/transport.rs) に置き、`displayd <-> waylandd` と `sessiond <-> watchdog` の間で 1 行 1 message の Unix socket 通信を行います。`sessiond` は `--manage-active` 時に active profile runtime を持ち続け、最初の health stream では full launch-state を送り、その後は変更された component だけを delta として watchdog へ stream します。watchdog は profile ごとの cached launch-state に merge したうえで inspection を返し、cache を失っている場合は `resync-launch-state` を返して full state の再送を要求します。必要なら degraded fallback の launch-state 更新と component 起動まで連続で行います。

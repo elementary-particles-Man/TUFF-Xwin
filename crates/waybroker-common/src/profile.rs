@@ -126,6 +126,16 @@ pub struct SessionLaunchState {
     pub components: Vec<SessionLaunchComponentState>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionLaunchDelta {
+    pub profile_id: String,
+    pub display_name: String,
+    pub protocol: DesktopProtocol,
+    pub broker_services: Vec<ServiceRole>,
+    pub replace: bool,
+    pub components: Vec<SessionLaunchComponentState>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DesktopHealthStatus {
