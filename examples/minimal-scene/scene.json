@@ -1,0 +1,33 @@
+{
+  "target_output": "eDP-1",
+  "focus": {
+    "type": "surface",
+    "id": "terminal-1"
+  },
+  "surfaces": [
+    {
+      "id": "terminal-1",
+      "app_id": "org.kde.konsole",
+      "placement": {
+        "x": 50,
+        "y": 50,
+        "width": 1200,
+        "height": 800,
+        "z": 10,
+        "visible": true
+      }
+    },
+    {
+      "id": "panel-1",
+      "app_id": "org.kde.plasma.panel",
+      "placement": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 40,
+        "z": 100,
+        "visible": true
+      }
+    }
+  ]
+}
