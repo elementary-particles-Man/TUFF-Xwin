@@ -436,6 +436,8 @@ fn build_launch_state(
         display_name: profile.display_name.clone(),
         protocol: profile.protocol,
         broker_services: profile.broker_services.clone(),
+        generation: 1,
+        sequence: 1,
         components,
     })
 }
@@ -475,6 +477,8 @@ fn supervise_launch_state(
         display_name: profile.display_name.clone(),
         protocol: profile.protocol,
         broker_services: profile.broker_services.clone(),
+        generation: 1,
+        sequence: 1,
         components: components.into_iter().map(|component| component.state).collect(),
     })
 }
@@ -586,9 +590,11 @@ fn write_profile_transition(transition: &SessionProfileTransition) -> Result<Pat
 
 fn print_launch_state(state: &SessionLaunchState) {
     println!(
-        "sessiond launch_state profile={} protocol={} components={}",
+        "sessiond launch_state profile={} protocol={} generation={} sequence={} components={}",
         state.profile_id,
         state.protocol.as_str(),
+        state.generation,
+        state.sequence,
         state.components.len()
     );
 
@@ -787,6 +793,7 @@ fn watchdog_stream_command(
     };
 
     if previous.profile_id != state.profile_id
+        || previous.generation != state.generation
         || previous.components.len() != state.components.len()
     {
         return WatchdogCommand::UpdateLaunchState {
@@ -795,6 +802,8 @@ fn watchdog_stream_command(
                 display_name: state.display_name.clone(),
                 protocol: state.protocol,
                 broker_services: state.broker_services.clone(),
+                generation: state.generation,
+                sequence: state.sequence,
                 replace: true,
                 components: state.components.clone(),
             },
@@ -820,6 +829,8 @@ fn watchdog_stream_command(
             display_name: state.display_name.clone(),
             protocol: state.protocol,
             broker_services: state.broker_services.clone(),
+            generation: state.generation,
+            sequence: state.sequence,
             replace: false,
             components: changed_components,
         },
@@ -861,24 +872,37 @@ struct SessionSupervisor {
     profiles: Vec<DesktopProfile>,
     profile: DesktopProfile,
     components: Vec<RuntimeComponent>,
+    stream_generation: u64,
+    stream_sequence: u64,
     last_streamed_state: Option<SessionLaunchState>,
 }
 
 impl SessionSupervisor {
     fn bootstrap(config: &Config, profiles: &[DesktopProfile]) -> Result<Self> {
         let profile = read_active_profile()?;
-        let mut supervisor = Self::new(profile, profiles.to_vec())?;
+        let mut supervisor = Self::new(profile, profiles.to_vec(), 1)?;
         supervisor.activate(config)?;
         Ok(supervisor)
     }
 
-    fn new(profile: DesktopProfile, profiles: Vec<DesktopProfile>) -> Result<Self> {
+    fn new(
+        profile: DesktopProfile,
+        profiles: Vec<DesktopProfile>,
+        stream_generation: u64,
+    ) -> Result<Self> {
         let mut components = Vec::with_capacity(profile.session_components.len());
         for component in &profile.session_components {
             components.push(RuntimeComponent::new(component)?);
         }
 
-        Ok(Self { profiles, profile, components, last_streamed_state: None })
+        Ok(Self {
+            profiles,
+            profile,
+            components,
+            stream_generation,
+            stream_sequence: 0,
+            last_streamed_state: None,
+        })
     }
 
     fn profile(&self) -> DesktopProfile {
@@ -898,7 +922,8 @@ impl SessionSupervisor {
     fn switch_to(&mut self, profile: DesktopProfile, config: &Config) -> Result<()> {
         self.stop_all()?;
         let profiles = self.profiles.clone();
-        *self = Self::new(profile, profiles)?;
+        let next_generation = self.stream_generation.saturating_add(1);
+        *self = Self::new(profile, profiles, next_generation)?;
         self.activate(config)?;
         println!("sessiond auto_launched_profile={}", self.profile.id);
         Ok(())
@@ -928,12 +953,16 @@ impl SessionSupervisor {
         Ok(())
     }
 
-    fn snapshot(&self) -> SessionLaunchState {
+    fn snapshot(&mut self) -> SessionLaunchState {
+        self.stream_sequence = self.stream_sequence.saturating_add(1);
+
         SessionLaunchState {
             profile_id: self.profile.id.clone(),
             display_name: self.profile.display_name.clone(),
             protocol: self.profile.protocol,
             broker_services: self.profile.broker_services.clone(),
+            generation: self.stream_generation,
+            sequence: self.stream_sequence,
             components: self.components.iter().map(|component| component.state.clone()).collect(),
         }
     }
@@ -1244,6 +1273,8 @@ mod tests {
             display_name: "Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 1,
             components: vec![SessionLaunchComponentState {
                 id: "demo-wm".into(),
                 role: DesktopComponentRole::WindowManager,
@@ -1261,6 +1292,8 @@ mod tests {
             display_name: "Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 2,
             components: vec![SessionLaunchComponentState {
                 id: "demo-wm".into(),
                 role: DesktopComponentRole::WindowManager,
@@ -1279,6 +1312,8 @@ mod tests {
         match command {
             WatchdogCommand::UpdateLaunchState { delta } => {
                 assert!(!delta.replace);
+                assert_eq!(delta.generation, 1);
+                assert_eq!(delta.sequence, 2);
                 assert_eq!(delta.components.len(), 1);
                 assert_eq!(delta.components[0].state, DesktopComponentState::Failed);
                 assert_eq!(delta.components[0].restart_count, 3);
@@ -1294,6 +1329,8 @@ mod tests {
             display_name: "Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             broker_services: vec![ServiceRole::Sessiond],
+            generation: 1,
+            sequence: 4,
             components: vec![SessionLaunchComponentState {
                 id: "demo-wm".into(),
                 role: DesktopComponentRole::WindowManager,
@@ -1311,6 +1348,8 @@ mod tests {
             display_name: "Degraded Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             broker_services: vec![ServiceRole::Sessiond],
+            generation: 2,
+            sequence: 1,
             components: vec![SessionLaunchComponentState {
                 id: "openbox".into(),
                 role: DesktopComponentRole::WindowManager,
@@ -1330,6 +1369,8 @@ mod tests {
             WatchdogCommand::UpdateLaunchState { delta } => {
                 assert!(delta.replace);
                 assert_eq!(delta.profile_id, "demo-x11-degraded");
+                assert_eq!(delta.generation, 2);
+                assert_eq!(delta.sequence, 1);
                 assert_eq!(delta.components.len(), 1);
                 assert_eq!(delta.components[0].id, "openbox");
             }

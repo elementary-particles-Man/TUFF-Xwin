@@ -211,6 +211,8 @@ mod tests {
                     display_name: "Demo".into(),
                     protocol: super::DesktopProtocol::LayerX11,
                     broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+                    generation: 1,
+                    sequence: 1,
                     components: vec![super::SessionLaunchComponentState {
                         id: "demo-wm".into(),
                         role: super::DesktopComponentRole::WindowManager,
@@ -244,6 +246,8 @@ mod tests {
                     display_name: "Demo".into(),
                     protocol: super::DesktopProtocol::LayerX11,
                     broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+                    generation: 1,
+                    sequence: 2,
                     replace: false,
                     components: vec![super::SessionLaunchComponentState {
                         id: "demo-wm".into(),

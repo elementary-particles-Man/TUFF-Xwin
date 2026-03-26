@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::ServiceRole;
 
+const fn default_stream_generation() -> u64 {
+    1
+}
+
+const fn default_stream_sequence() -> u64 {
+    1
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DesktopProtocol {
@@ -123,6 +131,10 @@ pub struct SessionLaunchState {
     pub display_name: String,
     pub protocol: DesktopProtocol,
     pub broker_services: Vec<ServiceRole>,
+    #[serde(default = "default_stream_generation")]
+    pub generation: u64,
+    #[serde(default = "default_stream_sequence")]
+    pub sequence: u64,
     pub components: Vec<SessionLaunchComponentState>,
 }
 
@@ -132,6 +144,10 @@ pub struct SessionLaunchDelta {
     pub display_name: String,
     pub protocol: DesktopProtocol,
     pub broker_services: Vec<ServiceRole>,
+    #[serde(default = "default_stream_generation")]
+    pub generation: u64,
+    #[serde(default = "default_stream_sequence")]
+    pub sequence: u64,
     pub replace: bool,
     pub components: Vec<SessionLaunchComponentState>,
 }

@@ -51,13 +51,13 @@ launch state は次の用途に使います。
 - critical component が欠けている profile を boot 前に検出する
 - 将来 `watchdog` が「どの GUI component を監視するか」を知る
 
-初期実装では `sessiond` が `active-profile.json` と `launch-state-<profile>.json` を runtime dir へ書きます。
+初期実装では `sessiond` が `active-profile.json` と `launch-state-<profile>.json` を runtime dir へ書きます。launch state には `generation` と `sequence` も持たせ、active profile の世代と更新順序を追跡します。
 
-`watchdog` は `launch-state-<profile>.json` を読み、各 component を `healthy / unhealthy / inactive` で分類できます。加えて、常駐 `sessiond` supervisor が最初の full launch-state と、その後の component 差分だけを watchdog へ stream すれば、pull ではなく event-driven に同じ判定を返せます。watchdog が再起動して cache を失った場合は `resync-launch-state` を返し、`sessiond` が full state を再送して監視を継続します。これにより、`xfwm4` が落ちたのか、単に未導入なのか、まだ起動していないだけなのかを分けられます。
+`watchdog` は `launch-state-<profile>.json` を読み、各 component を `healthy / unhealthy / inactive` で分類できます。加えて、常駐 `sessiond` supervisor が最初の full launch-state と、その後の component 差分だけを watchdog へ stream すれば、pull ではなく event-driven に同じ判定を返せます。watchdog が再起動して cache を失った場合は `resync-launch-state` を返し、`sessiond` が full state を再送して監視を継続します。stale delta は `generation/sequence` で無視し、欠番だけ resync へ倒すため、将来の再送や multi-client 化でも古い state が現行 cache を巻き戻しにくくなります。これにより、`xfwm4` が落ちたのか、単に未導入なのか、まだ起動していないだけなのかを分けられます。
 
 `sessiond` の supervisor stub は critical component に restart counter を持ちます。`watchdog` はその値を見て、`restart-component` で済む段階か、`degraded-profile` へ落とす段階かを判断します。
 
-profile manifest は `degraded_profile_id` を持てます。`watchdog` は launch state から `watchdog-report-<profile>.json` を作るだけでなく、Unix socket server として `sessiond` から full state / delta update の両方を受け取れます。`sessiond --serve-ipc --spawn-components --manage-active --notify-watchdog` で動かしていれば、active profile の component を常駐で poll し、その更新を watchdog へ stream し、返ってきた report に `degraded-profile` action が含まれていれば `active-profile.json` を fallback profile に差し替えます。結果は `profile-transition-<from>-to-<to>.json` と新しい `launch-state-<profile>.json` に記録されます。
+profile manifest は `degraded_profile_id` を持てます。`watchdog` は launch state から `watchdog-report-<profile>.json` を作るだけでなく、Unix socket server として `sessiond` から full state / delta update の両方を受け取れます。`sessiond --serve-ipc --spawn-components --manage-active --notify-watchdog` で動かしていれば、active profile の component を常駐で poll し、その更新を watchdog へ stream し、返ってきた report に `degraded-profile` action が含まれていれば `active-profile.json` を fallback profile に差し替えます。profile 切替時は新しい `generation` で stream を再開するため、旧 profile から遅れて届いた delta は watchdog 側で捨てられます。結果は `profile-transition-<from>-to-<to>.json` と新しい `launch-state-<profile>.json` に記録されます。
 
 ## Failure Boundary
 

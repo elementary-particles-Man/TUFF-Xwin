@@ -33,7 +33,7 @@ fn main() -> Result<()> {
 
     for launch_state in &launch_states {
         let report = inspect_launch_state(launch_state);
-        print_report(&report);
+        print_report(launch_state, &report);
 
         if config.write_reports {
             let report_path = write_report(&report)?;
@@ -168,45 +168,90 @@ fn handle_watchdog_command(
     server: &mut WatchdogServer,
 ) -> Result<WatchdogCommand> {
     match command {
-        WatchdogCommand::InspectLaunchState { state } => {
-            server.cache_full_state(&state);
-            let report = inspect_launch_state(&state);
-            print_report(&report);
+        WatchdogCommand::InspectLaunchState { state } => match server.cache_full_state(&state) {
+            StateUpdateOutcome::Accepted(state) => {
+                let report = inspect_launch_state(&state);
+                print_report(&state, &report);
 
-            if config.write_reports {
-                let report_path = write_report(&report)?;
-                println!("watchdog wrote_report={}", report_path.display());
-            }
-
-            if config.notify_sessiond && source != ServiceRole::Sessiond {
-                let response = notify_sessiond(&report)?;
-                print_sessiond_response(&response);
-            }
-
-            Ok(WatchdogCommand::InspectionResult { report })
-        }
-        WatchdogCommand::UpdateLaunchState { delta } => {
-            let profile_id = delta.profile_id.clone();
-            match server.apply_delta(delta) {
-                Ok(state) => {
-                    let report = inspect_launch_state(&state);
-                    print_report(&report);
-
-                    if config.write_reports {
-                        let report_path = write_report(&report)?;
-                        println!("watchdog wrote_report={}", report_path.display());
-                    }
-
-                    if config.notify_sessiond && source != ServiceRole::Sessiond {
-                        let response = notify_sessiond(&report)?;
-                        print_sessiond_response(&response);
-                    }
-
-                    Ok(WatchdogCommand::InspectionResult { report })
+                if config.write_reports {
+                    let report_path = write_report(&report)?;
+                    println!("watchdog wrote_report={}", report_path.display());
                 }
-                Err(reason) => Ok(WatchdogCommand::ResyncLaunchState { profile_id, reason }),
+
+                if config.notify_sessiond && source != ServiceRole::Sessiond {
+                    let response = notify_sessiond(&report)?;
+                    print_sessiond_response(&response);
+                }
+
+                Ok(WatchdogCommand::InspectionResult { report })
             }
-        }
+            StateUpdateOutcome::Ignored { state, reason } => {
+                println!(
+                    "watchdog ignored_launch_state profile={} generation={} sequence={} reason={}",
+                    state.profile_id, state.generation, state.sequence, reason
+                );
+
+                let report = inspect_launch_state(&state);
+                print_report(&state, &report);
+
+                if config.write_reports {
+                    let report_path = write_report(&report)?;
+                    println!("watchdog wrote_report={}", report_path.display());
+                }
+
+                if config.notify_sessiond && source != ServiceRole::Sessiond {
+                    let response = notify_sessiond(&report)?;
+                    print_sessiond_response(&response);
+                }
+
+                Ok(WatchdogCommand::InspectionResult { report })
+            }
+            StateUpdateOutcome::Resync { profile_id, reason } => {
+                Ok(WatchdogCommand::ResyncLaunchState { profile_id, reason })
+            }
+        },
+        WatchdogCommand::UpdateLaunchState { delta } => match server.apply_delta(delta) {
+            StateUpdateOutcome::Accepted(state) => {
+                let report = inspect_launch_state(&state);
+                print_report(&state, &report);
+
+                if config.write_reports {
+                    let report_path = write_report(&report)?;
+                    println!("watchdog wrote_report={}", report_path.display());
+                }
+
+                if config.notify_sessiond && source != ServiceRole::Sessiond {
+                    let response = notify_sessiond(&report)?;
+                    print_sessiond_response(&response);
+                }
+
+                Ok(WatchdogCommand::InspectionResult { report })
+            }
+            StateUpdateOutcome::Ignored { state, reason } => {
+                println!(
+                    "watchdog ignored_launch_state profile={} generation={} sequence={} reason={}",
+                    state.profile_id, state.generation, state.sequence, reason
+                );
+
+                let report = inspect_launch_state(&state);
+                print_report(&state, &report);
+
+                if config.write_reports {
+                    let report_path = write_report(&report)?;
+                    println!("watchdog wrote_report={}", report_path.display());
+                }
+
+                if config.notify_sessiond && source != ServiceRole::Sessiond {
+                    let response = notify_sessiond(&report)?;
+                    print_sessiond_response(&response);
+                }
+
+                Ok(WatchdogCommand::InspectionResult { report })
+            }
+            StateUpdateOutcome::Resync { profile_id, reason } => {
+                Ok(WatchdogCommand::ResyncLaunchState { profile_id, reason })
+            }
+        },
         other => Ok(WatchdogCommand::Escalate {
             level: 1,
             reason: format!("watchdog IPC does not apply {other:?}"),
@@ -219,39 +264,115 @@ struct WatchdogServer {
     cached_states: HashMap<String, SessionLaunchState>,
 }
 
+#[derive(Debug)]
+enum StateUpdateOutcome {
+    Accepted(SessionLaunchState),
+    Ignored { state: SessionLaunchState, reason: String },
+    Resync { profile_id: String, reason: String },
+}
+
 impl WatchdogServer {
-    fn cache_full_state(&mut self, state: &SessionLaunchState) {
+    fn cache_full_state(&mut self, state: &SessionLaunchState) -> StateUpdateOutcome {
+        if let Some(current) = self.cached_states.get(&state.profile_id).cloned() {
+            if state.generation < current.generation
+                || (state.generation == current.generation && state.sequence < current.sequence)
+            {
+                return StateUpdateOutcome::Ignored {
+                    state: current.clone(),
+                    reason: format!(
+                        "incoming full state generation={} sequence={} is older than cached generation={} sequence={}",
+                        state.generation, state.sequence, current.generation, current.sequence
+                    ),
+                };
+            }
+        }
+
         self.cached_states.insert(state.profile_id.clone(), state.clone());
+        StateUpdateOutcome::Accepted(state.clone())
     }
 
-    fn apply_delta(&mut self, delta: SessionLaunchDelta) -> Result<SessionLaunchState, String> {
+    fn apply_delta(&mut self, delta: SessionLaunchDelta) -> StateUpdateOutcome {
         let SessionLaunchDelta {
             profile_id,
             display_name,
             protocol,
             broker_services,
+            generation,
+            sequence,
             replace,
             components,
         } = delta;
 
-        let state = if replace {
+        let Some(current) = self.cached_states.get(&profile_id).cloned() else {
+            return StateUpdateOutcome::Resync {
+                profile_id,
+                reason: "watchdog cache miss for profile; full launch-state resend required"
+                    .to_string(),
+            };
+        };
+
+        if generation < current.generation
+            || (generation == current.generation && sequence <= current.sequence)
+        {
+            return StateUpdateOutcome::Ignored {
+                state: current.clone(),
+                reason: format!(
+                    "incoming delta generation={} sequence={} is not newer than cached generation={} sequence={}",
+                    generation, sequence, current.generation, current.sequence
+                ),
+            };
+        }
+
+        if generation > current.generation {
+            if !replace {
+                return StateUpdateOutcome::Resync {
+                    profile_id,
+                    reason: format!(
+                        "watchdog observed generation jump {} -> {} without full replace",
+                        current.generation, generation
+                    ),
+                };
+            }
+
+            if sequence != 1 {
+                return StateUpdateOutcome::Resync {
+                    profile_id,
+                    reason: format!(
+                        "watchdog expected sequence 1 for new generation {} but got {}",
+                        generation, sequence
+                    ),
+                };
+            }
+        } else {
+            let expected_sequence = current.sequence.saturating_add(1);
+            if sequence != expected_sequence {
+                return StateUpdateOutcome::Resync {
+                    profile_id,
+                    reason: format!(
+                        "watchdog detected sequence gap: expected {}, got {}",
+                        expected_sequence, sequence
+                    ),
+                };
+            }
+        }
+
+        let mut state = if replace {
             SessionLaunchState {
                 profile_id: profile_id.clone(),
                 display_name,
                 protocol,
                 broker_services,
+                generation,
+                sequence,
                 components,
             }
         } else {
-            let Some(mut state) = self.cached_states.remove(&profile_id) else {
-                return Err(format!(
-                    "watchdog cache miss for profile {profile_id}; full launch-state resend required"
-                ));
-            };
-
+            let mut state = current;
             state.display_name = display_name;
             state.protocol = protocol;
             state.broker_services = broker_services;
+            state.generation = generation;
+            state.sequence = sequence;
 
             for component in components {
                 if let Some(existing) =
@@ -266,8 +387,10 @@ impl WatchdogServer {
             state
         };
 
+        state.generation = generation;
+        state.sequence = sequence;
         self.cached_states.insert(profile_id, state.clone());
-        Ok(state)
+        StateUpdateOutcome::Accepted(state)
     }
 }
 
@@ -420,10 +543,12 @@ fn write_report(report: &SessionWatchdogReport) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn print_report(report: &SessionWatchdogReport) {
+fn print_report(state: &SessionLaunchState, report: &SessionWatchdogReport) {
     println!(
-        "watchdog profile={} healthy={} unhealthy={} inactive={}",
+        "watchdog profile={} generation={} sequence={} healthy={} unhealthy={} inactive={}",
         report.profile_id,
+        state.generation,
+        state.sequence,
         report.healthy_components,
         report.unhealthy_components,
         report.inactive_components
@@ -504,7 +629,9 @@ impl Drop for SocketGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, WatchdogServer, handle_watchdog_command, inspect_launch_state};
+    use super::{
+        Config, StateUpdateOutcome, WatchdogServer, handle_watchdog_command, inspect_launch_state,
+    };
     use waybroker_common::{
         DesktopComponentRole, DesktopComponentState, DesktopHealthStatus, DesktopProtocol,
         DesktopRecoveryAction, ServiceRole, SessionLaunchComponentState, SessionLaunchDelta,
@@ -518,6 +645,8 @@ mod tests {
             display_name: "Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             broker_services: vec![ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 1,
             components: vec![SessionLaunchComponentState {
                 id: "missing".into(),
                 role: DesktopComponentRole::Shell,
@@ -545,6 +674,8 @@ mod tests {
             display_name: "Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             broker_services: vec![ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 1,
             components: vec![SessionLaunchComponentState {
                 id: "ready".into(),
                 role: DesktopComponentRole::Panel,
@@ -572,6 +703,8 @@ mod tests {
             display_name: "Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 1,
             components: vec![
                 SessionLaunchComponentState {
                     id: "wm".into(),
@@ -600,31 +733,36 @@ mod tests {
         let mut server = WatchdogServer::default();
         server.cache_full_state(&state);
 
-        let merged = server
-            .apply_delta(SessionLaunchDelta {
-                profile_id: "demo".into(),
-                display_name: "Demo".into(),
-                protocol: DesktopProtocol::LayerX11,
-                broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
-                replace: false,
-                components: vec![SessionLaunchComponentState {
-                    id: "wm".into(),
-                    role: DesktopComponentRole::WindowManager,
-                    critical: true,
-                    command: vec!["wm".into()],
-                    resolved_command: Some("/usr/bin/wm".into()),
-                    state: DesktopComponentState::Failed,
-                    pid: None,
-                    restart_count: 3,
-                    last_exit_status: Some(1),
-                }],
-            })
-            .expect("merge delta");
+        let merged = match server.apply_delta(SessionLaunchDelta {
+            profile_id: "demo".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 2,
+            replace: false,
+            components: vec![SessionLaunchComponentState {
+                id: "wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                command: vec!["wm".into()],
+                resolved_command: Some("/usr/bin/wm".into()),
+                state: DesktopComponentState::Failed,
+                pid: None,
+                restart_count: 3,
+                last_exit_status: Some(1),
+            }],
+        }) {
+            StateUpdateOutcome::Accepted(state) => state,
+            other => panic!("expected merged delta state, got {other:?}"),
+        };
 
         assert_eq!(merged.components.len(), 2);
         assert_eq!(merged.components[0].id, "wm");
         assert_eq!(merged.components[0].state, DesktopComponentState::Failed);
         assert_eq!(merged.components[0].restart_count, 3);
+        assert_eq!(merged.generation, 1);
+        assert_eq!(merged.sequence, 2);
         assert_eq!(merged.components[1].id, "panel");
         assert_eq!(merged.components[1].state, DesktopComponentState::Spawned);
     }
@@ -641,6 +779,8 @@ mod tests {
                     display_name: "Demo".into(),
                     protocol: DesktopProtocol::LayerX11,
                     broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+                    generation: 1,
+                    sequence: 2,
                     replace: false,
                     components: vec![SessionLaunchComponentState {
                         id: "wm".into(),
@@ -667,6 +807,115 @@ mod tests {
                 assert!(reason.contains("cache miss"));
             }
             other => panic!("expected resync request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ignores_stale_delta_when_sequence_goes_backwards() {
+        let state = SessionLaunchState {
+            profile_id: "demo".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 3,
+            components: vec![SessionLaunchComponentState {
+                id: "wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                command: vec!["wm".into()],
+                resolved_command: Some("/usr/bin/wm".into()),
+                state: DesktopComponentState::Spawned,
+                pid: Some(10),
+                restart_count: 0,
+                last_exit_status: None,
+            }],
+        };
+        let mut server = WatchdogServer::default();
+        server.cache_full_state(&state);
+
+        let response = server.apply_delta(SessionLaunchDelta {
+            profile_id: "demo".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 2,
+            replace: false,
+            components: vec![SessionLaunchComponentState {
+                id: "wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                command: vec!["wm".into()],
+                resolved_command: Some("/usr/bin/wm".into()),
+                state: DesktopComponentState::Failed,
+                pid: None,
+                restart_count: 3,
+                last_exit_status: Some(1),
+            }],
+        });
+
+        match response {
+            super::StateUpdateOutcome::Ignored { state, reason } => {
+                assert_eq!(state.sequence, 3);
+                assert_eq!(state.components[0].state, DesktopComponentState::Spawned);
+                assert!(reason.contains("not newer"));
+            }
+            other => panic!("expected stale delta to be ignored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn requests_resync_when_sequence_gap_is_detected() {
+        let state = SessionLaunchState {
+            profile_id: "demo".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 1,
+            components: vec![SessionLaunchComponentState {
+                id: "wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                command: vec!["wm".into()],
+                resolved_command: Some("/usr/bin/wm".into()),
+                state: DesktopComponentState::Spawned,
+                pid: Some(10),
+                restart_count: 0,
+                last_exit_status: None,
+            }],
+        };
+        let mut server = WatchdogServer::default();
+        server.cache_full_state(&state);
+
+        let response = server.apply_delta(SessionLaunchDelta {
+            profile_id: "demo".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 3,
+            replace: false,
+            components: vec![SessionLaunchComponentState {
+                id: "wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                command: vec!["wm".into()],
+                resolved_command: Some("/usr/bin/wm".into()),
+                state: DesktopComponentState::Failed,
+                pid: None,
+                restart_count: 1,
+                last_exit_status: Some(1),
+            }],
+        });
+
+        match response {
+            super::StateUpdateOutcome::Resync { profile_id, reason } => {
+                assert_eq!(profile_id, "demo");
+                assert!(reason.contains("sequence gap"));
+            }
+            other => panic!("expected resync for sequence gap, got {other:?}"),
         }
     }
 }
