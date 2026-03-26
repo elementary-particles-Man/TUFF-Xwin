@@ -49,10 +49,21 @@ echo
 echo "==> cargo run -p waylandd -- --require-displayd"
 cargo run -p waylandd -- --require-displayd
 
+echo
+echo "==> cargo run -p compd -- --commit-demo"
+cargo run -p compd -- --commit-demo
+
 wait "$displayd_pid"
 unset displayd_pid
 
-for pkg in "${packages[@]}"; do
+echo
+echo "==> cargo run -p lockd -- --serve-ipc --once"
+cargo run -p lockd -- --serve-ipc --once &
+sleep 1
+python3 -c 'import socket; s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect("'"$runtime_dir"'/lockd.sock"); s.sendall(b"{\"source\":\"sessiond\",\"destination\":\"lockd\",\"kind\":{\"kind\":\"lock-command\",\"payload\":{\"op\":\"set-lock-state\",\"state\":\"locked\"}}}\n")'
+wait $!
+
+for pkg in sessiond watchdog; do
   echo
   echo "==> cargo run -p $pkg"
   cargo run -p "$pkg"

@@ -17,3 +17,5 @@ jobs:
         run: cargo check --workspace
       - name: Test
         run: cargo test --workspace
+      - name: E2E Smoke Test
+        run: ./scripts/smoke-test.sh
