@@ -15,7 +15,7 @@ use waybroker_common::{
     MessageKind, ServiceBanner, ServiceRole, SessionCommand, SessionLaunchComponentState,
     SessionLaunchDelta, SessionLaunchState, SessionProfileTransition, SessionWatchdogReport,
     WatchdogCommand, bind_service_socket, connect_service_socket, ensure_runtime_dir,
-    read_json_line, runtime_dir, send_json_line,
+    now_unix_timestamp, read_json_line, runtime_dir, send_json_line,
 };
 
 fn main() -> Result<()> {
@@ -28,12 +28,16 @@ fn main() -> Result<()> {
         "lid, idle, suspend, session policy, desktop profile manager",
     );
     println!("{}", banner.render());
-    println!("sessiond profiles_dir={} loaded_profiles={}", profiles_dir.display(), profiles.len());
+    println!(
+        "service=sessiond op=load_profiles dir={} count={}",
+        profiles_dir.display(),
+        profiles.len()
+    );
 
     if config.list_profiles || config.selected_profile_id.is_none() {
         for profile in &profiles {
             println!(
-                "sessiond profile id={} protocol={} name={} summary={}",
+                "service=sessiond op=profile_entry id={} protocol={} name=\"{}\" summary=\"{}\"",
                 profile.id,
                 profile.protocol.as_str(),
                 profile.display_name,
@@ -50,7 +54,7 @@ fn main() -> Result<()> {
         let plan = profile.launch_plan();
 
         println!(
-            "sessiond selected_profile id={} protocol={} components={}",
+            "service=sessiond op=select_profile id={} protocol={} components={}",
             profile.id,
             profile.protocol.as_str(),
             profile.session_components.len()
@@ -58,12 +62,12 @@ fn main() -> Result<()> {
 
         if config.print_launch_plan {
             for service in &plan.broker_services {
-                println!("sessiond broker service={}", service.as_str());
+                println!("service=sessiond op=broker_service id={}", service.as_str());
             }
 
             for component in &plan.session_components {
                 println!(
-                    "sessiond component id={} role={:?} critical={} command={}",
+                    "service=sessiond op=component_entry id={} role={:?} critical={} command=\"{}\"",
                     component.id,
                     component.role,
                     component.critical,
@@ -74,7 +78,7 @@ fn main() -> Result<()> {
 
         if config.write_selection {
             let state_path = write_active_profile(profile)?;
-            println!("sessiond wrote_active_profile={}", state_path.display());
+            println!("service=sessiond op=write_active_profile path={}", state_path.display());
         }
     }
 
@@ -87,7 +91,7 @@ fn main() -> Result<()> {
         let state_path = write_launch_state(&launch_state)?;
 
         print_launch_state(&launch_state);
-        println!("sessiond wrote_launch_state={}", state_path.display());
+        println!("service=sessiond op=write_launch_state path={}", state_path.display());
     }
 
     if config.launch_active {
@@ -96,7 +100,7 @@ fn main() -> Result<()> {
         let state_path = write_launch_state(&launch_state)?;
 
         print_launch_state(&launch_state);
-        println!("sessiond wrote_launch_state={}", state_path.display());
+        println!("service=sessiond op=write_launch_state path={}", state_path.display());
     }
 
     if config.apply_watchdog_active {
@@ -530,6 +534,7 @@ fn build_launch_state(
         generation: 1,
         sequence: 1,
         components,
+        unix_timestamp: now_unix_timestamp(),
     })
 }
 
@@ -570,6 +575,7 @@ fn supervise_launch_state(
         generation: 1,
         sequence: 1,
         components: components.into_iter().map(|component| component.state).collect(),
+        unix_timestamp: now_unix_timestamp(),
     })
 }
 
@@ -748,11 +754,12 @@ fn print_launch_state(state: &SessionLaunchState) {
 
 fn print_profile_transition(transition: &SessionProfileTransition) {
     println!(
-        "sessiond profile_transition from={} to={} reason={} triggers={}",
+        "service=sessiond op=profile_transition event=transition_begin from={} to={} reason=\"{}\" triggers={} timestamp={}",
         transition.source_profile_id,
         transition.target_profile_id,
         transition.reason,
-        transition.trigger_component_ids.join(",")
+        transition.trigger_component_ids.join(","),
+        transition.unix_timestamp,
     );
 }
 
@@ -802,6 +809,7 @@ fn apply_watchdog_report(
         target_display_name: target_profile.display_name.clone(),
         reason: "watchdog requested degraded profile switch".into(),
         trigger_component_ids,
+        unix_timestamp: now_unix_timestamp(),
     };
 
     Ok(WatchdogApplyOutcome::Transition { target_profile, transition })
@@ -827,8 +835,8 @@ fn persist_watchdog_apply_outcome(
             let transition_path = write_profile_transition(transition)?;
 
             print_profile_transition(transition);
-            println!("sessiond wrote_active_profile={}", active_path.display());
-            println!("sessiond wrote_profile_transition={}", transition_path.display());
+            println!("service=sessiond op=persist_outcome event=write_active_profile path={}", active_path.display());
+            println!("service=sessiond op=persist_outcome event=write_profile_transition path={}", transition_path.display());
 
             if let Some(supervisor) = supervisor {
                 supervisor.switch_to(target_profile.clone(), config)?;
@@ -836,8 +844,8 @@ fn persist_watchdog_apply_outcome(
                 let launch_state = launch_state_for_profile(target_profile, config)?;
                 let state_path = write_launch_state(&launch_state)?;
                 print_launch_state(&launch_state);
-                println!("sessiond auto_launched_profile={}", target_profile.id);
-                println!("sessiond wrote_launch_state={}", state_path.display());
+                println!("service=sessiond op=persist_outcome event=auto_launch_profile id={}", target_profile.id);
+                println!("service=sessiond op=persist_outcome event=write_launch_state path={}", state_path.display());
             }
 
             Ok(SessionCommand::ProfileTransition { transition: transition.clone() })
@@ -934,6 +942,7 @@ fn watchdog_stream_command(
                 sequence: state.sequence,
                 replace: true,
                 components: state.components.clone(),
+                unix_timestamp: now_unix_timestamp(),
             },
         };
     }
@@ -961,6 +970,7 @@ fn watchdog_stream_command(
             sequence: state.sequence,
             replace: false,
             components: changed_components,
+            unix_timestamp: now_unix_timestamp(),
         },
     }
 }
@@ -1054,7 +1064,7 @@ impl SessionSupervisor {
         let next_generation = self.stream_generation.saturating_add(1);
         *self = Self::new(profile, profiles, next_generation, config)?;
         self.activate(config)?;
-        println!("sessiond auto_launched_profile={}", self.profile.id);
+        println!("service=sessiond op=profile_transition event=transition_complete profile={} generation={}", self.profile.id, self.stream_generation);
         Ok(())
     }
 
@@ -1093,6 +1103,7 @@ impl SessionSupervisor {
             generation: self.stream_generation,
             sequence: self.stream_sequence,
             components: self.components.iter().map(|component| component.state.clone()).collect(),
+            unix_timestamp: now_unix_timestamp(),
         }
     }
 
@@ -1100,8 +1111,8 @@ impl SessionSupervisor {
         let launch_state = self.snapshot();
         let state_path = write_launch_state(&launch_state)?;
         print_launch_state(&launch_state);
-        println!("sessiond {}={}", label, self.profile.id);
-        println!("sessiond wrote_launch_state={}", state_path.display());
+        println!("service=sessiond op=snapshot event={} profile={} timestamp={}", label, self.profile.id, launch_state.unix_timestamp);
+        println!("service=sessiond op=snapshot path={}", state_path.display());
 
         if should_notify_watchdog(config) {
             match notify_watchdog(&launch_state, self.last_streamed_state.as_ref()) {
@@ -1462,6 +1473,7 @@ mod tests {
                 restart_count: 0,
                 last_exit_status: None,
             }],
+            unix_timestamp: 0,
         };
         let next = SessionLaunchState {
             profile_id: "demo-x11".into(),
@@ -1481,6 +1493,7 @@ mod tests {
                 restart_count: 3,
                 last_exit_status: Some(1),
             }],
+            unix_timestamp: 0,
         };
 
         let command = watchdog_stream_command(&next, Some(&previous));
@@ -1518,6 +1531,7 @@ mod tests {
                 restart_count: 0,
                 last_exit_status: None,
             }],
+            unix_timestamp: 0,
         };
         let next = SessionLaunchState {
             profile_id: "demo-x11-degraded".into(),
@@ -1537,6 +1551,7 @@ mod tests {
                 restart_count: 0,
                 last_exit_status: None,
             }],
+            unix_timestamp: 0,
         };
 
         let command = watchdog_stream_command(&next, Some(&previous));

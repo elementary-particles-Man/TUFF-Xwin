@@ -18,6 +18,13 @@ pub use transport::{
     send_json_line, service_socket_path,
 };
 
+pub fn now_unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs()
+}
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +231,7 @@ mod tests {
                         restart_count: 0,
                         last_exit_status: None,
                     }],
+                    unix_timestamp: 0,
                 },
             }),
         );
@@ -260,6 +268,7 @@ mod tests {
                         restart_count: 3,
                         last_exit_status: Some(1),
                     }],
+                    unix_timestamp: 0,
                 },
             }),
         );

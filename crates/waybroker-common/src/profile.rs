@@ -152,6 +152,7 @@ pub struct SessionLaunchState {
     #[serde(default = "default_stream_sequence")]
     pub sequence: u64,
     pub components: Vec<SessionLaunchComponentState>,
+    pub unix_timestamp: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +167,7 @@ pub struct SessionLaunchDelta {
     pub sequence: u64,
     pub replace: bool,
     pub components: Vec<SessionLaunchComponentState>,
+    pub unix_timestamp: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +227,7 @@ pub struct SessionWatchdogReport {
     pub unhealthy_components: usize,
     pub inactive_components: usize,
     pub components: Vec<SessionWatchdogComponentReport>,
+    pub unix_timestamp: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +238,7 @@ pub struct SessionProfileTransition {
     pub target_display_name: String,
     pub reason: String,
     pub trigger_component_ids: Vec<String>,
+    pub unix_timestamp: u64,
 }
 
 #[cfg(test)]

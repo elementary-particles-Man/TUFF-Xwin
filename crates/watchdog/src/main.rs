@@ -11,8 +11,8 @@ use waybroker_common::{
     DesktopComponentState, DesktopHealthStatus, DesktopRecoveryAction, IpcEnvelope, MessageKind,
     ServiceBanner, ServiceRole, SessionCommand, SessionLaunchComponentState, SessionLaunchDelta,
     SessionLaunchState, SessionWatchdogComponentReport, SessionWatchdogReport, WatchdogCommand,
-    bind_service_socket, connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir,
-    send_json_line,
+    bind_service_socket, connect_service_socket, ensure_runtime_dir, now_unix_timestamp,
+    read_json_line, runtime_dir, send_json_line,
 };
 
 fn main() -> Result<()> {
@@ -37,7 +37,7 @@ fn main() -> Result<()> {
 
         if config.write_reports {
             let report_path = write_report(&report)?;
-            println!("watchdog wrote_report={}", report_path.display());
+            println!("service=watchdog op=write_report path={}", report_path.display());
         }
 
         if config.notify_sessiond {
@@ -301,6 +301,7 @@ impl WatchdogServer {
             sequence,
             replace,
             components,
+            ..
         } = delta;
 
         let Some(current) = self.cached_states.get(&profile_id).cloned() else {
@@ -365,6 +366,7 @@ impl WatchdogServer {
                 generation,
                 sequence,
                 components,
+                unix_timestamp: now_unix_timestamp(),
             }
         } else {
             let mut state = current;
@@ -373,6 +375,7 @@ impl WatchdogServer {
             state.broker_services = broker_services;
             state.generation = generation;
             state.sequence = sequence;
+            state.unix_timestamp = now_unix_timestamp();
 
             for component in components {
                 if let Some(existing) =
@@ -463,6 +466,7 @@ fn inspect_launch_state(state: &SessionLaunchState) -> SessionWatchdogReport {
         unhealthy_components,
         inactive_components,
         components,
+        unix_timestamp: now_unix_timestamp(),
     }
 }
 
@@ -545,18 +549,19 @@ fn write_report(report: &SessionWatchdogReport) -> Result<PathBuf> {
 
 fn print_report(state: &SessionLaunchState, report: &SessionWatchdogReport) {
     println!(
-        "watchdog profile={} generation={} sequence={} healthy={} unhealthy={} inactive={}",
+        "service=watchdog op=report profile={} generation={} sequence={} healthy={} unhealthy={} inactive={} timestamp={}",
         report.profile_id,
         state.generation,
         state.sequence,
         report.healthy_components,
         report.unhealthy_components,
-        report.inactive_components
+        report.inactive_components,
+        report.unix_timestamp,
     );
 
     for component in &report.components {
         println!(
-            "watchdog component id={} role={} critical={} status={} pid={} crashes={} action={} reason={}",
+            "service=watchdog op=component_status id={} role={} critical={} status={} pid={} crashes={} action={} reason=\"{}\"",
             component.id,
             component.role.as_str(),
             component.critical,
@@ -588,7 +593,7 @@ fn print_sessiond_response(response: &IpcEnvelope) {
     match &response.kind {
         MessageKind::SessionCommand(SessionCommand::ProfileTransition { transition }) => {
             println!(
-                "watchdog sessiond_response from={} to={} reason={} triggers={}",
+                "service=watchdog op=sessiond_response event=profile_transition from={} to={} reason=\"{}\" triggers={}",
                 transition.source_profile_id,
                 transition.target_profile_id,
                 transition.reason,
@@ -597,13 +602,12 @@ fn print_sessiond_response(response: &IpcEnvelope) {
         }
         MessageKind::SessionCommand(SessionCommand::ProfileUnchanged { profile_id, reason }) => {
             println!(
-                "watchdog sessiond_response profile={} unchanged_reason={}",
-                profile_id, reason
+                "service=watchdog op=sessiond_response event=profile_unchanged profile={} reason=\"{}\"",
+                profile_id,
+                reason
             );
         }
-        other => {
-            println!("watchdog sessiond_response unexpected={other:?}");
-        }
+        other => println!("service=watchdog op=sessiond_response event=unknown kind={:?}", other),
     }
 }
 
@@ -658,6 +662,7 @@ mod tests {
                 restart_count: 0,
                 last_exit_status: None,
             }],
+            unix_timestamp: 0,
         };
 
         let report = inspect_launch_state(&state);
@@ -687,6 +692,7 @@ mod tests {
                 restart_count: 0,
                 last_exit_status: None,
             }],
+            unix_timestamp: 0,
         };
 
         let report = inspect_launch_state(&state);
@@ -729,6 +735,7 @@ mod tests {
                     last_exit_status: None,
                 },
             ],
+            unix_timestamp: 0,
         };
         let mut server = WatchdogServer::default();
         server.cache_full_state(&state);
@@ -752,6 +759,7 @@ mod tests {
                 restart_count: 3,
                 last_exit_status: Some(1),
             }],
+            unix_timestamp: 0,
         }) {
             StateUpdateOutcome::Accepted(state) => state,
             other => panic!("expected merged delta state, got {other:?}"),
@@ -793,6 +801,7 @@ mod tests {
                         restart_count: 3,
                         last_exit_status: Some(1),
                     }],
+                    unix_timestamp: 0,
                 },
             },
             ServiceRole::Sessiond,
@@ -830,6 +839,7 @@ mod tests {
                 restart_count: 0,
                 last_exit_status: None,
             }],
+            unix_timestamp: 0,
         };
         let mut server = WatchdogServer::default();
         server.cache_full_state(&state);
@@ -853,6 +863,7 @@ mod tests {
                 restart_count: 3,
                 last_exit_status: Some(1),
             }],
+            unix_timestamp: 0,
         });
 
         match response {
@@ -885,6 +896,7 @@ mod tests {
                 restart_count: 0,
                 last_exit_status: None,
             }],
+            unix_timestamp: 0,
         };
         let mut server = WatchdogServer::default();
         server.cache_full_state(&state);
@@ -908,6 +920,7 @@ mod tests {
                 restart_count: 1,
                 last_exit_status: Some(1),
             }],
+            unix_timestamp: 0,
         });
 
         match response {
