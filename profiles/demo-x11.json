@@ -1,0 +1,32 @@
+{
+  "id": "demo-x11",
+  "display_name": "Demo Desktop on LeyerX11",
+  "protocol": "layer-x11",
+  "summary": "repo 内の mock component を使って launch / watchdog を確認する demo profile。",
+  "broker_services": [
+    "displayd",
+    "sessiond",
+    "watchdog",
+    "x11bridge"
+  ],
+  "session_components": [
+    {
+      "id": "demo-x11bridge",
+      "role": "compat-layer",
+      "command": ["./scripts/mock-desktop-component.sh", "--component", "demo-x11bridge", "--hold-seconds", "20"],
+      "critical": true
+    },
+    {
+      "id": "demo-wm",
+      "role": "window-manager",
+      "command": ["./scripts/mock-desktop-component.sh", "--component", "demo-wm", "--hold-seconds", "20"],
+      "critical": true
+    },
+    {
+      "id": "demo-panel",
+      "role": "panel",
+      "command": ["./scripts/mock-desktop-component.sh", "--component", "demo-panel", "--hold-seconds", "20"],
+      "critical": false
+    }
+  ]
+}

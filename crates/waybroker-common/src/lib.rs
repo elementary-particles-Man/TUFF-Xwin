@@ -8,7 +8,9 @@ pub use ipc::{
     SurfaceSnapshot, WatchdogCommand,
 };
 pub use profile::{
-    DesktopComponent, DesktopComponentRole, DesktopProfile, DesktopProtocol, SessionLaunchPlan,
+    DesktopComponent, DesktopComponentRole, DesktopComponentState, DesktopHealthStatus,
+    DesktopProfile, DesktopProtocol, SessionLaunchComponentState, SessionLaunchPlan,
+    SessionLaunchState, SessionWatchdogComponentReport, SessionWatchdogReport,
 };
 pub use transport::{
     bind_service_socket, connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir,

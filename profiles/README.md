@@ -11,7 +11,11 @@
 
 ## 現在の profile
 
+- `demo-x11.json`
 - `xfce-x11.json`
 - `openbox-x11.json`
 
-どちらも `LeyerX11` の `x11bridge` を互換層として前提にする rootless `X11` profile です。
+- `demo-x11`
+  - repo 内の mock component を使う launch / watchdog 検証用 profile
+- `xfce-x11`, `openbox-x11`
+  - 実際の package 導入を前提にする rootless `X11` profile

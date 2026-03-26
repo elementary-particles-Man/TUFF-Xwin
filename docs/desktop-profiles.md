@@ -42,6 +42,17 @@
 - profile manifest を列挙する
 - user が選んだ profile を active state として保持する
 - どの broker service と GUI component が必要かを launch plan として出す
+- command の解決状態を launch state として記録する
+
+launch state は次の用途に使います。
+
+- GUI package が未導入かどうかを切り分ける
+- critical component が欠けている profile を boot 前に検出する
+- 将来 `watchdog` が「どの GUI component を監視するか」を知る
+
+初期実装では `sessiond` が `active-profile.json` と `launch-state-<profile>.json` を runtime dir へ書きます。
+
+`watchdog` は `launch-state-<profile>.json` を読み、各 component を `healthy / unhealthy / inactive` で分類します。これにより、`xfwm4` が落ちたのか、単に未導入なのか、まだ起動していないだけなのかを分けられます。
 
 ## Failure Boundary
 
