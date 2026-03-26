@@ -36,6 +36,7 @@ pub enum DisplayCommand {
     SetMode { output: String, mode: OutputMode },
     CommitScene { target: CommitTarget, focus: FocusTarget, surfaces: Vec<SurfaceSnapshot> },
     SecureBlank { output: Option<String> },
+    ResumeBegin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +47,7 @@ pub enum DisplayEvent {
     SceneCommitted { target: CommitTarget, focus: FocusTarget, surface_count: usize },
     BlankApplied { output: Option<String> },
     Rejected { reason: String },
+    ResumeStarted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

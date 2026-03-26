@@ -50,4 +50,19 @@ cargo run -p sessiond -- --select-profile demo-x11 --write-selection --launch-ac
 echo "==> Running watchdog inspection"
 cargo run -p watchdog -- --profile-id demo-x11 --write-reports
 
+# 7. Verify resume sequence orchestration
+echo "==> Starting services for resume test"
+cargo run -p displayd &
+displayd_pid=$!
+cargo run -p compd -- --serve-ipc --once &
+compd_pid=$!
+cargo run -p lockd -- --serve-ipc &
+lockd_pid=$!
+sleep 2
+
+echo "==> Running sessiond --resume-demo"
+cargo run -p sessiond -- --resume-demo
+
+kill "$displayd_pid" "$lockd_pid" 2>/dev/null || true
+
 echo "==> Smoke test PASSED"

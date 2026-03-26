@@ -1,10 +1,15 @@
-use std::{env, io::BufReader};
+use std::{
+    env, fs,
+    io::BufReader,
+    os::unix::net::UnixStream,
+    path::PathBuf,
+};
 
 use anyhow::{Result, bail};
 use waybroker_common::{
     CommitTarget, DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope, MessageKind,
-    ServiceBanner, ServiceRole, SurfacePlacement, SurfaceSnapshot, connect_service_socket,
-    read_json_line, send_json_line,
+    ServiceBanner, ServiceRole, SurfacePlacement, SurfaceSnapshot, bind_service_socket,
+    connect_service_socket, read_json_line, send_json_line,
 };
 
 fn main() -> Result<()> {
@@ -12,7 +17,9 @@ fn main() -> Result<()> {
     let banner = ServiceBanner::new(ServiceRole::Compd, "scene, focus, composition policy");
     println!("{}", banner.render());
 
-    if config.commit_demo {
+    if config.serve_ipc {
+        serve_ipc(&config)?;
+    } else if config.commit_demo {
         let scene = mock_demo_scene();
         println!(
             "compd demo_scene focus={:?} surfaces={}",
@@ -23,7 +30,7 @@ fn main() -> Result<()> {
         let committed = commit_scene_to_displayd(&scene)?;
         println!("compd committed_surfaces={committed}");
     } else {
-        println!("compd state=idle (use --commit-demo to trigger mock scene)");
+        println!("compd state=idle (use --serve-ipc to start composition service)");
     }
 
     Ok(())
@@ -32,6 +39,8 @@ fn main() -> Result<()> {
 #[derive(Debug, Default)]
 struct Config {
     commit_demo: bool,
+    serve_ipc: bool,
+    serve_once: bool,
 }
 
 impl Config {
@@ -41,8 +50,10 @@ impl Config {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--commit-demo" => config.commit_demo = true,
+                "--serve-ipc" => config.serve_ipc = true,
+                "--once" => config.serve_once = true,
                 "--help" | "-h" => {
-                    println!("usage: compd [--commit-demo]");
+                    println!("usage: compd [--commit-demo] [--serve-ipc] [--once]");
                     std::process::exit(0);
                 }
                 _ => bail!("unknown argument: {arg}"),
@@ -50,6 +61,77 @@ impl Config {
         }
 
         Ok(config)
+    }
+}
+
+fn serve_ipc(config: &Config) -> Result<()> {
+    let (listener, socket_path) = bind_service_socket(ServiceRole::Compd)?;
+    let _socket_guard = SocketGuard::new(socket_path.clone());
+    println!("compd listening socket={}", socket_path.display());
+
+    let mut served = 0usize;
+    for stream in listener.incoming() {
+        let stream = stream?;
+        handle_client(stream)?;
+        served += 1;
+
+        if config.serve_once {
+            break;
+        }
+    }
+
+    println!("compd served_requests={served}");
+    Ok(())
+}
+
+fn handle_client(mut stream: UnixStream) -> Result<()> {
+    let request: IpcEnvelope = {
+        let mut reader = BufReader::new(stream.try_clone()?);
+        read_json_line(&mut reader)?
+    };
+
+    let response = build_response(request);
+    send_json_line(&mut stream, &response)?;
+    Ok(())
+}
+
+fn build_response(request: IpcEnvelope) -> IpcEnvelope {
+    let source = request.source;
+    let response_kind = match request.kind {
+        MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint { stage, output })
+            if request.destination == ServiceRole::Compd =>
+        {
+            println!("compd resume_hint stage={:?} output={:?}", stage, output);
+            MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
+                stage,
+                output,
+            })
+        }
+        MessageKind::LockCommand(waybroker_common::LockCommand::SetLockState { state }) => {
+            println!("compd lock_state_hint state={:?}", state);
+            MessageKind::LockCommand(waybroker_common::LockCommand::SetLockState { state })
+        }
+        other => MessageKind::SessionCommand(waybroker_common::SessionCommand::DegradedMode {
+            reason: format!("compd does not handle {other:?}"),
+        }),
+    };
+
+    IpcEnvelope::new(ServiceRole::Compd, source, response_kind)
+}
+
+struct SocketGuard {
+    path: PathBuf,
+}
+
+impl SocketGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }
 

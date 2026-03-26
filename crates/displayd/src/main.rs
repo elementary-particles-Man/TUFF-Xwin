@@ -94,6 +94,7 @@ fn handle_display_command(command: DisplayCommand) -> DisplayEvent {
             DisplayEvent::SceneCommitted { target, focus, surface_count: surfaces.len() }
         }
         DisplayCommand::SecureBlank { output } => DisplayEvent::BlankApplied { output },
+        DisplayCommand::ResumeBegin => DisplayEvent::ResumeStarted,
     }
 }
 

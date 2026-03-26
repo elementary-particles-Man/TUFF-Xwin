@@ -106,6 +106,10 @@ fn main() -> Result<()> {
         let _ = persist_watchdog_apply_outcome(&outcome, &config, None)?;
     }
 
+    if config.resume_demo {
+        run_resume_demo(&config)?;
+    }
+
     if config.serve_ipc {
         serve_ipc(&config, &profiles)?;
     }
@@ -132,6 +136,7 @@ struct Config {
     serve_once: bool,
     manage_active: bool,
     notify_watchdog: bool,
+    resume_demo: bool,
 }
 
 impl Default for Config {
@@ -154,6 +159,7 @@ impl Default for Config {
             serve_once: false,
             manage_active: false,
             notify_watchdog: false,
+            resume_demo: false,
         }
     }
 }
@@ -194,6 +200,7 @@ impl Config {
                 "--once" => config.serve_once = true,
                 "--manage-active" => config.manage_active = true,
                 "--notify-watchdog" => config.notify_watchdog = true,
+                "--resume-demo" => config.resume_demo = true,
                 "--supervise-seconds" => {
                     let value = args.next().context("--supervise-seconds requires a number")?;
                     config.supervise_seconds = value
@@ -208,7 +215,7 @@ impl Config {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: sessiond [--repo-root PATH] [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N] [--apply-watchdog-active] [--watchdog-report PATH] [--serve-ipc] [--once] [--manage-active] [--notify-watchdog]"
+                        "usage: sessiond [--repo-root PATH] [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N] [--apply-watchdog-active] [--watchdog-report PATH] [--serve-ipc] [--once] [--manage-active] [--notify-watchdog] [--resume-demo]"
                     );
                     std::process::exit(0);
                 }
@@ -306,6 +313,76 @@ fn read_watchdog_report(
         .with_context(|| format!("failed to read watchdog report {}", path.display()))?;
     serde_json::from_str(&raw)
         .with_context(|| format!("failed to decode watchdog report {}", path.display()))
+}
+
+fn run_resume_demo(_config: &Config) -> Result<()> {
+    println!("sessiond resume_sequence=begin");
+
+    // 1. sessiond -> displayd (ResumeBegin)
+    let response = send_ipc_and_wait(
+        ServiceRole::Displayd,
+        MessageKind::DisplayCommand(waybroker_common::DisplayCommand::ResumeBegin),
+    )?;
+    println!("sessiond resume_sequence=displayd_started response={:?}", response.kind);
+
+    // 2. sessiond -> lockd (SetLockState Locked)
+    let response = send_ipc_and_wait(
+        ServiceRole::Lockd,
+        MessageKind::LockCommand(waybroker_common::LockCommand::SetLockState {
+            state: waybroker_common::LockState::Locked,
+        }),
+    )?;
+    println!("sessiond resume_sequence=lockd_locked response={:?}", response.kind);
+
+    // 3. sessiond -> compd (ResumeHint OutputsRecovered)
+    let response = send_ipc_and_wait(
+        ServiceRole::Compd,
+        MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
+            stage: waybroker_common::ResumeStage::OutputsRecovered,
+            output: Some(waybroker_common::OutputMode {
+                name: "eDP-1".into(),
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+            }),
+        }),
+    )?;
+    println!(
+        "sessiond resume_sequence=compd_outputs_recovered response={:?}",
+        response.kind
+    );
+
+    // 4. sessiond -> lockd (AuthPrompt)
+    let response = send_ipc_and_wait(
+        ServiceRole::Lockd,
+        MessageKind::LockCommand(waybroker_common::LockCommand::AuthPrompt {
+            reason: "resume auth required".into(),
+        }),
+    )?;
+    println!("sessiond resume_sequence=lockd_auth_prompt response={:?}", response.kind);
+
+    // 5. sessiond -> compd (ResumeHint Complete)
+    let response = send_ipc_and_wait(
+        ServiceRole::Compd,
+        MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
+            stage: waybroker_common::ResumeStage::Complete,
+            output: None,
+        }),
+    )?;
+    println!("sessiond resume_sequence=compd_complete response={:?}", response.kind);
+
+    println!("sessiond resume_sequence=finished");
+    Ok(())
+}
+
+fn send_ipc_and_wait(destination: ServiceRole, kind: MessageKind) -> Result<IpcEnvelope> {
+    let mut stream = connect_service_socket(destination)?;
+    let request = IpcEnvelope::new(ServiceRole::Sessiond, destination, kind);
+    send_json_line(&mut stream, &request)?;
+
+    let mut reader = BufReader::new(stream);
+    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    Ok(response)
 }
 
 fn serve_ipc(config: &Config, profiles: &[DesktopProfile]) -> Result<()> {
