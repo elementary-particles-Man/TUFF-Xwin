@@ -13,8 +13,9 @@ use anyhow::{Context, Result, bail};
 use waybroker_common::{
     DesktopComponent, DesktopComponentState, DesktopProfile, DesktopRecoveryAction, IpcEnvelope,
     MessageKind, ServiceBanner, ServiceRole, SessionCommand, SessionLaunchComponentState,
-    SessionLaunchState, SessionProfileTransition, SessionWatchdogReport, bind_service_socket,
-    ensure_runtime_dir, read_json_line, runtime_dir, send_json_line,
+    SessionLaunchState, SessionProfileTransition, SessionWatchdogReport, WatchdogCommand,
+    bind_service_socket, connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir,
+    send_json_line,
 };
 
 fn main() -> Result<()> {
@@ -129,6 +130,7 @@ struct Config {
     serve_ipc: bool,
     serve_once: bool,
     manage_active: bool,
+    notify_watchdog: bool,
 }
 
 impl Default for Config {
@@ -149,6 +151,7 @@ impl Default for Config {
             serve_ipc: false,
             serve_once: false,
             manage_active: false,
+            notify_watchdog: false,
         }
     }
 }
@@ -184,6 +187,7 @@ impl Config {
                 "--serve-ipc" => config.serve_ipc = true,
                 "--once" => config.serve_once = true,
                 "--manage-active" => config.manage_active = true,
+                "--notify-watchdog" => config.notify_watchdog = true,
                 "--supervise-seconds" => {
                     let value = args.next().context("--supervise-seconds requires a number")?;
                     config.supervise_seconds = value
@@ -198,7 +202,7 @@ impl Config {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: sessiond [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N] [--apply-watchdog-active] [--watchdog-report PATH] [--serve-ipc] [--once] [--manage-active]"
+                        "usage: sessiond [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N] [--apply-watchdog-active] [--watchdog-report PATH] [--serve-ipc] [--once] [--manage-active] [--notify-watchdog]"
                     );
                     std::process::exit(0);
                 }
@@ -298,8 +302,11 @@ fn serve_ipc(config: &Config, profiles: &[DesktopProfile]) -> Result<()> {
         .with_context(|| format!("failed to set nonblocking mode on {}", socket_path.display()))?;
     println!("sessiond listening socket={}", socket_path.display());
 
-    let mut supervisor =
-        if config.manage_active { Some(SessionSupervisor::bootstrap(config)?) } else { None };
+    let mut supervisor = if config.manage_active {
+        Some(SessionSupervisor::bootstrap(config, profiles)?)
+    } else {
+        None
+    };
 
     let mut served = 0usize;
     loop {
@@ -718,6 +725,39 @@ fn should_auto_launch_transition(config: &Config) -> bool {
     config.spawn_components || config.supervise_seconds > 0
 }
 
+fn should_notify_watchdog(config: &Config) -> bool {
+    config.notify_watchdog
+}
+
+fn notify_watchdog(state: &SessionLaunchState) -> Result<SessionWatchdogReport> {
+    let mut stream = connect_service_socket(ServiceRole::Watchdog)?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Sessiond,
+        ServiceRole::Watchdog,
+        MessageKind::WatchdogCommand(WatchdogCommand::InspectLaunchState { state: state.clone() }),
+    );
+
+    send_json_line(&mut stream, &request)?;
+
+    let mut reader = BufReader::new(stream);
+    let response: IpcEnvelope = read_json_line(&mut reader)?;
+
+    match response.kind {
+        MessageKind::WatchdogCommand(WatchdogCommand::InspectionResult { report }) => Ok(report),
+        other => bail!("watchdog returned unexpected response: {other:?}"),
+    }
+}
+
+fn print_watchdog_stream_report(report: &SessionWatchdogReport) {
+    println!(
+        "sessiond watchdog_stream profile={} healthy={} unhealthy={} inactive={}",
+        report.profile_id,
+        report.healthy_components,
+        report.unhealthy_components,
+        report.inactive_components
+    );
+}
+
 enum WatchdogApplyOutcome {
     Transition { target_profile: DesktopProfile, transition: SessionProfileTransition },
     Unchanged { profile_id: String, reason: String },
@@ -740,25 +780,26 @@ impl Drop for SocketGuard {
 }
 
 struct SessionSupervisor {
+    profiles: Vec<DesktopProfile>,
     profile: DesktopProfile,
     components: Vec<RuntimeComponent>,
 }
 
 impl SessionSupervisor {
-    fn bootstrap(config: &Config) -> Result<Self> {
+    fn bootstrap(config: &Config, profiles: &[DesktopProfile]) -> Result<Self> {
         let profile = read_active_profile()?;
-        let mut supervisor = Self::new(profile)?;
+        let mut supervisor = Self::new(profile, profiles.to_vec())?;
         supervisor.activate(config)?;
         Ok(supervisor)
     }
 
-    fn new(profile: DesktopProfile) -> Result<Self> {
+    fn new(profile: DesktopProfile, profiles: Vec<DesktopProfile>) -> Result<Self> {
         let mut components = Vec::with_capacity(profile.session_components.len());
         for component in &profile.session_components {
             components.push(RuntimeComponent::new(component)?);
         }
 
-        Ok(Self { profile, components })
+        Ok(Self { profiles, profile, components })
     }
 
     fn profile(&self) -> DesktopProfile {
@@ -772,12 +813,13 @@ impl SessionSupervisor {
             }
         }
 
-        self.write_snapshot("managed_active_profile")
+        self.write_snapshot("managed_active_profile", config)
     }
 
     fn switch_to(&mut self, profile: DesktopProfile, config: &Config) -> Result<()> {
         self.stop_all()?;
-        *self = Self::new(profile)?;
+        let profiles = self.profiles.clone();
+        *self = Self::new(profile, profiles)?;
         self.activate(config)?;
         println!("sessiond auto_launched_profile={}", self.profile.id);
         Ok(())
@@ -793,7 +835,7 @@ impl SessionSupervisor {
         }
 
         if had_event {
-            self.write_snapshot("managed_runtime_update")?;
+            self.write_snapshot("managed_runtime_update", config)?;
         }
 
         Ok(had_event)
@@ -817,12 +859,50 @@ impl SessionSupervisor {
         }
     }
 
-    fn write_snapshot(&self, label: &str) -> Result<()> {
+    fn write_snapshot(&mut self, label: &str, config: &Config) -> Result<()> {
         let launch_state = self.snapshot();
         let state_path = write_launch_state(&launch_state)?;
         print_launch_state(&launch_state);
         println!("sessiond {}={}", label, self.profile.id);
         println!("sessiond wrote_launch_state={}", state_path.display());
+
+        if should_notify_watchdog(config) {
+            match notify_watchdog(&launch_state) {
+                Ok(report) => {
+                    print_watchdog_stream_report(&report);
+                    self.apply_watchdog_stream_report(&report, config)?;
+                }
+                Err(err) => {
+                    println!(
+                        "sessiond watchdog_stream_failed profile={} reason={err:#}",
+                        self.profile.id
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_watchdog_stream_report(
+        &mut self,
+        report: &SessionWatchdogReport,
+        config: &Config,
+    ) -> Result<()> {
+        let outcome = apply_watchdog_report(&self.profile, &self.profiles, report)?;
+
+        match outcome {
+            WatchdogApplyOutcome::Transition { target_profile, transition } => {
+                let active_path = write_active_profile(&target_profile)?;
+                let transition_path = write_profile_transition(&transition)?;
+                print_profile_transition(&transition);
+                println!("sessiond wrote_active_profile={}", active_path.display());
+                println!("sessiond wrote_profile_transition={}", transition_path.display());
+                self.switch_to(target_profile, config)?;
+            }
+            WatchdogApplyOutcome::Unchanged { .. } => {}
+        }
+
         Ok(())
     }
 }

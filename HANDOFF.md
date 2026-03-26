@@ -145,6 +145,19 @@
 - `scripts/run-degraded-mode.sh`
   - file 経由ではなく `watchdog -> sessiond` IPC で degraded fallback を自動適用し、そのまま fallback component 起動まで確認する
 
+### 12. sessiond -> watchdog health stream
+
+- `WatchdogCommand`
+  - `InspectLaunchState`
+  - `InspectionResult`
+- `watchdog`
+  - `--serve-ipc [--once]` で Unix socket server として sessiond から launch-state snapshot を受け取る
+- `sessiond`
+  - `--notify-watchdog` で managed active profile の launch-state 更新を watchdog へ stream
+  - watchdog の応答 report をその場で評価し、degraded fallback を自前で適用
+- `scripts/run-degraded-mode.sh`
+  - `watchdog` を background server として起動し、manual pull なしで degraded switch と fallback health report 収束まで確認する
+
 ## 現在のコード上の要点
 
 ### 共有型

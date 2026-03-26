@@ -7,7 +7,9 @@ cd "$repo_root"
 runtime_dir="${WAYBROKER_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/waybroker}"
 crashy_launch_state="$runtime_dir/launch-state-demo-x11-crashy.json"
 degraded_launch_state="$runtime_dir/launch-state-demo-x11-degraded.json"
+degraded_report="$runtime_dir/watchdog-report-demo-x11-degraded.json"
 sessiond_pid=""
+watchdog_pid=""
 
 cleanup_state() {
   local launch_state="$1"
@@ -20,6 +22,11 @@ cleanup_state() {
 }
 
 cleanup() {
+  if [[ -n "$watchdog_pid" ]] && kill -0 "$watchdog_pid" 2>/dev/null; then
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+  fi
+
   if [[ -n "$sessiond_pid" ]] && kill -0 "$sessiond_pid" 2>/dev/null; then
     kill "$sessiond_pid" 2>/dev/null || true
     wait "$sessiond_pid" 2>/dev/null || true
@@ -38,8 +45,14 @@ echo "==> cargo run -p sessiond -- --select-profile demo-x11-crashy --write-sele
 cargo run -p sessiond -- --select-profile demo-x11-crashy --write-selection
 
 echo
-echo "==> cargo run -p sessiond -- --serve-ipc --spawn-components --manage-active"
-cargo run -p sessiond -- --serve-ipc --spawn-components --manage-active &
+echo "==> cargo run -p watchdog -- --serve-ipc --write-reports"
+cargo run -p watchdog -- --serve-ipc --write-reports &
+watchdog_pid=$!
+sleep 1
+
+echo
+echo "==> cargo run -p sessiond -- --serve-ipc --spawn-components --manage-active --notify-watchdog"
+cargo run -p sessiond -- --serve-ipc --spawn-components --manage-active --notify-watchdog &
 sessiond_pid=$!
 sleep 1
 
@@ -60,9 +73,17 @@ if [[ "$crash_loop_ready" -ne 1 ]]; then
 fi
 
 echo
-echo "==> cargo run -p watchdog -- --profile-id demo-x11-crashy --write-reports --notify-sessiond"
-cargo run -p watchdog -- --profile-id demo-x11-crashy --write-reports --notify-sessiond
+echo "==> waiting for degraded watchdog report in $degraded_report"
+degraded_report_ready=0
+for _ in $(seq 1 30); do
+  if [[ -f "$degraded_report" ]] && rg -q '"healthy_components": 3' "$degraded_report" && rg -q '"unhealthy_components": 0' "$degraded_report"; then
+    degraded_report_ready=1
+    break
+  fi
+  sleep 1
+done
 
-echo
-echo "==> cargo run -p watchdog -- --profile-id demo-x11-degraded --write-reports"
-cargo run -p watchdog -- --profile-id demo-x11-degraded --write-reports
+if [[ "$degraded_report_ready" -ne 1 ]]; then
+  echo "degraded watchdog report was not reached in time" >&2
+  exit 1
+fi

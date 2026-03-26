@@ -53,11 +53,11 @@ launch state は次の用途に使います。
 
 初期実装では `sessiond` が `active-profile.json` と `launch-state-<profile>.json` を runtime dir へ書きます。
 
-`watchdog` は `launch-state-<profile>.json` を読み、各 component を `healthy / unhealthy / inactive` で分類します。これにより、`xfwm4` が落ちたのか、単に未導入なのか、まだ起動していないだけなのかを分けられます。
+`watchdog` は `launch-state-<profile>.json` を読み、各 component を `healthy / unhealthy / inactive` で分類できます。加えて、常駐 `sessiond` supervisor が launch-state 更新ごとに watchdog へ stream すれば、pull ではなく event-driven に同じ判定を返せます。これにより、`xfwm4` が落ちたのか、単に未導入なのか、まだ起動していないだけなのかを分けられます。
 
 `sessiond` の supervisor stub は critical component に restart counter を持ちます。`watchdog` はその値を見て、`restart-component` で済む段階か、`degraded-profile` へ落とす段階かを判断します。
 
-profile manifest は `degraded_profile_id` を持てます。`watchdog` は launch state から `watchdog-report-<profile>.json` を作るだけでなく、必要なら Unix socket で `sessiond` に report を送れます。`sessiond` は active profile に対応する report を評価し、`degraded-profile` action が含まれていれば `active-profile.json` を fallback profile に差し替え、結果を `profile-transition-<from>-to-<to>.json` として記録します。`sessiond --serve-ipc --spawn-components --manage-active` で動かしていれば、active profile の component を常駐で poll し、切替直後に fallback profile の `launch-state` を書いて component 起動まで進めます。
+profile manifest は `degraded_profile_id` を持てます。`watchdog` は launch state から `watchdog-report-<profile>.json` を作るだけでなく、Unix socket server として `sessiond` から launch-state snapshot を受け取れます。`sessiond --serve-ipc --spawn-components --manage-active --notify-watchdog` で動かしていれば、active profile の component を常駐で poll し、その更新を watchdog へ stream し、返ってきた report に `degraded-profile` action が含まれていれば `active-profile.json` を fallback profile に差し替えます。結果は `profile-transition-<from>-to-<to>.json` と新しい `launch-state-<profile>.json` に記録されます。
 
 ## Failure Boundary
 

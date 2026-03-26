@@ -199,4 +199,37 @@ mod tests {
         assert_eq!(decoded, envelope);
         assert!(json.contains("\"op\":\"apply-watchdog-report\""));
     }
+
+    #[test]
+    fn roundtrips_watchdog_launch_state_inspection() {
+        let envelope = IpcEnvelope::new(
+            ServiceRole::Sessiond,
+            ServiceRole::Watchdog,
+            MessageKind::WatchdogCommand(super::WatchdogCommand::InspectLaunchState {
+                state: super::SessionLaunchState {
+                    profile_id: "demo-x11".into(),
+                    display_name: "Demo".into(),
+                    protocol: super::DesktopProtocol::LayerX11,
+                    broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+                    components: vec![super::SessionLaunchComponentState {
+                        id: "demo-wm".into(),
+                        role: super::DesktopComponentRole::WindowManager,
+                        critical: true,
+                        command: vec!["demo-wm".into()],
+                        resolved_command: Some("/usr/bin/demo-wm".into()),
+                        state: super::DesktopComponentState::Spawned,
+                        pid: Some(1234),
+                        restart_count: 0,
+                        last_exit_status: None,
+                    }],
+                },
+            }),
+        );
+
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let decoded: IpcEnvelope = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded, envelope);
+        assert!(json.contains("\"op\":\"inspect-launch-state\""));
+    }
 }

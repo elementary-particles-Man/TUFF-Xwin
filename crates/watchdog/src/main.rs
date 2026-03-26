@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     io::BufReader,
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
 };
 
@@ -8,14 +9,19 @@ use anyhow::{Context, Result, bail};
 use waybroker_common::{
     DesktopComponentState, DesktopHealthStatus, DesktopRecoveryAction, IpcEnvelope, MessageKind,
     ServiceBanner, ServiceRole, SessionCommand, SessionLaunchComponentState, SessionLaunchState,
-    SessionWatchdogComponentReport, SessionWatchdogReport, connect_service_socket,
-    ensure_runtime_dir, read_json_line, runtime_dir, send_json_line,
+    SessionWatchdogComponentReport, SessionWatchdogReport, WatchdogCommand, bind_service_socket,
+    connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir, send_json_line,
 };
 
 fn main() -> Result<()> {
     let config = Config::from_args(env::args().skip(1))?;
     let banner = ServiceBanner::new(ServiceRole::Watchdog, "display stack recovery control");
     println!("{}", banner.render());
+
+    if config.serve_ipc {
+        serve_ipc(&config)?;
+        return Ok(());
+    }
 
     if !config.has_inspection_target() {
         return Ok(());
@@ -48,6 +54,8 @@ struct Config {
     inspect_all: bool,
     write_reports: bool,
     notify_sessiond: bool,
+    serve_ipc: bool,
+    serve_once: bool,
 }
 
 impl Config {
@@ -67,9 +75,11 @@ impl Config {
                 "--inspect-all" => config.inspect_all = true,
                 "--write-reports" => config.write_reports = true,
                 "--notify-sessiond" => config.notify_sessiond = true,
+                "--serve-ipc" => config.serve_ipc = true,
+                "--once" => config.serve_once = true,
                 "--help" | "-h" => {
                     println!(
-                        "usage: watchdog [--launch-state PATH] [--profile-id ID] [--inspect-all] [--write-reports] [--notify-sessiond]"
+                        "usage: watchdog [--launch-state PATH] [--profile-id ID] [--inspect-all] [--write-reports] [--notify-sessiond] [--serve-ipc] [--once]"
                     );
                     std::process::exit(0);
                 }
@@ -82,6 +92,90 @@ impl Config {
 
     fn has_inspection_target(&self) -> bool {
         self.launch_state_path.is_some() || self.profile_id.is_some() || self.inspect_all
+    }
+}
+
+fn serve_ipc(config: &Config) -> Result<()> {
+    let (listener, socket_path) = bind_service_socket(ServiceRole::Watchdog)?;
+    let _socket_guard = SocketGuard::new(socket_path.clone());
+    println!("watchdog listening socket={}", socket_path.display());
+
+    let mut served = 0usize;
+    for stream in listener.incoming() {
+        let stream = stream?;
+        handle_client(stream, config)?;
+        served += 1;
+
+        if config.serve_once {
+            break;
+        }
+    }
+
+    println!("watchdog served_requests={served}");
+    Ok(())
+}
+
+fn handle_client(mut stream: UnixStream, config: &Config) -> Result<()> {
+    let request: IpcEnvelope = {
+        let mut reader = BufReader::new(stream.try_clone()?);
+        read_json_line(&mut reader)?
+    };
+
+    let response = build_response(request, config)?;
+    send_json_line(&mut stream, &response)?;
+    Ok(())
+}
+
+fn build_response(request: IpcEnvelope, config: &Config) -> Result<IpcEnvelope> {
+    let source = request.source;
+    let response_kind = match request.kind {
+        MessageKind::WatchdogCommand(command) if request.destination == ServiceRole::Watchdog => {
+            MessageKind::WatchdogCommand(handle_watchdog_command(command, source, config)?)
+        }
+        MessageKind::WatchdogCommand(_) => {
+            MessageKind::WatchdogCommand(WatchdogCommand::Escalate {
+                level: 1,
+                reason: format!(
+                    "watchdog received message addressed to {}",
+                    request.destination.as_str()
+                ),
+            })
+        }
+        other => MessageKind::WatchdogCommand(WatchdogCommand::Escalate {
+            level: 1,
+            reason: format!("watchdog does not handle {other:?}"),
+        }),
+    };
+
+    Ok(IpcEnvelope::new(ServiceRole::Watchdog, source, response_kind))
+}
+
+fn handle_watchdog_command(
+    command: WatchdogCommand,
+    source: ServiceRole,
+    config: &Config,
+) -> Result<WatchdogCommand> {
+    match command {
+        WatchdogCommand::InspectLaunchState { state } => {
+            let report = inspect_launch_state(&state);
+            print_report(&report);
+
+            if config.write_reports {
+                let report_path = write_report(&report)?;
+                println!("watchdog wrote_report={}", report_path.display());
+            }
+
+            if config.notify_sessiond && source != ServiceRole::Sessiond {
+                let response = notify_sessiond(&report)?;
+                print_sessiond_response(&response);
+            }
+
+            Ok(WatchdogCommand::InspectionResult { report })
+        }
+        other => Ok(WatchdogCommand::Escalate {
+            level: 1,
+            reason: format!("watchdog IPC does not apply {other:?}"),
+        }),
     }
 }
 
@@ -298,6 +392,22 @@ fn print_sessiond_response(response: &IpcEnvelope) {
 
 fn launch_state_path(profile_id: &str) -> PathBuf {
     runtime_dir().join(format!("launch-state-{profile_id}.json"))
+}
+
+struct SocketGuard {
+    path: PathBuf,
+}
+
+impl SocketGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 #[cfg(test)]
