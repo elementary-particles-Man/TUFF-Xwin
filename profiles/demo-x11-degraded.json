@@ -1,0 +1,33 @@
+{
+  "id": "demo-x11-degraded",
+  "display_name": "Degraded Demo Desktop on LeyerX11",
+  "protocol": "layer-x11",
+  "summary": "critical component が crash-loop に入った時の最小 fallback profile。",
+  "degraded_profile_id": null,
+  "broker_services": [
+    "displayd",
+    "sessiond",
+    "watchdog",
+    "x11bridge"
+  ],
+  "session_components": [
+    {
+      "id": "demo-x11bridge-fallback",
+      "role": "compat-layer",
+      "command": ["./scripts/mock-desktop-component.sh", "--component", "demo-x11bridge-fallback", "--hold-seconds", "20"],
+      "critical": true
+    },
+    {
+      "id": "demo-fallback-wm",
+      "role": "window-manager",
+      "command": ["./scripts/mock-desktop-component.sh", "--component", "demo-fallback-wm", "--hold-seconds", "20"],
+      "critical": true
+    },
+    {
+      "id": "demo-fallback-panel",
+      "role": "panel",
+      "command": ["./scripts/mock-desktop-component.sh", "--component", "demo-fallback-panel", "--hold-seconds", "20"],
+      "critical": false
+    }
+  ]
+}

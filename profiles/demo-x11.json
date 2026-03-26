@@ -3,6 +3,7 @@
   "display_name": "Demo Desktop on LeyerX11",
   "protocol": "layer-x11",
   "summary": "repo 内の mock component を使って launch / watchdog を確認する demo profile。",
+  "degraded_profile_id": "demo-x11-degraded",
   "broker_services": [
     "displayd",
     "sessiond",

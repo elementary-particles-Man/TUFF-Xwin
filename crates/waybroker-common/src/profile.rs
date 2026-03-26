@@ -58,6 +58,7 @@ pub struct DesktopProfile {
     pub display_name: String,
     pub protocol: DesktopProtocol,
     pub summary: String,
+    pub degraded_profile_id: Option<String>,
     pub broker_services: Vec<ServiceRole>,
     pub session_components: Vec<DesktopComponent>,
 }
@@ -184,6 +185,16 @@ pub struct SessionWatchdogReport {
     pub components: Vec<SessionWatchdogComponentReport>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionProfileTransition {
+    pub source_profile_id: String,
+    pub source_display_name: String,
+    pub target_profile_id: String,
+    pub target_display_name: String,
+    pub reason: String,
+    pub trigger_component_ids: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DesktopComponent, DesktopComponentRole, DesktopProfile, DesktopProtocol};
@@ -196,6 +207,7 @@ mod tests {
             display_name: "XFCE Classic on LeyerX11".into(),
             protocol: DesktopProtocol::LayerX11,
             summary: "lightweight x11 desktop".into(),
+            degraded_profile_id: Some("openbox-x11".into()),
             broker_services: vec![
                 ServiceRole::Displayd,
                 ServiceRole::Sessiond,

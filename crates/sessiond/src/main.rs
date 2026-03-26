@@ -9,8 +9,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use waybroker_common::{
-    DesktopComponent, DesktopComponentState, DesktopProfile, ServiceBanner, ServiceRole,
-    SessionLaunchComponentState, SessionLaunchState, ensure_runtime_dir, runtime_dir,
+    DesktopComponent, DesktopComponentState, DesktopProfile, DesktopRecoveryAction, ServiceBanner,
+    ServiceRole, SessionLaunchComponentState, SessionLaunchState, SessionProfileTransition,
+    SessionWatchdogReport, ensure_runtime_dir, runtime_dir,
 };
 
 fn main() -> Result<()> {
@@ -94,6 +95,28 @@ fn main() -> Result<()> {
         println!("sessiond wrote_launch_state={}", state_path.display());
     }
 
+    if config.apply_watchdog_active {
+        let active_profile = read_active_profile()?;
+        let report = read_watchdog_report(&config, &active_profile)?;
+
+        match evaluate_watchdog_transition(&active_profile, &profiles, &report)? {
+            Some((target_profile, transition)) => {
+                let active_path = write_active_profile(&target_profile)?;
+                let transition_path = write_profile_transition(&transition)?;
+
+                print_profile_transition(&transition);
+                println!("sessiond wrote_active_profile={}", active_path.display());
+                println!("sessiond wrote_profile_transition={}", transition_path.display());
+            }
+            None => {
+                println!(
+                    "sessiond watchdog_action=none active_profile={} report={}",
+                    active_profile.id, report.profile_id
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -109,6 +132,8 @@ struct Config {
     spawn_components: bool,
     supervise_seconds: u64,
     restart_limit: u32,
+    apply_watchdog_active: bool,
+    watchdog_report_path: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -124,6 +149,8 @@ impl Default for Config {
             spawn_components: false,
             supervise_seconds: 0,
             restart_limit: 2,
+            apply_watchdog_active: false,
+            watchdog_report_path: None,
         }
     }
 }
@@ -151,6 +178,11 @@ impl Config {
                 }
                 "--launch-active" => config.launch_active = true,
                 "--spawn-components" => config.spawn_components = true,
+                "--apply-watchdog-active" => config.apply_watchdog_active = true,
+                "--watchdog-report" => {
+                    let path = args.next().context("--watchdog-report requires a path")?;
+                    config.watchdog_report_path = Some(PathBuf::from(path));
+                }
                 "--supervise-seconds" => {
                     let value = args.next().context("--supervise-seconds requires a number")?;
                     config.supervise_seconds = value
@@ -165,7 +197,7 @@ impl Config {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: sessiond [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N]"
+                        "usage: sessiond [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N] [--apply-watchdog-active] [--watchdog-report PATH]"
                     );
                     std::process::exit(0);
                 }
@@ -231,12 +263,30 @@ fn launch_state_path(profile_id: &str) -> PathBuf {
     runtime_dir().join(format!("launch-state-{profile_id}.json"))
 }
 
+fn watchdog_report_path(profile_id: &str) -> PathBuf {
+    runtime_dir().join(format!("watchdog-report-{profile_id}.json"))
+}
+
 fn read_active_profile() -> Result<DesktopProfile> {
     let path = active_profile_path();
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("failed to read active profile {}", path.display()))?;
     serde_json::from_str(&raw)
         .with_context(|| format!("failed to decode active profile {}", path.display()))
+}
+
+fn read_watchdog_report(
+    config: &Config,
+    active_profile: &DesktopProfile,
+) -> Result<SessionWatchdogReport> {
+    let path = config
+        .watchdog_report_path
+        .clone()
+        .unwrap_or_else(|| watchdog_report_path(&active_profile.id));
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read watchdog report {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("failed to decode watchdog report {}", path.display()))
 }
 
 fn launch_state_for_profile(
@@ -401,6 +451,18 @@ fn write_launch_state(state: &SessionLaunchState) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn write_profile_transition(transition: &SessionProfileTransition) -> Result<PathBuf> {
+    let dir = ensure_runtime_dir()?;
+    let path = dir.join(format!(
+        "profile-transition-{}-to-{}.json",
+        transition.source_profile_id, transition.target_profile_id
+    ));
+    let json = serde_json::to_string_pretty(transition)
+        .context("failed to serialize profile transition")?;
+    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
 fn print_launch_state(state: &SessionLaunchState) {
     println!(
         "sessiond launch_state profile={} protocol={} components={}",
@@ -427,6 +489,66 @@ fn print_launch_state(state: &SessionLaunchState) {
                 .unwrap_or("none")
         );
     }
+}
+
+fn print_profile_transition(transition: &SessionProfileTransition) {
+    println!(
+        "sessiond profile_transition from={} to={} reason={} triggers={}",
+        transition.source_profile_id,
+        transition.target_profile_id,
+        transition.reason,
+        transition.trigger_component_ids.join(",")
+    );
+}
+
+fn evaluate_watchdog_transition(
+    active_profile: &DesktopProfile,
+    profiles: &[DesktopProfile],
+    report: &SessionWatchdogReport,
+) -> Result<Option<(DesktopProfile, SessionProfileTransition)>> {
+    if report.profile_id != active_profile.id {
+        bail!(
+            "watchdog report profile {} does not match active profile {}",
+            report.profile_id,
+            active_profile.id
+        );
+    }
+
+    let trigger_component_ids: Vec<String> = report
+        .components
+        .iter()
+        .filter(|component| component.action == DesktopRecoveryAction::DegradedProfile)
+        .map(|component| component.id.clone())
+        .collect();
+
+    if trigger_component_ids.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(target_profile_id) = active_profile.degraded_profile_id.as_deref() else {
+        return Ok(None);
+    };
+
+    if target_profile_id == active_profile.id {
+        bail!("active profile {} cannot degrade to itself", active_profile.id);
+    }
+
+    let target_profile = profiles
+        .iter()
+        .find(|profile| profile.id == target_profile_id)
+        .with_context(|| format!("unknown degraded profile id: {target_profile_id}"))?
+        .clone();
+
+    let transition = SessionProfileTransition {
+        source_profile_id: active_profile.id.clone(),
+        source_display_name: active_profile.display_name.clone(),
+        target_profile_id: target_profile.id.clone(),
+        target_display_name: target_profile.display_name.clone(),
+        reason: "watchdog requested degraded profile switch".into(),
+        trigger_component_ids,
+    };
+
+    Ok(Some((target_profile, transition)))
 }
 
 struct RuntimeComponent {
@@ -500,14 +622,18 @@ impl RuntimeComponent {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_launch_state, is_executable, resolve_command_path};
+    use super::{
+        build_launch_state, evaluate_watchdog_transition, is_executable, resolve_command_path,
+    };
     use std::{
         fs,
         os::unix::fs::PermissionsExt,
         time::{SystemTime, UNIX_EPOCH},
     };
     use waybroker_common::{
-        DesktopComponent, DesktopComponentRole, DesktopProfile, DesktopProtocol, ServiceRole,
+        DesktopComponent, DesktopComponentRole, DesktopHealthStatus, DesktopProfile,
+        DesktopProtocol, DesktopRecoveryAction, ServiceRole, SessionWatchdogComponentReport,
+        SessionWatchdogReport,
     };
 
     #[test]
@@ -541,6 +667,7 @@ mod tests {
             display_name: "Test".into(),
             protocol: DesktopProtocol::LayerX11,
             summary: "test".into(),
+            degraded_profile_id: None,
             broker_services: vec![ServiceRole::Sessiond],
             session_components: vec![DesktopComponent {
                 id: "missing".into(),
@@ -555,5 +682,95 @@ mod tests {
         assert_eq!(state.components.len(), 1);
         assert_eq!(state.components[0].state, waybroker_common::DesktopComponentState::Missing);
         assert_eq!(state.components[0].restart_count, 0);
+    }
+
+    #[test]
+    fn evaluates_degraded_profile_transition_from_watchdog_report() {
+        let active_profile = DesktopProfile {
+            id: "demo-x11-crashy".into(),
+            display_name: "Crashy Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            summary: "crash test".into(),
+            degraded_profile_id: Some("demo-x11-degraded".into()),
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            session_components: Vec::new(),
+        };
+        let degraded_profile = DesktopProfile {
+            id: "demo-x11-degraded".into(),
+            display_name: "Degraded Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            summary: "fallback".into(),
+            degraded_profile_id: None,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            session_components: Vec::new(),
+        };
+        let report = SessionWatchdogReport {
+            profile_id: "demo-x11-crashy".into(),
+            display_name: "Crashy Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            healthy_components: 1,
+            unhealthy_components: 1,
+            inactive_components: 0,
+            components: vec![SessionWatchdogComponentReport {
+                id: "crashy-wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                status: DesktopHealthStatus::Unhealthy,
+                pid: None,
+                crash_loop_count: 3,
+                action: DesktopRecoveryAction::DegradedProfile,
+                reason: "component spawn failed or supervisor gave up".into(),
+            }],
+        };
+
+        let (target_profile, transition) = evaluate_watchdog_transition(
+            &active_profile,
+            &[active_profile.clone(), degraded_profile.clone()],
+            &report,
+        )
+        .expect("evaluate transition")
+        .expect("transition should be present");
+
+        assert_eq!(target_profile.id, "demo-x11-degraded");
+        assert_eq!(transition.source_profile_id, "demo-x11-crashy");
+        assert_eq!(transition.target_profile_id, "demo-x11-degraded");
+        assert_eq!(transition.trigger_component_ids, vec!["crashy-wm".to_string()]);
+    }
+
+    #[test]
+    fn ignores_watchdog_transition_when_no_degraded_action_exists() {
+        let active_profile = DesktopProfile {
+            id: "demo-x11".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            summary: "demo".into(),
+            degraded_profile_id: Some("demo-x11-degraded".into()),
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            session_components: Vec::new(),
+        };
+        let report = SessionWatchdogReport {
+            profile_id: "demo-x11".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            healthy_components: 1,
+            unhealthy_components: 0,
+            inactive_components: 0,
+            components: vec![SessionWatchdogComponentReport {
+                id: "demo-wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                status: DesktopHealthStatus::Healthy,
+                pid: Some(42),
+                crash_loop_count: 0,
+                action: DesktopRecoveryAction::None,
+                reason: "component process is alive".into(),
+            }],
+        };
+
+        let transition =
+            evaluate_watchdog_transition(&active_profile, &[active_profile.clone()], &report)
+                .expect("evaluate transition");
+
+        assert!(transition.is_none());
     }
 }

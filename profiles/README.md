@@ -13,6 +13,7 @@
 
 - `demo-x11.json`
 - `demo-x11-crashy.json`
+- `demo-x11-degraded.json`
 - `xfce-x11.json`
 - `openbox-x11.json`
 
@@ -20,5 +21,9 @@
   - repo 内の mock component を使う launch / watchdog 検証用 profile
 - `demo-x11-crashy`
   - critical component の再起動と crash-loop 判定を確認する profile
+- `demo-x11-degraded`
+  - crash-loop 後に切り替える最小 fallback profile
 - `xfce-x11`, `openbox-x11`
   - 実際の package 導入を前提にする rootless `X11` profile
+
+各 profile は必要なら `degraded_profile_id` を持てます。これは critical component の crash-loop や未導入を `watchdog` が検知した時に、`sessiond` が次に切り替える fallback profile を指します。

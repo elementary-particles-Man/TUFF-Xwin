@@ -3,6 +3,7 @@
   "display_name": "Crashy Demo Desktop on LeyerX11",
   "protocol": "layer-x11",
   "summary": "critical component の再起動と crash-loop 判定を確認する demo profile。",
+  "degraded_profile_id": "demo-x11-degraded",
   "broker_services": [
     "displayd",
     "sessiond",

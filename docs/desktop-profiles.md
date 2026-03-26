@@ -43,6 +43,7 @@
 - user が選んだ profile を active state として保持する
 - どの broker service と GUI component が必要かを launch plan として出す
 - command の解決状態を launch state として記録する
+- `watchdog` report を見て、必要なら degraded fallback profile へ切り替える
 
 launch state は次の用途に使います。
 
@@ -55,6 +56,8 @@ launch state は次の用途に使います。
 `watchdog` は `launch-state-<profile>.json` を読み、各 component を `healthy / unhealthy / inactive` で分類します。これにより、`xfwm4` が落ちたのか、単に未導入なのか、まだ起動していないだけなのかを分けられます。
 
 `sessiond` の supervisor stub は critical component に restart counter を持ちます。`watchdog` はその値を見て、`restart-component` で済む段階か、`degraded-profile` へ落とす段階かを判断します。
+
+profile manifest は `degraded_profile_id` を持てます。`sessiond --apply-watchdog-active` は active profile に対応する `watchdog-report-<profile>.json` を読み、`degraded-profile` action が含まれていれば `active-profile.json` を fallback profile に差し替えます。切替結果は `profile-transition-<from>-to-<to>.json` として記録します。
 
 ## Failure Boundary
 

@@ -119,6 +119,18 @@
 - `scripts/run-profile-demo.sh`
   - profile manager の確認導線
 
+### 10. Degraded fallback switching
+
+- `DesktopProfile`
+  - `degraded_profile_id` で fallback profile を宣言可能
+- `sessiond`
+  - `watchdog-report-<profile>.json` を読み、`--apply-watchdog-active` で active profile を fallback へ切替
+  - `profile-transition-<from>-to-<to>.json` を runtime dir へ記録
+- `profiles/demo-x11-degraded.json`
+  - crash-loop 後の最小 fallback demo profile
+- `scripts/run-degraded-mode.sh`
+  - crash-loop 検知から degraded profile 切替まで確認する導線
+
 ## 現在のコード上の要点
 
 ### 共有型
@@ -165,6 +177,7 @@
 2. `compd` と `displayd` の scene commit stub を足して policy と hardware broker を分ける
 3. `watchdog` に health report と restart request の最小実装を生やす
 4. `LeyerX11` に clipboard / selection の最小橋渡しを足す
+5. degraded profile 切替後の component 再起動と state 収束を `watchdog` / `sessiond` 間で自動化する
 
 ## 注意点
 

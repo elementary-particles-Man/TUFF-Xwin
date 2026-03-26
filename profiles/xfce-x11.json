@@ -3,6 +3,7 @@
   "display_name": "XFCE Classic on LeyerX11",
   "protocol": "layer-x11",
   "summary": "軽量な X11 desktop profile。x11bridge の上に xfwm4 と panel 群を載せる。",
+  "degraded_profile_id": "openbox-x11",
   "broker_services": [
     "displayd",
     "sessiond",

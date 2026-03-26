@@ -3,6 +3,7 @@
   "display_name": "Openbox Minimal on LeyerX11",
   "protocol": "layer-x11",
   "summary": "最小構成の X11 desktop profile。rootless X11 と軽量 WM を組み合わせる。",
+  "degraded_profile_id": null,
   "broker_services": [
     "displayd",
     "sessiond",
