@@ -76,3 +76,32 @@ kernel      sessiond      displayd      waylandd      watchdog      compd
 - output recovery と auth prompt を同時に始めない
 - `kernel` / `driver` 由来障害と `userspace` 障害を同じログに混ぜない
 - 「復帰できなかったので全部再起動」は最後の手段にする
+
+## Implementation Scenarios
+
+Waybroker implements 4 predefined resume scenarios for testing and hardening:
+
+| Scenario | Service Trigger | Final State | Artifact |
+|:---|:---|:---|:---|
+| `normal` | Success path | `normal` | `resume-trace-normal.json` |
+| `displayd-trouble` | `displayd --fail-resume` | `hold` | `resume-trace-displayd-trouble.json` |
+| `compd-trouble` | `compd --fail-resume` | `restart-request` | `resume-trace-compd-trouble.json` |
+| `lockd-trouble` | `lockd --fail-resume` | `blank-only` | `resume-trace-lockd-trouble.json` |
+
+## Resume Trace Artifact
+
+Each resume attempt generates a JSON trace in `WAYBROKER_RUNTIME_DIR`. This trace captures the exact sequence of steps and outcomes from each service involved.
+
+Example:
+```json
+{
+  "scenario": "compd-trouble",
+  "unix_timestamp": 1774571047,
+  "steps": [
+    { "name": "resume_begin", "service": "displayd", "outcome": "success" },
+    { "name": "set_lock_state", "service": "lockd", "outcome": "success" },
+    { "name": "resume_hint_outputs", "service": "compd", "outcome": "failed" }
+  ],
+  "final_state": "restart-request"
+}
+```
