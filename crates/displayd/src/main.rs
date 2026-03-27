@@ -13,12 +13,12 @@ fn main() -> Result<()> {
 
     let (listener, socket_path) = bind_service_socket(ServiceRole::Displayd)?;
     let _socket_guard = SocketGuard::new(socket_path.clone());
-    println!("displayd listening socket={}", socket_path.display());
+    println!("service=displayd op=listen event=socket_bound path={}", socket_path.display());
 
     let mut served = 0usize;
     for stream in listener.incoming() {
         let stream = stream?;
-        handle_client(stream)?;
+        handle_client(stream, &config)?;
         served += 1;
 
         if config.serve_once {
@@ -26,13 +26,14 @@ fn main() -> Result<()> {
         }
     }
 
-    println!("displayd served_requests={served}");
+    println!("service=displayd op=terminate event=finished served_requests={served}");
     Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Config {
     serve_once: bool,
+    fail_resume: bool,
 }
 
 impl Config {
@@ -42,8 +43,9 @@ impl Config {
         for arg in args {
             match arg.as_str() {
                 "--once" => config.serve_once = true,
+                "--fail-resume" => config.fail_resume = true,
                 "--help" | "-h" => {
-                    println!("usage: displayd [--once]");
+                    println!("usage: displayd [--once] [--fail-resume]");
                     std::process::exit(0);
                 }
                 _ => bail!("unknown argument: {arg}"),
@@ -54,21 +56,21 @@ impl Config {
     }
 }
 
-fn handle_client(mut stream: UnixStream) -> Result<()> {
+fn handle_client(mut stream: UnixStream, config: &Config) -> Result<()> {
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
     };
 
-    let response = build_response(request);
+    let response = build_response(request, config);
     send_json_line(&mut stream, &response)?;
     Ok(())
 }
 
-fn build_response(request: IpcEnvelope) -> IpcEnvelope {
+fn build_response(request: IpcEnvelope, config: &Config) -> IpcEnvelope {
     let response_kind = match request.kind {
         MessageKind::DisplayCommand(command) if request.destination == ServiceRole::Displayd => {
-            MessageKind::DisplayEvent(handle_display_command(command))
+            MessageKind::DisplayEvent(handle_display_command(command, config))
         }
         MessageKind::DisplayCommand(_) => MessageKind::DisplayEvent(DisplayEvent::Rejected {
             reason: format!(
@@ -84,17 +86,35 @@ fn build_response(request: IpcEnvelope) -> IpcEnvelope {
     IpcEnvelope::new(ServiceRole::Displayd, request.source, response_kind)
 }
 
-fn handle_display_command(command: DisplayCommand) -> DisplayEvent {
+fn handle_display_command(command: DisplayCommand, config: &Config) -> DisplayEvent {
     match command {
         DisplayCommand::EnumerateOutputs => {
+            println!("service=displayd op=enumerate_outputs event=success");
             DisplayEvent::OutputInventory { outputs: vec![stub_output_mode()] }
         }
-        DisplayCommand::SetMode { output, mode } => DisplayEvent::ModeApplied { output, mode },
+        DisplayCommand::SetMode { output, mode } => {
+            println!("service=displayd op=set_mode event=success output={output} mode={:?}", mode);
+            DisplayEvent::ModeApplied { output, mode }
+        }
         DisplayCommand::CommitScene { target, focus, surfaces } => {
+            println!("service=displayd op=commit_scene event=success surfaces={}", surfaces.len());
             DisplayEvent::SceneCommitted { target, focus, surface_count: surfaces.len() }
         }
-        DisplayCommand::SecureBlank { output } => DisplayEvent::BlankApplied { output },
-        DisplayCommand::ResumeBegin => DisplayEvent::ResumeStarted,
+        DisplayCommand::SecureBlank { output } => {
+            println!("service=displayd op=secure_blank event=success output={:?}", output);
+            DisplayEvent::BlankApplied { output }
+        }
+        DisplayCommand::ResumeBegin => {
+            if config.fail_resume {
+                println!(
+                    "service=displayd op=resume_begin event=failed reason=\"fault injection\""
+                );
+                DisplayEvent::Rejected { reason: "fault injection".into() }
+            } else {
+                println!("service=displayd op=resume_begin event=success");
+                DisplayEvent::ResumeStarted
+            }
+        }
     }
 }
 

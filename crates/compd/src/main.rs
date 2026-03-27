@@ -21,7 +21,7 @@ fn main() -> Result<()> {
 
     if config.print_scene {
         println!(
-            "service=compd op=scene_print target={} surfaces={}",
+            "service=compd op=scene_print event=success target={} surfaces={}",
             scene.target_output,
             scene.surfaces.len()
         );
@@ -30,7 +30,7 @@ fn main() -> Result<()> {
 
     if config.commit_demo {
         println!(
-            "service=compd op=scene_build target={} focus={:?} surfaces={}",
+            "service=compd op=scene_build event=success target={} focus={:?} surfaces={}",
             scene.target_output,
             scene.focus,
             scene.surfaces.len()
@@ -46,7 +46,7 @@ fn main() -> Result<()> {
                 if config.require_displayd {
                     return Err(err).context("failed to commit scene to displayd (required)");
                 } else {
-                    println!("service=compd op=scene_commit status=failed reason=\"{}\"", err);
+                    println!("service=compd op=scene_commit event=failed reason=\"{}\"", err);
                 }
             }
         }
@@ -67,6 +67,7 @@ struct Config {
     require_displayd: bool,
     serve_ipc: bool,
     serve_once: bool,
+    fail_resume: bool,
 }
 
 impl Config {
@@ -84,9 +85,10 @@ impl Config {
                 "--require-displayd" => config.require_displayd = true,
                 "--serve-ipc" => config.serve_ipc = true,
                 "--once" => config.serve_once = true,
+                "--fail-resume" => config.fail_resume = true,
                 "--help" | "-h" => {
                     println!(
-                        "usage: compd [--scene PATH] [--print-scene] [--commit-demo] [--require-displayd] [--serve-ipc] [--once]"
+                        "usage: compd [--scene PATH] [--print-scene] [--commit-demo] [--require-displayd] [--serve-ipc] [--once] [--fail-resume]"
                     );
                     std::process::exit(0);
                 }
@@ -101,12 +103,12 @@ impl Config {
 fn serve_ipc(config: &Config) -> Result<()> {
     let (listener, socket_path) = bind_service_socket(ServiceRole::Compd)?;
     let _socket_guard = SocketGuard::new(socket_path.clone());
-    println!("compd listening socket={}", socket_path.display());
+    println!("service=compd op=listen event=socket_bound path={}", socket_path.display());
 
     let mut served = 0usize;
     for stream in listener.incoming() {
         let stream = stream?;
-        handle_client(stream)?;
+        handle_client(stream, config)?;
         served += 1;
 
         if config.serve_once {
@@ -114,36 +116,49 @@ fn serve_ipc(config: &Config) -> Result<()> {
         }
     }
 
-    println!("compd served_requests={served}");
+    println!("service=compd op=terminate event=finished served_requests={served}");
     Ok(())
 }
 
-fn handle_client(mut stream: UnixStream) -> Result<()> {
+fn handle_client(mut stream: UnixStream, config: &Config) -> Result<()> {
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
     };
 
-    let response = build_response(request);
+    let response = build_response(request, config);
     send_json_line(&mut stream, &response)?;
     Ok(())
 }
 
-fn build_response(request: IpcEnvelope) -> IpcEnvelope {
+fn build_response(request: IpcEnvelope, config: &Config) -> IpcEnvelope {
     let source = request.source;
     let response_kind = match request.kind {
         MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
             stage,
             output,
         }) if request.destination == ServiceRole::Compd => {
-            println!("compd resume_hint stage={:?} output={:?}", stage, output);
-            MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
-                stage,
-                output,
-            })
+            if config.fail_resume {
+                println!(
+                    "service=compd op=resume_hint event=failed reason=\"fault injection\" stage={:?}",
+                    stage
+                );
+                MessageKind::SessionCommand(waybroker_common::SessionCommand::DegradedMode {
+                    reason: "compd fault injection".into(),
+                })
+            } else {
+                println!(
+                    "service=compd op=resume_hint event=success stage={:?} output={:?}",
+                    stage, output
+                );
+                MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
+                    stage,
+                    output,
+                })
+            }
         }
         MessageKind::LockCommand(waybroker_common::LockCommand::SetLockState { state }) => {
-            println!("compd lock_state_hint state={:?}", state);
+            println!("service=compd op=lock_state_hint event=success state={:?}", state);
             MessageKind::LockCommand(waybroker_common::LockCommand::SetLockState { state })
         }
         other => MessageKind::SessionCommand(waybroker_common::SessionCommand::DegradedMode {

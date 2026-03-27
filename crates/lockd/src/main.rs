@@ -14,7 +14,7 @@ fn main() -> Result<()> {
     if config.serve_ipc {
         serve_ipc(&config)?;
     } else {
-        println!("lockd state=idle (use --serve-ipc to start lock service)");
+        println!("service=lockd state=idle (use --serve-ipc to start lock service)");
     }
 
     Ok(())
@@ -24,6 +24,7 @@ fn main() -> Result<()> {
 struct Config {
     serve_ipc: bool,
     serve_once: bool,
+    fail_resume: bool,
 }
 
 impl Config {
@@ -34,8 +35,9 @@ impl Config {
             match arg.as_str() {
                 "--serve-ipc" => config.serve_ipc = true,
                 "--once" => config.serve_once = true,
+                "--fail-resume" => config.fail_resume = true,
                 "--help" | "-h" => {
-                    println!("usage: lockd [--serve-ipc] [--once]");
+                    println!("usage: lockd [--serve-ipc] [--once] [--fail-resume]");
                     std::process::exit(0);
                 }
                 _ => bail!("unknown argument: {arg}"),
@@ -49,15 +51,15 @@ impl Config {
 fn serve_ipc(config: &Config) -> Result<()> {
     let (listener, socket_path) = bind_service_socket(ServiceRole::Lockd)?;
     let _socket_guard = SocketGuard::new(socket_path.clone());
-    println!("lockd listening socket={}", socket_path.display());
+    println!("service=lockd op=listen event=socket_bound path={}", socket_path.display());
 
     let mut current_state = LockState::Unlocked;
-    println!("lockd current_state={:?}", current_state);
+    println!("service=lockd op=status event=ready current_state={:?}", current_state);
 
     let mut served = 0usize;
     for stream in listener.incoming() {
         let stream = stream?;
-        handle_client(stream, &mut current_state)?;
+        handle_client(stream, &mut current_state, config)?;
         served += 1;
 
         if config.serve_once {
@@ -65,35 +67,63 @@ fn serve_ipc(config: &Config) -> Result<()> {
         }
     }
 
-    println!("lockd served_requests={served}");
+    println!("service=lockd op=terminate event=finished served_requests={served}");
     Ok(())
 }
 
-fn handle_client(mut stream: UnixStream, current_state: &mut LockState) -> Result<()> {
+fn handle_client(
+    mut stream: UnixStream,
+    current_state: &mut LockState,
+    config: &Config,
+) -> Result<()> {
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
     };
 
-    let response = build_response(request, current_state);
+    let response = build_response(request, current_state, config);
     send_json_line(&mut stream, &response)?;
     Ok(())
 }
 
-fn build_response(request: IpcEnvelope, current_state: &mut LockState) -> IpcEnvelope {
+fn build_response(
+    request: IpcEnvelope,
+    current_state: &mut LockState,
+    config: &Config,
+) -> IpcEnvelope {
     let source = request.source;
     let response_kind = match request.kind {
         MessageKind::LockCommand(LockCommand::SetLockState { state })
             if request.destination == ServiceRole::Lockd =>
         {
-            let old_state = *current_state;
-            *current_state = state;
-            println!("lockd state_transition from={:?} to={:?}", old_state, state);
-            MessageKind::LockCommand(LockCommand::SetLockState { state })
+            if config.fail_resume {
+                println!("service=lockd op=set_lock_state event=failed reason=\"fault injection\"");
+                MessageKind::LockCommand(LockCommand::AuthPrompt {
+                    reason: "fault injection".into(),
+                })
+            } else {
+                let old_state = *current_state;
+                *current_state = state;
+                println!(
+                    "service=lockd op=state_transition event=success from={:?} to={:?}",
+                    old_state, state
+                );
+                MessageKind::LockCommand(LockCommand::SetLockState { state })
+            }
         }
         MessageKind::LockCommand(LockCommand::AuthPrompt { reason }) => {
-            println!("lockd auth_prompt reason={}", reason);
-            MessageKind::LockCommand(LockCommand::AuthPrompt { reason })
+            if config.fail_resume {
+                println!(
+                    "service=lockd op=auth_prompt event=failed reason=\"fault injection\" prompt_reason=\"{}\"",
+                    reason
+                );
+                MessageKind::LockCommand(LockCommand::AuthPrompt {
+                    reason: "fault injection".into(),
+                })
+            } else {
+                println!("service=lockd op=auth_prompt event=success reason=\"{}\"", reason);
+                MessageKind::LockCommand(LockCommand::AuthPrompt { reason })
+            }
         }
         MessageKind::LockCommand(_) => MessageKind::LockCommand(LockCommand::AuthPrompt {
             reason: format!("lockd received message addressed to {}", request.destination.as_str()),
