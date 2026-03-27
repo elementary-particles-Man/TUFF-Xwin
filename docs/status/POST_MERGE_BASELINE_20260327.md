@@ -24,8 +24,9 @@
 
 ## 変更のハイライト
 - **compd**: 最小ランタイムが実装され、`displayd` へのモックシーンコミットが可能になった。
+- **Resume/Degraded Hardening**: Resume 時の故障分類とシナリオ検証環境が導入された。`sessiond` によるオーケストレーションとトレース生成が `main` に一本化された。
 - **IPC**: `SessionLaunchState` および `SessionLaunchDelta` に `unix_timestamp` が追加され、watchdog 連携の堅牢性が向上した。
 - **Tests**: 構造体の変更に追従し、全てのユニットテストが最新化された。
 
 ## 次のステップ
-- `P1-INTEGRATION-SMOKE`: サービス間連携を短時間で確認できる統合スモークテストを `main` 基準で整備する。
+- `P3-WATCHDOG-AUTO-RECOVERY-WIRING`: `restart-request` 等の故障ステートを `watchdog` による自動復旧へ接続する。

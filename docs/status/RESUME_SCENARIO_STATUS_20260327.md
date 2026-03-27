@@ -1,8 +1,8 @@
-# Resume Scenario Status Report (2026-03-27)
+# Resume Scenario Status Report (2026-03-27) [Merged to main]
 
 ## 概要
 Resume 時の異常系ハンドリングを強化し、シナリオベースの検証環境を構築した。
-`sessiond` におけるオーケストレーションロジックを整理し、故障箇所に応じた適切な `final_state`（hold, blank-only, restart-request）への遷移と、詳細な実行トレースの保存を実装した。
+本成果は `main` ブランチに統合済み。
 
 ## 実装済みシナリオ
 
