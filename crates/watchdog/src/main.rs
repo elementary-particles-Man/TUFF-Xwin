@@ -161,6 +161,15 @@ fn build_response(
     Ok(IpcEnvelope::new(ServiceRole::Watchdog, source, response_kind))
 }
 
+#[derive(Debug, serde::Serialize)]
+struct WatchdogRecoveryArtifact {
+    role: String,
+    reason: String,
+    requested_by: String,
+    unix_timestamp: u64,
+    action: String,
+}
+
 fn handle_watchdog_command(
     command: WatchdogCommand,
     source: ServiceRole,
@@ -168,6 +177,41 @@ fn handle_watchdog_command(
     server: &mut WatchdogServer,
 ) -> Result<WatchdogCommand> {
     match command {
+        WatchdogCommand::Restart { role, reason } => {
+            if role == ServiceRole::Compd || role == ServiceRole::Lockd {
+                println!(
+                    "service=watchdog op=recovery_request event=accepted role={} reason=\"{}\" requested_by={}",
+                    role.as_str(),
+                    reason,
+                    source.as_str()
+                );
+
+                let artifact = WatchdogRecoveryArtifact {
+                    role: role.as_str().into(),
+                    reason: reason.clone(),
+                    requested_by: source.as_str().into(),
+                    unix_timestamp: now_unix_timestamp(),
+                    action: "restart-request-accepted".into(),
+                };
+
+                let artifact_path = write_recovery_artifact(&artifact)?;
+                println!(
+                    "service=watchdog op=write_recovery_artifact path={}",
+                    artifact_path.display()
+                );
+
+                Ok(WatchdogCommand::Restart { role, reason })
+            } else {
+                println!(
+                    "service=watchdog op=recovery_request event=rejected role={} reason=\"unsupported role\"",
+                    role.as_str()
+                );
+                Ok(WatchdogCommand::Escalate {
+                    level: 1,
+                    reason: format!("watchdog does not support restarting {}", role.as_str()),
+                })
+            }
+        }
         WatchdogCommand::InspectLaunchState { state } => match server.cache_full_state(&state) {
             StateUpdateOutcome::Accepted(state) => {
                 let report = inspect_launch_state(&state);
@@ -536,6 +580,15 @@ fn component_action(component: &SessionLaunchComponentState) -> DesktopRecoveryA
 
 fn process_exists(pid: u32) -> bool {
     PathBuf::from("/proc").join(pid.to_string()).exists()
+}
+
+fn write_recovery_artifact(artifact: &WatchdogRecoveryArtifact) -> Result<PathBuf> {
+    let dir = ensure_runtime_dir()?;
+    let path = dir.join(format!("watchdog-recovery-{}.json", artifact.role));
+    let json = serde_json::to_string_pretty(artifact)
+        .context("failed to serialize watchdog recovery artifact")?;
+    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
 }
 
 fn write_report(report: &SessionWatchdogReport) -> Result<PathBuf> {
