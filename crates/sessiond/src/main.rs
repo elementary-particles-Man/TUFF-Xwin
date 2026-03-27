@@ -614,6 +614,43 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
         });
     }
 
+    if final_state == "restart-request" {
+        println!("service=sessiond op=resume_sequence event=watchdog_restart_request role=compd");
+        let res = send_watchdog_command(WatchdogCommand::Restart {
+            role: ServiceRole::Compd,
+            reason: "resume failure (restart-request)".into(),
+        });
+
+        match res {
+            Ok(envelope) => {
+                if let MessageKind::WatchdogCommand(WatchdogCommand::Restart { .. }) = envelope.kind
+                {
+                    steps.push(ResumeStep {
+                        name: "watchdog_restart_request".into(),
+                        service: "watchdog".into(),
+                        outcome: "accepted".into(),
+                        detail: None,
+                    });
+                } else {
+                    steps.push(ResumeStep {
+                        name: "watchdog_restart_request".into(),
+                        service: "watchdog".into(),
+                        outcome: "rejected".into(),
+                        detail: Some(format!("{:?}", envelope.kind)),
+                    });
+                }
+            }
+            Err(err) => {
+                steps.push(ResumeStep {
+                    name: "watchdog_restart_request".into(),
+                    service: "watchdog".into(),
+                    outcome: "unreachable".into(),
+                    detail: Some(err.to_string()),
+                });
+            }
+        }
+    }
+
     println!("service=sessiond op=resume_sequence event=finished final_state={}", final_state);
 
     let trace = ResumeTrace {
