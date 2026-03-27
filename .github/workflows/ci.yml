@@ -19,3 +19,5 @@ jobs:
         run: cargo test --workspace
       - name: Integration Smoke Test
         run: ./scripts/run-integration-smoke.sh
+      - name: Resume Scenarios Smoke Test
+        run: ./scripts/run-resume-scenarios.sh
