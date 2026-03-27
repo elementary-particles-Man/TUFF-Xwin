@@ -21,3 +21,5 @@ jobs:
         run: ./scripts/run-integration-smoke.sh
       - name: Resume Scenarios Smoke Test
         run: ./scripts/run-resume-scenarios.sh
+      - name: Watchdog Auto-Recovery Smoke Test
+        run: ./scripts/run-watchdog-auto-recovery.sh
