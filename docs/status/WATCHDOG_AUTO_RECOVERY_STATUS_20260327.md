@@ -1,7 +1,8 @@
-# Watchdog Auto-Recovery Wiring Status (2026-03-27)
+# Watchdog Auto-Recovery Wiring Status (2026-03-27) [Merged to main]
 
 ## 概要
-Resume シーケンス中の故障（`restart-request` 状態）を Watchdog へ通知し、Watchdog がリカバリ計画を確定させるまでの配線を完了した。これにより、個別のサービス故障をシステム全体の停止ではなく、監視サービスによる自動復旧フローへ接続する足場が整った。
+Resume シーケンス中の故障（`restart-request` 状態）を Watchdog へ通知し、Watchdog がリカバリ計画を確定させるまでの配線を完了した。
+本成果は `main` ブランチに統合済み。
 
 ## 実装内容
 - **sessiond**:

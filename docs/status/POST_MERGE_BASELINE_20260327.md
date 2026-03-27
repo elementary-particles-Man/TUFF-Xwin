@@ -25,8 +25,9 @@
 ## 変更のハイライト
 - **compd**: 最小ランタイムが実装され、`displayd` へのモックシーンコミットが可能になった。
 - **Resume/Degraded Hardening**: Resume 時の故障分類とシナリオ検証環境が導入された。`sessiond` によるオーケストレーションとトレース生成が `main` に一本化された。
+- **Watchdog Auto-Recovery Wiring**: `restart-request` 状態が Watchdog へ通知され、リカバリ計画がアーティファクトとして記録されるフローが `main` に統合された。
 - **IPC**: `SessionLaunchState` および `SessionLaunchDelta` に `unix_timestamp` が追加され、watchdog 連携の堅牢性が向上した。
 - **Tests**: 構造体の変更に追従し、全てのユニットテストが最新化された。
 
 ## 次のステップ
-- `P3-WATCHDOG-AUTO-RECOVERY-WIRING`: `restart-request` 等の故障ステートを `watchdog` による自動復旧へ接続する。
+- `P4-ROLE-SCOPED-SUPERVISOR-ACTION-EXECUTION`: Watchdog が受理した `restart-request` に基づき、実際にプロセスの再起動を実行する。
