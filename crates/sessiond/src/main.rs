@@ -111,7 +111,11 @@ fn main() -> Result<()> {
     }
 
     if config.resume_demo {
-        run_resume_demo(&config)?;
+        run_resume_scenario(&config, ResumeScenario::Normal)?;
+    }
+
+    if let Some(scenario) = config.resume_scenario {
+        run_resume_scenario(&config, scenario)?;
     }
 
     if config.serve_ipc {
@@ -119,6 +123,51 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeScenario {
+    Normal,
+    DisplaydTrouble,
+    CompdTrouble,
+    LockdTrouble,
+}
+
+impl ResumeScenario {
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "normal" => Ok(Self::Normal),
+            "displayd-trouble" => Ok(Self::DisplaydTrouble),
+            "compd-trouble" => Ok(Self::CompdTrouble),
+            "lockd-trouble" => Ok(Self::LockdTrouble),
+            _ => bail!("unknown resume scenario: {s}"),
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::DisplaydTrouble => "displayd-trouble",
+            Self::CompdTrouble => "compd-trouble",
+            Self::LockdTrouble => "lockd-trouble",
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ResumeTrace {
+    scenario: String,
+    unix_timestamp: u64,
+    steps: Vec<ResumeStep>,
+    final_state: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ResumeStep {
+    name: String,
+    service: String,
+    outcome: String,
+    detail: Option<String>,
 }
 
 #[derive(Debug)]
@@ -141,6 +190,7 @@ struct Config {
     manage_active: bool,
     notify_watchdog: bool,
     resume_demo: bool,
+    resume_scenario: Option<ResumeScenario>,
 }
 
 impl Default for Config {
@@ -164,6 +214,7 @@ impl Default for Config {
             manage_active: false,
             notify_watchdog: false,
             resume_demo: false,
+            resume_scenario: None,
         }
     }
 }
@@ -205,6 +256,10 @@ impl Config {
                 "--manage-active" => config.manage_active = true,
                 "--notify-watchdog" => config.notify_watchdog = true,
                 "--resume-demo" => config.resume_demo = true,
+                "--resume-scenario" => {
+                    let scenario = args.next().context("--resume-scenario requires a name")?;
+                    config.resume_scenario = Some(ResumeScenario::from_str(&scenario)?);
+                }
                 "--supervise-seconds" => {
                     let value = args.next().context("--supervise-seconds requires a number")?;
                     config.supervise_seconds = value
@@ -219,7 +274,7 @@ impl Config {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: sessiond [--repo-root PATH] [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N] [--apply-watchdog-active] [--watchdog-report PATH] [--serve-ipc] [--once] [--manage-active] [--notify-watchdog] [--resume-demo]"
+                        "usage: sessiond [--repo-root PATH] [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N] [--apply-watchdog-active] [--watchdog-report PATH] [--serve-ipc] [--once] [--manage-active] [--notify-watchdog] [--resume-demo] [--resume-scenario NAME]"
                     );
                     std::process::exit(0);
                 }
@@ -319,61 +374,267 @@ fn read_watchdog_report(
         .with_context(|| format!("failed to decode watchdog report {}", path.display()))
 }
 
-fn run_resume_demo(_config: &Config) -> Result<()> {
-    println!("sessiond resume_sequence=begin");
+fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()> {
+    println!("service=sessiond op=resume_sequence event=begin scenario={}", scenario.as_str());
+
+    let mut steps = Vec::new();
+    let mut final_state = "normal".to_string();
 
     // 1. sessiond -> displayd (ResumeBegin)
-    let response = send_ipc_and_wait(
+    let displayd_res = send_ipc_and_wait(
         ServiceRole::Displayd,
         MessageKind::DisplayCommand(waybroker_common::DisplayCommand::ResumeBegin),
-    )?;
-    println!("sessiond resume_sequence=displayd_started response={:?}", response.kind);
+    );
 
-    // 2. sessiond -> lockd (SetLockState Locked)
-    let response = send_ipc_and_wait(
-        ServiceRole::Lockd,
-        MessageKind::LockCommand(waybroker_common::LockCommand::SetLockState {
-            state: waybroker_common::LockState::Locked,
-        }),
-    )?;
-    println!("sessiond resume_sequence=lockd_locked response={:?}", response.kind);
+    match displayd_res {
+        Ok(envelope) => {
+            if let MessageKind::DisplayEvent(waybroker_common::DisplayEvent::ResumeStarted) =
+                envelope.kind
+            {
+                println!("service=sessiond op=resume_sequence event=displayd_started");
+                steps.push(ResumeStep {
+                    name: "resume_begin".into(),
+                    service: "displayd".into(),
+                    outcome: "success".into(),
+                    detail: None,
+                });
+            } else {
+                println!(
+                    "service=sessiond op=resume_sequence event=displayd_failed detail={:?}",
+                    envelope.kind
+                );
+                steps.push(ResumeStep {
+                    name: "resume_begin".into(),
+                    service: "displayd".into(),
+                    outcome: "failed".into(),
+                    detail: Some(format!("{:?}", envelope.kind)),
+                });
+                final_state = "hold".into();
+            }
+        }
+        Err(err) => {
+            println!(
+                "service=sessiond op=resume_sequence event=displayd_unreachable reason=\"{err}\""
+            );
+            steps.push(ResumeStep {
+                name: "resume_begin".into(),
+                service: "displayd".into(),
+                outcome: "unreachable".into(),
+                detail: Some(err.to_string()),
+            });
+            final_state = "hold".into();
+        }
+    }
 
-    // 3. sessiond -> compd (ResumeHint OutputsRecovered)
-    let response = send_ipc_and_wait(
-        ServiceRole::Compd,
-        MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
-            stage: waybroker_common::ResumeStage::OutputsRecovered,
-            output: Some(waybroker_common::OutputMode {
-                name: "eDP-1".into(),
-                width: 1920,
-                height: 1080,
-                refresh_hz: 60,
+    if final_state == "normal" {
+        // 2. sessiond -> lockd (SetLockState Locked)
+        let lockd_res = send_ipc_and_wait(
+            ServiceRole::Lockd,
+            MessageKind::LockCommand(waybroker_common::LockCommand::SetLockState {
+                state: waybroker_common::LockState::Locked,
             }),
-        }),
-    )?;
-    println!("sessiond resume_sequence=compd_outputs_recovered response={:?}", response.kind);
+        );
 
-    // 4. sessiond -> lockd (AuthPrompt)
-    let response = send_ipc_and_wait(
-        ServiceRole::Lockd,
-        MessageKind::LockCommand(waybroker_common::LockCommand::AuthPrompt {
-            reason: "resume auth required".into(),
-        }),
-    )?;
-    println!("sessiond resume_sequence=lockd_auth_prompt response={:?}", response.kind);
+        match lockd_res {
+            Ok(envelope) => {
+                if let MessageKind::LockCommand(waybroker_common::LockCommand::SetLockState {
+                    state: waybroker_common::LockState::Locked,
+                }) = envelope.kind
+                {
+                    println!("service=sessiond op=resume_sequence event=lockd_locked");
+                    steps.push(ResumeStep {
+                        name: "set_lock_state".into(),
+                        service: "lockd".into(),
+                        outcome: "success".into(),
+                        detail: None,
+                    });
+                } else {
+                    println!(
+                        "service=sessiond op=resume_sequence event=lockd_failed detail={:?}",
+                        envelope.kind
+                    );
+                    steps.push(ResumeStep {
+                        name: "set_lock_state".into(),
+                        service: "lockd".into(),
+                        outcome: "failed".into(),
+                        detail: Some(format!("{:?}", envelope.kind)),
+                    });
+                    final_state = "blank-only".into();
+                }
+            }
+            Err(err) => {
+                println!(
+                    "service=sessiond op=resume_sequence event=lockd_unreachable reason=\"{err}\""
+                );
+                steps.push(ResumeStep {
+                    name: "set_lock_state".into(),
+                    service: "lockd".into(),
+                    outcome: "unreachable".into(),
+                    detail: Some(err.to_string()),
+                });
+                final_state = "blank-only".into();
+            }
+        }
+    }
 
-    // 5. sessiond -> compd (ResumeHint Complete)
-    let response = send_ipc_and_wait(
-        ServiceRole::Compd,
-        MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
-            stage: waybroker_common::ResumeStage::Complete,
-            output: None,
-        }),
-    )?;
-    println!("sessiond resume_sequence=compd_complete response={:?}", response.kind);
+    if final_state == "normal" {
+        // 3. sessiond -> compd (ResumeHint OutputsRecovered)
+        let compd_res = send_ipc_and_wait(
+            ServiceRole::Compd,
+            MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
+                stage: waybroker_common::ResumeStage::OutputsRecovered,
+                output: Some(waybroker_common::OutputMode {
+                    name: "eDP-1".into(),
+                    width: 1920,
+                    height: 1080,
+                    refresh_hz: 60,
+                }),
+            }),
+        );
 
-    println!("sessiond resume_sequence=finished");
+        match compd_res {
+            Ok(envelope) => {
+                if let MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
+                    ..
+                }) = envelope.kind
+                {
+                    println!("service=sessiond op=resume_sequence event=compd_outputs_recovered");
+                    steps.push(ResumeStep {
+                        name: "resume_hint_outputs".into(),
+                        service: "compd".into(),
+                        outcome: "success".into(),
+                        detail: None,
+                    });
+                } else {
+                    println!(
+                        "service=sessiond op=resume_sequence event=compd_failed detail={:?}",
+                        envelope.kind
+                    );
+                    steps.push(ResumeStep {
+                        name: "resume_hint_outputs".into(),
+                        service: "compd".into(),
+                        outcome: "failed".into(),
+                        detail: Some(format!("{:?}", envelope.kind)),
+                    });
+                    final_state = "restart-request".into();
+                }
+            }
+            Err(err) => {
+                println!(
+                    "service=sessiond op=resume_sequence event=compd_unreachable reason=\"{err}\""
+                );
+                steps.push(ResumeStep {
+                    name: "resume_hint_outputs".into(),
+                    service: "compd".into(),
+                    outcome: "unreachable".into(),
+                    detail: Some(err.to_string()),
+                });
+                final_state = "restart-request".into();
+            }
+        }
+    }
+
+    if final_state == "normal" {
+        // 4. sessiond -> lockd (AuthPrompt)
+        let lockd_res = send_ipc_and_wait(
+            ServiceRole::Lockd,
+            MessageKind::LockCommand(waybroker_common::LockCommand::AuthPrompt {
+                reason: "resume auth required".into(),
+            }),
+        );
+
+        match lockd_res {
+            Ok(envelope) => {
+                if let MessageKind::LockCommand(waybroker_common::LockCommand::AuthPrompt {
+                    reason,
+                }) = envelope.kind
+                {
+                    if reason == "fault injection" {
+                        println!("service=sessiond op=resume_sequence event=lockd_auth_failed");
+                        steps.push(ResumeStep {
+                            name: "auth_prompt".into(),
+                            service: "lockd".into(),
+                            outcome: "failed".into(),
+                            detail: Some("auth prompt fault injection".into()),
+                        });
+                        final_state = "blank-only".into();
+                    } else {
+                        println!("service=sessiond op=resume_sequence event=lockd_auth_prompt");
+                        steps.push(ResumeStep {
+                            name: "auth_prompt".into(),
+                            service: "lockd".into(),
+                            outcome: "success".into(),
+                            detail: None,
+                        });
+                    }
+                } else {
+                    println!(
+                        "service=sessiond op=resume_sequence event=lockd_auth_failed detail={:?}",
+                        envelope.kind
+                    );
+                    steps.push(ResumeStep {
+                        name: "auth_prompt".into(),
+                        service: "lockd".into(),
+                        outcome: "failed".into(),
+                        detail: Some(format!("{:?}", envelope.kind)),
+                    });
+                    final_state = "blank-only".into();
+                }
+            }
+            Err(err) => {
+                println!(
+                    "service=sessiond op=resume_sequence event=lockd_auth_unreachable reason=\"{err}\""
+                );
+                steps.push(ResumeStep {
+                    name: "auth_prompt".into(),
+                    service: "lockd".into(),
+                    outcome: "unreachable".into(),
+                    detail: Some(err.to_string()),
+                });
+                final_state = "blank-only".into();
+            }
+        }
+    }
+
+    if final_state == "normal" {
+        // 5. sessiond -> compd (ResumeHint Complete)
+        let _ = send_ipc_and_wait(
+            ServiceRole::Compd,
+            MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
+                stage: waybroker_common::ResumeStage::Complete,
+                output: None,
+            }),
+        );
+        println!("service=sessiond op=resume_sequence event=compd_complete");
+        steps.push(ResumeStep {
+            name: "resume_hint_complete".into(),
+            service: "compd".into(),
+            outcome: "success".into(),
+            detail: None,
+        });
+    }
+
+    println!("service=sessiond op=resume_sequence event=finished final_state={}", final_state);
+
+    let trace = ResumeTrace {
+        scenario: scenario.as_str().into(),
+        unix_timestamp: now_unix_timestamp(),
+        steps,
+        final_state,
+    };
+
+    write_resume_trace(&trace)?;
+
     Ok(())
+}
+
+fn write_resume_trace(trace: &ResumeTrace) -> Result<PathBuf> {
+    let dir = ensure_runtime_dir()?;
+    let path = dir.join(format!("resume-trace-{}.json", trace.scenario));
+    let json = serde_json::to_string_pretty(trace).context("failed to serialize resume trace")?;
+    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    println!("service=sessiond op=write_resume_trace event=success path={}", path.display());
+    Ok(path)
 }
 
 fn send_ipc_and_wait(destination: ServiceRole, kind: MessageKind) -> Result<IpcEnvelope> {
