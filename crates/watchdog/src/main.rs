@@ -347,7 +347,8 @@ impl WatchdogServer {
             sequence,
             replace,
             components,
-            ..
+            unix_timestamp: _,
+            service_component_bindings,
         } = delta;
 
         let Some(current) = self.cached_states.get(&profile_id).cloned() else {
@@ -403,7 +404,7 @@ impl WatchdogServer {
             }
         }
 
-        let mut state = if replace {
+        let next_state = if replace {
             SessionLaunchState {
                 profile_id: profile_id.clone(),
                 display_name,
@@ -413,6 +414,7 @@ impl WatchdogServer {
                 sequence,
                 components,
                 unix_timestamp: now_unix_timestamp(),
+                service_component_bindings,
             }
         } else {
             let mut state = current;
@@ -422,6 +424,7 @@ impl WatchdogServer {
             state.generation = generation;
             state.sequence = sequence;
             state.unix_timestamp = now_unix_timestamp();
+            state.service_component_bindings = service_component_bindings;
 
             for component in components {
                 if let Some(existing) =
@@ -436,10 +439,8 @@ impl WatchdogServer {
             state
         };
 
-        state.generation = generation;
-        state.sequence = sequence;
-        self.cached_states.insert(profile_id, state.clone());
-        StateUpdateOutcome::Accepted(state)
+        self.cached_states.insert(profile_id, next_state.clone());
+        StateUpdateOutcome::Accepted(next_state)
     }
 }
 
@@ -717,6 +718,7 @@ mod tests {
                 last_exit_status: None,
             }],
             unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
         };
 
         let report = inspect_launch_state(&state);
@@ -747,6 +749,7 @@ mod tests {
                 last_exit_status: None,
             }],
             unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
         };
 
         let report = inspect_launch_state(&state);
@@ -790,6 +793,7 @@ mod tests {
                 },
             ],
             unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
         };
         let mut server = WatchdogServer::default();
         server.cache_full_state(&state);
@@ -814,6 +818,7 @@ mod tests {
                 last_exit_status: Some(1),
             }],
             unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
         }) {
             StateUpdateOutcome::Accepted(state) => state,
             other => panic!("expected merged delta state, got {other:?}"),
@@ -856,6 +861,7 @@ mod tests {
                         last_exit_status: Some(1),
                     }],
                     unix_timestamp: 0,
+                    service_component_bindings: Vec::new(),
                 },
             },
             ServiceRole::Sessiond,
@@ -894,6 +900,7 @@ mod tests {
                 last_exit_status: None,
             }],
             unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
         };
         let mut server = WatchdogServer::default();
         server.cache_full_state(&state);
@@ -918,6 +925,7 @@ mod tests {
                 last_exit_status: Some(1),
             }],
             unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
         });
 
         match response {
@@ -951,6 +959,7 @@ mod tests {
                 last_exit_status: None,
             }],
             unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
         };
         let mut server = WatchdogServer::default();
         server.cache_full_state(&state);
@@ -975,6 +984,7 @@ mod tests {
                 last_exit_status: Some(1),
             }],
             unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
         });
 
         match response {
