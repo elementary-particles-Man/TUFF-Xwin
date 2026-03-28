@@ -25,5 +25,11 @@
       "critical": false,
       "launcher": "repo-script"
     }
+  ],
+  "service_component_bindings": [
+    {
+      "service": "compd",
+      "component_id": "crashy-wm"
+    }
   ]
 }

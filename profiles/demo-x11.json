@@ -32,5 +32,15 @@
       "critical": false,
       "launcher": "repo-script"
     }
+  ],
+  "service_component_bindings": [
+    {
+      "service": "compd",
+      "component_id": "demo-wm"
+    },
+    {
+      "service": "x11bridge",
+      "component_id": "demo-x11bridge"
+    }
   ]
 }
