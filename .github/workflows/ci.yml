@@ -23,3 +23,5 @@ jobs:
         run: ./scripts/run-resume-scenarios.sh
       - name: Watchdog Auto-Recovery Smoke Test
         run: ./scripts/run-watchdog-auto-recovery.sh
+      - name: Role-Scoped Recovery Execution Smoke Test
+        run: ./scripts/run-role-scoped-recovery-execution.sh
