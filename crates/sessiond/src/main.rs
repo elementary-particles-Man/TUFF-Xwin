@@ -1310,6 +1310,32 @@ impl Drop for SocketGuard {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct WatchdogRecoveryArtifact {
+    #[allow(dead_code)]
+    role: String,
+    reason: String,
+    #[allow(dead_code)]
+    requested_by: String,
+    unix_timestamp: u64,
+    #[allow(dead_code)]
+    action: String,
+    status: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct WatchdogExecutionArtifact {
+    role: String,
+    action: String,
+    requested_at: u64,
+    executed_at: u64,
+    result: String,
+    component_id: Option<String>,
+    previous_pid: Option<u32>,
+    new_pid: Option<u32>,
+    reason: String,
+}
+
 struct SessionSupervisor {
     profiles: Vec<DesktopProfile>,
     profile: DesktopProfile,
@@ -1375,8 +1401,127 @@ impl SessionSupervisor {
         Ok(())
     }
 
+    fn process_recovery_requests(&mut self, config: &Config) -> Result<bool> {
+        let runtime = ensure_runtime_dir()?;
+        let mut executed_any = false;
+
+        // Support roles
+        let supported_roles = [ServiceRole::Compd, ServiceRole::Lockd];
+
+        for role in supported_roles {
+            let recovery_path = runtime.join(format!("watchdog-recovery-{}.json", role.as_str()));
+            if !recovery_path.exists() {
+                continue;
+            }
+
+            let raw = fs::read_to_string(&recovery_path)?;
+            let recovery: WatchdogRecoveryArtifact = match serde_json::from_str(&raw) {
+                Ok(r) => r,
+                Err(err) => {
+                    println!(
+                        "service=sessiond op=recovery_execution event=invalid_artifact role={} error=\"{err}\"",
+                        role.as_str()
+                    );
+                    let _ = fs::remove_file(&recovery_path);
+                    continue;
+                }
+            };
+
+            if recovery.status != "pending" {
+                continue;
+            }
+
+            println!(
+                "service=sessiond op=recovery_execution event=started role={} reason=\"{}\"",
+                role.as_str(),
+                recovery.reason
+            );
+
+            let execution = self.execute_recovery(role, &recovery, config)?;
+
+            let execution_path =
+                runtime.join(format!("watchdog-action-execution-{}.json", role.as_str()));
+            let json = serde_json::to_string_pretty(&execution)?;
+            fs::write(execution_path, json)?;
+
+            println!(
+                "service=sessiond op=recovery_execution event=finished role={} result={} component={:?} new_pid={:?}",
+                role.as_str(),
+                execution.result,
+                execution.component_id,
+                execution.new_pid
+            );
+
+            let _ = fs::remove_file(&recovery_path);
+            executed_any = true;
+        }
+
+        Ok(executed_any)
+    }
+
+    fn execute_recovery(
+        &mut self,
+        role: ServiceRole,
+        recovery: &WatchdogRecoveryArtifact,
+        _config: &Config,
+    ) -> Result<WatchdogExecutionArtifact> {
+        let mut artifact = WatchdogExecutionArtifact {
+            role: role.as_str().into(),
+            action: "restart".into(),
+            requested_at: recovery.unix_timestamp,
+            executed_at: now_unix_timestamp(),
+            result: "failed".into(),
+            component_id: None,
+            previous_pid: None,
+            new_pid: None,
+            reason: "no matching component for role".into(),
+        };
+
+        // Resolve ServiceRole to DesktopComponentRole string
+        let target_role_str = match role {
+            ServiceRole::Compd => "window-manager",
+            ServiceRole::Lockd => "lockscreen",
+            other => other.as_str(),
+        };
+
+        let target_component =
+            self.components.iter_mut().find(|c| c.component.role.as_str() == target_role_str);
+
+        let Some(component) = target_component else {
+            artifact.result = "no-executor".into();
+            artifact.reason = format!("no component found with role {target_role_str}");
+            return Ok(artifact);
+        };
+
+        artifact.component_id = Some(component.component.id.clone());
+        artifact.previous_pid = component.state.pid;
+
+        println!(
+            "service=sessiond op=recovery_execution event=stopping_component id={}",
+            component.component.id
+        );
+        component.stop()?;
+
+        println!(
+            "service=sessiond op=recovery_execution event=spawning_component id={}",
+            component.component.id
+        );
+        component.spawn(&self.profile.id)?;
+
+        if component.state.state == DesktopComponentState::Spawned {
+            artifact.result = "succeeded".into();
+            artifact.new_pid = component.state.pid;
+            artifact.reason = "component restarted successfully".into();
+        } else {
+            artifact.result = "failed".into();
+            artifact.reason = "failed to spawn component".into();
+        }
+
+        Ok(artifact)
+    }
+
     fn poll(&mut self, config: &Config) -> Result<bool> {
-        let mut had_event = false;
+        let mut had_event = self.process_recovery_requests(config)?;
 
         for component in &mut self.components {
             if component.poll_and_restart(&self.profile.id, config.restart_limit)? {
