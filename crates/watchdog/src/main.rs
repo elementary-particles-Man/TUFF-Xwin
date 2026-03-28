@@ -161,13 +161,14 @@ fn build_response(
     Ok(IpcEnvelope::new(ServiceRole::Watchdog, source, response_kind))
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct WatchdogRecoveryArtifact {
     role: String,
     reason: String,
     requested_by: String,
     unix_timestamp: u64,
     action: String,
+    status: String,
 }
 
 fn handle_watchdog_command(
@@ -192,6 +193,7 @@ fn handle_watchdog_command(
                     requested_by: source.as_str().into(),
                     unix_timestamp: now_unix_timestamp(),
                     action: "restart-request-accepted".into(),
+                    status: "pending".into(),
                 };
 
                 let artifact_path = write_recovery_artifact(&artifact)?;
