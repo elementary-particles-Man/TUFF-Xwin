@@ -7,7 +7,7 @@ Watchdog が受理したリカバリ要求（restart-request）に基づき、`m
 ## 実装内容
 - **sessiond (Recovery Executor)**:
   - スーパーバイザーループ内で `watchdog-recovery-*.json` を監視。
-  - `ServiceRole` から実コンポーネントへの解決（例: `Compd` -> `window-manager` ロールを持つコンポーネント）。
+  - ServiceRole から実コンポーネントへの解決（Profile 内の `service_component_bindings` による明示的マッピング）。
   - `RuntimeComponent` を用いた安全な停止（kill/wait）と再起動（spawn）。
   - 実行結果の永続化（`watchdog-action-execution-<role>.json`）。
 - **watchdog (Artifact Schema)**:
