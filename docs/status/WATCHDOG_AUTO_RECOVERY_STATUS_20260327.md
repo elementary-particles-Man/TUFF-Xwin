@@ -22,7 +22,7 @@ Resume シーケンス中の故障（`restart-request` 状態）を Watchdog へ
 
 ## 検証スクリプト
 - `scripts/run-watchdog-auto-recovery.sh`: 配線の検証。
-- `scripts/run-role-scoped-recovery-execution.sh`: 実実行の検証。
+- `scripts/run-role-scoped-recovery-execution.sh`: 実実行の検証（main 反映済み）。
 
 ## 生成アーティファクト例 (`watchdog-recovery-compd.json`)
 ```json

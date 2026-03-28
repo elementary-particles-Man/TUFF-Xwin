@@ -1,7 +1,8 @@
-# Role-Scoped Recovery Execution Status (2026-03-27)
+# Role-Scoped Recovery Execution Status (2026-03-27) [Merged to main]
 
 ## 概要
-Watchdog が受理したリカバリ要求（restart-request）に基づき、`manage-active` な `sessiond` スーパーバイザーが対象コンポーネントを実際に再起動するフローを実装・検証した。これにより、「監視 -> 受理 -> 実行」のリカバリライフサイクルが完走するようになった。
+Watchdog が受理したリカバリ要求（restart-request）に基づき、`manage-active` な `sessiond` スーパーバイザーが対象コンポーネントを実際に再起動するフローを実装・検証した。
+本成果は `main` ブランチに統合済み。
 
 ## 実装内容
 - **sessiond (Recovery Executor)**:
