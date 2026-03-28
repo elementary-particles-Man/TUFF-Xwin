@@ -827,6 +827,7 @@ fn build_launch_state(profile: &DesktopProfile, config: &Config) -> Result<Sessi
         sequence: 1,
         components,
         unix_timestamp: now_unix_timestamp(),
+        service_component_bindings: profile.service_component_bindings.clone(),
     })
 }
 
@@ -865,6 +866,7 @@ fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<S
         sequence: 1,
         components: components.into_iter().map(|component| component.state).collect(),
         unix_timestamp: now_unix_timestamp(),
+        service_component_bindings: profile.service_component_bindings.clone(),
     })
 }
 
@@ -1247,6 +1249,7 @@ fn watchdog_stream_command(
                 replace: true,
                 components: state.components.clone(),
                 unix_timestamp: now_unix_timestamp(),
+                service_component_bindings: state.service_component_bindings.clone(),
             },
         };
     }
@@ -1275,6 +1278,7 @@ fn watchdog_stream_command(
             replace: false,
             components: changed_components,
             unix_timestamp: now_unix_timestamp(),
+            service_component_bindings: state.service_component_bindings.clone(),
         },
     }
 }
@@ -1334,6 +1338,8 @@ struct WatchdogExecutionArtifact {
     previous_pid: Option<u32>,
     new_pid: Option<u32>,
     reason: String,
+    resolution_source: String,
+    bound_component_id: Option<String>,
 }
 
 struct SessionSupervisor {
@@ -1475,21 +1481,45 @@ impl SessionSupervisor {
             previous_pid: None,
             new_pid: None,
             reason: "no matching component for role".into(),
+            resolution_source: "explicit".into(),
+            bound_component_id: None,
         };
 
-        // Resolve ServiceRole to DesktopComponentRole string
-        let target_role_str = match role {
-            ServiceRole::Compd => "window-manager",
-            ServiceRole::Lockd => "lockscreen",
-            other => other.as_str(),
-        };
+        // Try explicit binding first
+        let target_id = self
+            .profile
+            .service_component_bindings
+            .iter()
+            .find(|b| b.service == role)
+            .map(|b| b.component_id.clone());
 
-        let target_component =
-            self.components.iter_mut().find(|c| c.component.role.as_str() == target_role_str);
+        let target_component = if let Some(id) = target_id {
+            artifact.bound_component_id = Some(id.clone());
+            println!(
+                "service=sessiond op=recovery_resolution event=bound role={} component_id={}",
+                role.as_str(),
+                id
+            );
+            self.components.iter_mut().find(|c| c.component.id == id)
+        } else {
+            // Legacy fallback
+            artifact.resolution_source = "legacy_fallback".into();
+            let target_role_str = match role {
+                ServiceRole::Compd => "window-manager",
+                ServiceRole::Lockd => "lockscreen",
+                other => other.as_str(),
+            };
+            println!(
+                "service=sessiond op=recovery_resolution event=legacy_fallback role={} target_role={}",
+                role.as_str(),
+                target_role_str
+            );
+            self.components.iter_mut().find(|c| c.component.role.as_str() == target_role_str)
+        };
 
         let Some(component) = target_component else {
             artifact.result = "no-executor".into();
-            artifact.reason = format!("no component found with role {target_role_str}");
+            artifact.reason = "no component found via selected resolution source".into();
             return Ok(artifact);
         };
 
@@ -1556,6 +1586,7 @@ impl SessionSupervisor {
             sequence: self.stream_sequence,
             components: self.components.iter().map(|component| component.state.clone()).collect(),
             unix_timestamp: now_unix_timestamp(),
+            service_component_bindings: self.profile.service_component_bindings.clone(),
         }
     }
 
@@ -1760,6 +1791,7 @@ mod tests {
                 critical: true,
                 launcher: waybroker_common::DesktopLauncher::System,
             }],
+            service_component_bindings: Vec::new(),
         };
 
         let config = super::Config::default();
@@ -1812,6 +1844,7 @@ mod tests {
             degraded_profile_id: Some("demo-x11-degraded".into()),
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
             session_components: Vec::new(),
+            service_component_bindings: Vec::new(),
         };
         let degraded_profile = DesktopProfile {
             id: "demo-x11-degraded".into(),
@@ -1821,6 +1854,7 @@ mod tests {
             degraded_profile_id: None,
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
             session_components: Vec::new(),
+            service_component_bindings: Vec::new(),
         };
         let report = SessionWatchdogReport {
             profile_id: "demo-x11-crashy".into(),
@@ -1872,6 +1906,7 @@ mod tests {
             degraded_profile_id: Some("demo-x11-degraded".into()),
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
             session_components: Vec::new(),
+            service_component_bindings: Vec::new(),
         };
         let report = SessionWatchdogReport {
             profile_id: "demo-x11".into(),
@@ -1928,6 +1963,7 @@ mod tests {
                 last_exit_status: None,
             }],
             unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
         };
         let next = SessionLaunchState {
             profile_id: "demo-x11".into(),
@@ -1948,6 +1984,7 @@ mod tests {
                 last_exit_status: Some(1),
             }],
             unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
         };
 
         let command = watchdog_stream_command(&next, Some(&previous));
@@ -1986,6 +2023,7 @@ mod tests {
                 last_exit_status: None,
             }],
             unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
         };
         let next = SessionLaunchState {
             profile_id: "demo-x11-degraded".into(),
@@ -2006,6 +2044,7 @@ mod tests {
                 last_exit_status: None,
             }],
             unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
         };
 
         let command = watchdog_stream_command(&next, Some(&previous));
