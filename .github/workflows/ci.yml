@@ -25,3 +25,5 @@ jobs:
         run: ./scripts/run-watchdog-auto-recovery.sh
       - name: Role-Scoped Recovery Execution Smoke Test
         run: ./scripts/run-role-scoped-recovery-execution.sh
+      - name: Component Identity Mapping Smoke Test
+        run: ./scripts/run-component-identity-mapping-smoke.sh
