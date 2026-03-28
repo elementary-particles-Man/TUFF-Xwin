@@ -77,6 +77,12 @@ pub struct DesktopComponent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceComponentBinding {
+    pub service: ServiceRole,
+    pub component_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesktopProfile {
     pub id: String,
     pub display_name: String,
@@ -85,6 +91,8 @@ pub struct DesktopProfile {
     pub degraded_profile_id: Option<String>,
     pub broker_services: Vec<ServiceRole>,
     pub session_components: Vec<DesktopComponent>,
+    #[serde(default)]
+    pub service_component_bindings: Vec<ServiceComponentBinding>,
 }
 
 impl DesktopProfile {
@@ -95,6 +103,7 @@ impl DesktopProfile {
             protocol: self.protocol,
             broker_services: self.broker_services.clone(),
             session_components: self.session_components.clone(),
+            service_component_bindings: self.service_component_bindings.clone(),
         }
     }
 }
@@ -106,6 +115,8 @@ pub struct SessionLaunchPlan {
     pub protocol: DesktopProtocol,
     pub broker_services: Vec<ServiceRole>,
     pub session_components: Vec<DesktopComponent>,
+    #[serde(default)]
+    pub service_component_bindings: Vec<ServiceComponentBinding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +164,8 @@ pub struct SessionLaunchState {
     pub sequence: u64,
     pub components: Vec<SessionLaunchComponentState>,
     pub unix_timestamp: u64,
+    #[serde(default)]
+    pub service_component_bindings: Vec<ServiceComponentBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +181,8 @@ pub struct SessionLaunchDelta {
     pub replace: bool,
     pub components: Vec<SessionLaunchComponentState>,
     pub unix_timestamp: u64,
+    #[serde(default)]
+    pub service_component_bindings: Vec<ServiceComponentBinding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +283,7 @@ mod tests {
                 critical: true,
                 launcher: DesktopLauncher::System,
             }],
+            service_component_bindings: Vec::new(),
         };
 
         let plan = profile.launch_plan();
