@@ -170,6 +170,21 @@ struct ResumeStep {
     detail: Option<String>,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct LockPathArtifact {
+    scenario: String,
+    service: String,
+    binding_source: String,
+    bound_component_id: Option<String>,
+    component_role: Option<String>,
+    ui_component_present: bool,
+    lock_state_outcome: String,
+    auth_outcome: String,
+    final_state: String,
+    reason: String,
+    unix_timestamp: u64,
+}
+
 #[derive(Debug)]
 struct Config {
     repo_root: Option<PathBuf>,
@@ -379,6 +394,45 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
 
     let mut steps = Vec::new();
     let mut final_state = "normal".to_string();
+    let mut lock_state_outcome = "skipped".to_string();
+    let mut auth_outcome = "skipped".to_string();
+    let mut lock_reason = "normal".to_string();
+
+    let profile = read_active_profile().ok();
+    let lockd_binding = profile.as_ref().and_then(|p| {
+        p.service_component_bindings.iter().find(|b| b.service == ServiceRole::Lockd)
+    });
+
+    let binding_source = if lockd_binding.is_some() { "explicit" } else { "missing" };
+    let bound_component_id = lockd_binding.map(|b| b.component_id.clone());
+    let ui_component_present = if let (Some(p), Some(id)) = (&profile, &bound_component_id) {
+        p.session_components
+            .iter()
+            .any(|c| c.id == *id && c.role == waybroker_common::DesktopComponentRole::LockScreen)
+    } else {
+        false
+    };
+
+    if binding_source == "missing" {
+        println!(
+            "service=sessiond op=resume_sequence event=lockd_binding_missing action=blank-only"
+        );
+        final_state = "blank-only".into();
+        lock_reason = "missing lockd binding".into();
+        steps.push(ResumeStep {
+            name: "lockd_binding_resolution".into(),
+            service: "sessiond".into(),
+            outcome: "missing".into(),
+            detail: Some("no lockd binding found in profile".into()),
+        });
+    } else {
+        steps.push(ResumeStep {
+            name: "lockd_binding_resolution".into(),
+            service: "sessiond".into(),
+            outcome: "explicit".into(),
+            detail: Some(format!("bound to {:?}", bound_component_id)),
+        });
+    }
 
     // 1. sessiond -> displayd (ResumeBegin)
     let displayd_res = send_ipc_and_wait(
@@ -442,6 +496,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                 }) = envelope.kind
                 {
                     println!("service=sessiond op=resume_sequence event=lockd_locked");
+                    lock_state_outcome = "success".into();
                     steps.push(ResumeStep {
                         name: "set_lock_state".into(),
                         service: "lockd".into(),
@@ -453,6 +508,8 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                         "service=sessiond op=resume_sequence event=lockd_failed detail={:?}",
                         envelope.kind
                     );
+                    lock_state_outcome = "failed".into();
+                    lock_reason = "SetLockState rejected".into();
                     steps.push(ResumeStep {
                         name: "set_lock_state".into(),
                         service: "lockd".into(),
@@ -466,6 +523,8 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                 println!(
                     "service=sessiond op=resume_sequence event=lockd_unreachable reason=\"{err}\""
                 );
+                lock_state_outcome = "unreachable".into();
+                lock_reason = "lockd unreachable".into();
                 steps.push(ResumeStep {
                     name: "set_lock_state".into(),
                     service: "lockd".into(),
@@ -551,6 +610,8 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                 {
                     if reason == "fault injection" {
                         println!("service=sessiond op=resume_sequence event=lockd_auth_failed");
+                        auth_outcome = "failed".into();
+                        lock_reason = "auth prompt fault injection".into();
                         steps.push(ResumeStep {
                             name: "auth_prompt".into(),
                             service: "lockd".into(),
@@ -560,6 +621,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                         final_state = "blank-only".into();
                     } else {
                         println!("service=sessiond op=resume_sequence event=lockd_auth_prompt");
+                        auth_outcome = "success".into();
                         steps.push(ResumeStep {
                             name: "auth_prompt".into(),
                             service: "lockd".into(),
@@ -572,6 +634,8 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                         "service=sessiond op=resume_sequence event=lockd_auth_failed detail={:?}",
                         envelope.kind
                     );
+                    auth_outcome = "failed".into();
+                    lock_reason = format!("{:?}", envelope.kind);
                     steps.push(ResumeStep {
                         name: "auth_prompt".into(),
                         service: "lockd".into(),
@@ -585,6 +649,8 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                 println!(
                     "service=sessiond op=resume_sequence event=lockd_auth_unreachable reason=\"{err}\""
                 );
+                auth_outcome = "unreachable".into();
+                lock_reason = "lockd unreachable".into();
                 steps.push(ResumeStep {
                     name: "auth_prompt".into(),
                     service: "lockd".into(),
@@ -657,12 +723,37 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
         scenario: scenario.as_str().into(),
         unix_timestamp: now_unix_timestamp(),
         steps,
-        final_state,
+        final_state: final_state.clone(),
     };
 
     write_resume_trace(&trace)?;
 
+    let lock_artifact = LockPathArtifact {
+        scenario: scenario.as_str().into(),
+        service: "lockd".into(),
+        binding_source: binding_source.into(),
+        bound_component_id,
+        component_role: Some("lockscreen".into()),
+        ui_component_present,
+        lock_state_outcome,
+        auth_outcome,
+        final_state,
+        reason: lock_reason,
+        unix_timestamp: now_unix_timestamp(),
+    };
+    write_lock_path_artifact(&lock_artifact)?;
+
     Ok(())
+}
+
+fn write_lock_path_artifact(artifact: &LockPathArtifact) -> Result<PathBuf> {
+    let dir = ensure_runtime_dir()?;
+    let path = dir.join(format!("lock-ui-path-{}.json", artifact.scenario));
+    let json =
+        serde_json::to_string_pretty(artifact).context("failed to serialize lock path artifact")?;
+    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    println!("service=sessiond op=write_lock_path_artifact event=success path={}", path.display());
+    Ok(path)
 }
 
 fn write_resume_trace(trace: &ResumeTrace) -> Result<PathBuf> {
