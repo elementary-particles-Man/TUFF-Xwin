@@ -36,6 +36,8 @@ pub enum DesktopComponentRole {
     SettingsDaemon,
     Applet,
     Portal,
+    #[serde(rename = "lockscreen")]
+    LockScreen,
 }
 
 impl DesktopComponentRole {
@@ -48,6 +50,7 @@ impl DesktopComponentRole {
             Self::SettingsDaemon => "settings-daemon",
             Self::Applet => "applet",
             Self::Portal => "portal",
+            Self::LockScreen => "lockscreen",
         }
     }
 }
