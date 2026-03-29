@@ -28,8 +28,8 @@
 - **Watchdog Auto-Recovery Wiring**: `restart-request` 状態が Watchdog へ通知され、リカバリ計画がアーティファクトとして記録されるフローが `main` に統合された。
 - **Role-Scoped Recovery Execution**: Watchdog が受理したリカバリ要求に基づき、`manage-active` なスーパーバイザーが対象コンポーネントを実際に再起動するフローが `main` に統合された。
 - **Component Identity Mapping Hardening**: ServiceRole から実コンポーネントへの解決を、曖昧な推測ではなく Profile で定義された明示的なバインディング (`service_component_bindings`) へ刷新する変更が `main` に統合された。
+- **Lockd Identity and UI Path Stabilization**: Lockd を explicit binding と専用のコンポーネント ID (`LockScreen` role) で安定化させ、認証およびブランク時の実行経路をより明示的にする変更が `main` に統合された。
 - **IPC**: `SessionLaunchState` および `SessionLaunchDelta` に `unix_timestamp` が追加され、watchdog 連携の堅牢性が向上した。
-- **Tests**: 構造体の変更に追従し、全てのユニットテストが最新化された。
 
 ## 次のステップ
-- `P6-LOCKD-IDENTITY-AND-UI-PATH-STABILIZATION`: Lockd を明示的なバインディングと専用のコンポーネント ID で安定化させ、認証およびブランク時の実行経路をより明示的にする。
+- `P7-LOCKD-RECOVERY-EXECUTION-OPTIONALIZATION`: Lockd の explicit binding を前提に、必要であれば role-scoped recovery execution を Lockd にも限定的に拡張する。
