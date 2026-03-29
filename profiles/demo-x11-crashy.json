@@ -24,12 +24,27 @@
       "command": ["scripts/mock-desktop-component.sh", "--component", "steady-panel", "--hold-seconds", "8", "--exit-code", "0"],
       "critical": false,
       "launcher": "repo-script"
+    },
+    {
+      "id": "demo-lockui",
+      "role": "lockscreen",
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-lockui", "--hold-seconds", "20"],
+      "critical": false,
+      "launcher": "repo-script"
     }
   ],
   "service_component_bindings": [
     {
       "service": "compd",
       "component_id": "crashy-wm"
+    },
+    {
+      "service": "x11bridge",
+      "component_id": "demo-x11bridge"
+    },
+    {
+      "service": "lockd",
+      "component_id": "demo-lockui"
     }
   ]
 }

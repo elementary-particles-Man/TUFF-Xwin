@@ -31,6 +31,13 @@
       "command": ["scripts/mock-desktop-component.sh", "--component", "demo-fallback-panel", "--hold-seconds", "20"],
       "critical": false,
       "launcher": "repo-script"
+    },
+    {
+      "id": "demo-lockui-fallback",
+      "role": "lockscreen",
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-lockui-fallback", "--hold-seconds", "20"],
+      "critical": false,
+      "launcher": "repo-script"
     }
   ],
   "service_component_bindings": [
@@ -41,6 +48,10 @@
     {
       "service": "x11bridge",
       "component_id": "demo-x11bridge-fallback"
+    },
+    {
+      "service": "lockd",
+      "component_id": "demo-lockui-fallback"
     }
   ]
 }
