@@ -36,3 +36,6 @@ Watchdog が受理したリカバリ要求（restart-request）に基づき、`m
   "reason": "component restarted successfully"
 }
 ```
+
+## 今後の課題
+- Lockd のリカバリ実行への拡張（本タスクでは Compd にスコープを絞り、Lockd 側は identity と UI path の安定化を優先）。
