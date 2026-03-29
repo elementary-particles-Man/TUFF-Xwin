@@ -230,6 +230,7 @@ mod tests {
                         last_exit_status: None,
                     }],
                     unix_timestamp: 0,
+                    service_component_bindings: Vec::new(),
                 },
             }),
         );
@@ -267,6 +268,7 @@ mod tests {
                         last_exit_status: Some(1),
                     }],
                     unix_timestamp: 0,
+                    service_component_bindings: Vec::new(),
                 },
             }),
         );

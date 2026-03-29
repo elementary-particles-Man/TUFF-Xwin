@@ -71,6 +71,9 @@ run_scenario() {
   "$target_dir/lockd" $lockd_args > "$WAYBROKER_RUNTIME_DIR/lockd-$scenario.log" 2>&1 &
   wait_for_socket "$WAYBROKER_RUNTIME_DIR/lockd.sock"
 
+  # We need a profile selection for sessiond to resolve bindings
+  "$target_dir/sessiond" --select-profile demo-x11 --write-selection > /dev/null
+
   # Run sessiond scenario
   "$target_dir/sessiond" --resume-scenario "$scenario" > "$WAYBROKER_RUNTIME_DIR/sessiond-$scenario.log" 2>&1
 

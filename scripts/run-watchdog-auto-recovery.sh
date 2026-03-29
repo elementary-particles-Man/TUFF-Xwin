@@ -60,6 +60,9 @@ wait_for_socket "$WAYBROKER_RUNTIME_DIR/lockd.sock"
 "$target_dir/watchdog" --serve-ipc > "$WAYBROKER_RUNTIME_DIR/watchdog.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/watchdog.sock"
 
+# Select demo profile so sessiond can read lockd bindings
+"$target_dir/sessiond" --select-profile demo-x11 --write-selection > /dev/null
+
 # Run sessiond scenario
 echo "==> Executing resume scenario: compd-trouble"
 "$target_dir/sessiond" --resume-scenario "compd-trouble" > "$WAYBROKER_RUNTIME_DIR/sessiond.log" 2>&1

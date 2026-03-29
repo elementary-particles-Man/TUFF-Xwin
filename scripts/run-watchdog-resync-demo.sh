@@ -114,7 +114,7 @@ echo
 echo "==> waiting for degraded watchdog report in $degraded_report"
 degraded_report_ready=0
 for _ in $(seq 1 30); do
-  if [[ -f "$degraded_report" ]] && rg -q '"healthy_components": 3' "$degraded_report" && rg -q '"unhealthy_components": 0' "$degraded_report"; then
+  if [[ -f "$degraded_report" ]] && rg -q '"healthy_components": 4' "$degraded_report" && rg -q '"unhealthy_components": 0' "$degraded_report"; then
     degraded_report_ready=1
     break
   fi
