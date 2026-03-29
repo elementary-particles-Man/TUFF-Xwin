@@ -2,7 +2,7 @@
 
 ## 概要
 Watchdog が受理したリカバリ要求（restart-request）に基づき、`manage-active` な `sessiond` スーパーバイザーが対象コンポーネントを実際に再起動するフローを実装・検証した。
-本成果は `main` ブランチに統合済み。
+本成果は `main` ブランチに統合済み。さらに、解決ロジックは明示的バインディング（`service_component_bindings`）ベースへ移行済みである。
 
 ## 実装内容
 - **sessiond (Recovery Executor)**:

@@ -1,7 +1,8 @@
-# Component Identity Mapping Hardening Status (2026-03-27)
+# Component Identity Mapping Hardening Status (2026-03-27) [Merged to main]
 
 ## 概要
 ServiceRole から実コンポーネントへの解決を、曖昧な role 推測から profile で定義された明示的なバインディング（`service_component_bindings`）へと移行した。これにより、リカバリ対象の特定が決定論的になり、将来的なコンポーネント構成の複雑化に対しても堅牢な基盤が整った。
+本成果は `main` ブランチに統合済み。
 
 ## 実装内容
 - **Schema 拡張**:

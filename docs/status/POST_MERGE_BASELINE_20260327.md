@@ -27,7 +27,7 @@
 - **Resume/Degraded Hardening**: Resume 時の故障分類とシナリオ検証環境が導入された。`sessiond` によるオーケストレーションとトレース生成が `main` に一本化された。
 - **Watchdog Auto-Recovery Wiring**: `restart-request` 状態が Watchdog へ通知され、リカバリ計画がアーティファクトとして記録されるフローが `main` に統合された。
 - **Role-Scoped Recovery Execution**: Watchdog が受理したリカバリ要求に基づき、`manage-active` なスーパーバイザーが対象コンポーネントを実際に再起動するフローが `main` に統合された。
-- **Component Identity Hardening**: ServiceRole から実コンポーネントへの解決を、曖昧な推測ではなく Profile での明示的なバインディング (`service_component_bindings`) へ刷新した。
+- **Component Identity Mapping Hardening**: ServiceRole から実コンポーネントへの解決を、曖昧な推測ではなく Profile で定義された明示的なバインディング (`service_component_bindings`) へ刷新する変更が `main` に統合された。
 - **IPC**: `SessionLaunchState` および `SessionLaunchDelta` に `unix_timestamp` が追加され、watchdog 連携の堅牢性が向上した。
 - **Tests**: 構造体の変更に追従し、全てのユニットテストが最新化された。
 
