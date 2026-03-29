@@ -27,3 +27,5 @@ jobs:
         run: ./scripts/run-role-scoped-recovery-execution.sh
       - name: Component Identity Mapping Smoke Test
         run: ./scripts/run-component-identity-mapping-smoke.sh
+      - name: Lockd Identity and UI Path Smoke Test
+        run: ./scripts/run-lockd-identity-and-ui-path-smoke.sh
