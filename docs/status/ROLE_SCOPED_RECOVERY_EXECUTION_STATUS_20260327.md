@@ -38,4 +38,4 @@ Watchdog が受理したリカバリ要求（restart-request）に基づき、`m
 ```
 
 ## 今後の課題
-- Lockd のリカバリ実行への拡張（Lockd 側の identity と UI path の安定化は完了済み。リカバリ実行自体は現在のところ Optional な課題として留めている）。
+- Lockd のリカバリ実行への拡張（opt-in ポリシーとして実装完了済み）。
