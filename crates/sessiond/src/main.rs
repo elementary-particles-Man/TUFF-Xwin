@@ -183,6 +183,9 @@ struct LockPathArtifact {
     final_state: String,
     reason: String,
     unix_timestamp: u64,
+    execution_policy: String,
+    watchdog_request_outcome: String,
+    execution_result: String,
 }
 
 #[derive(Debug)]
@@ -681,39 +684,138 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
     }
 
     if final_state == "restart-request" {
-        println!("service=sessiond op=resume_sequence event=watchdog_restart_request role=compd");
-        let res = send_watchdog_command(WatchdogCommand::Restart {
-            role: ServiceRole::Compd,
-            reason: "resume failure (restart-request)".into(),
+        // Evaluate Compd recovery policy (defaults to enabled/SupervisorRestart for compatibility)
+        let compd_policy = profile.as_ref().and_then(|p| {
+            p.service_recovery_execution_policies
+                .iter()
+                .find(|pol| pol.service == ServiceRole::Compd)
         });
 
-        match res {
-            Ok(envelope) => {
-                if let MessageKind::WatchdogCommand(WatchdogCommand::Restart { .. }) = envelope.kind
-                {
+        let is_compd_enabled = match compd_policy {
+            Some(pol) => pol.mode == waybroker_common::RecoveryExecutionMode::SupervisorRestart,
+            None => true, // default for compd is enabled
+        };
+
+        if is_compd_enabled {
+            println!(
+                "service=sessiond op=resume_sequence event=watchdog_restart_request role=compd"
+            );
+            let res = send_watchdog_command(WatchdogCommand::Restart {
+                role: ServiceRole::Compd,
+                reason: "resume failure (restart-request)".into(),
+            });
+
+            match res {
+                Ok(envelope) => {
+                    if let MessageKind::WatchdogCommand(WatchdogCommand::Restart { .. }) =
+                        envelope.kind
+                    {
+                        steps.push(ResumeStep {
+                            name: "watchdog_restart_request".into(),
+                            service: "watchdog".into(),
+                            outcome: "accepted".into(),
+                            detail: None,
+                        });
+                    } else {
+                        steps.push(ResumeStep {
+                            name: "watchdog_restart_request".into(),
+                            service: "watchdog".into(),
+                            outcome: "rejected".into(),
+                            detail: Some(format!("{:?}", envelope.kind)),
+                        });
+                    }
+                }
+                Err(err) => {
                     steps.push(ResumeStep {
                         name: "watchdog_restart_request".into(),
                         service: "watchdog".into(),
-                        outcome: "accepted".into(),
-                        detail: None,
-                    });
-                } else {
-                    steps.push(ResumeStep {
-                        name: "watchdog_restart_request".into(),
-                        service: "watchdog".into(),
-                        outcome: "rejected".into(),
-                        detail: Some(format!("{:?}", envelope.kind)),
+                        outcome: "unreachable".into(),
+                        detail: Some(err.to_string()),
                     });
                 }
             }
-            Err(err) => {
-                steps.push(ResumeStep {
-                    name: "watchdog_restart_request".into(),
-                    service: "watchdog".into(),
-                    outcome: "unreachable".into(),
-                    detail: Some(err.to_string()),
-                });
+        } else {
+            println!(
+                "service=sessiond op=resume_sequence event=watchdog_restart_request_skipped role=compd reason=policy-disabled"
+            );
+            steps.push(ResumeStep {
+                name: "watchdog_restart_request".into(),
+                service: "watchdog".into(),
+                outcome: "skipped".into(),
+                detail: Some("policy-disabled".into()),
+            });
+        }
+    }
+
+    let mut execution_policy = "disabled".to_string();
+    let mut watchdog_request_outcome = "skipped".to_string();
+
+    if final_state == "blank-only" {
+        let lockd_policy = profile.as_ref().and_then(|p| {
+            p.service_recovery_execution_policies
+                .iter()
+                .find(|pol| pol.service == ServiceRole::Lockd)
+        });
+
+        let is_lockd_enabled = match lockd_policy {
+            Some(pol) => pol.mode == waybroker_common::RecoveryExecutionMode::SupervisorRestart,
+            None => false, // default for lockd is disabled
+        };
+
+        println!(
+            "service=sessiond op=lock_recovery_policy event=evaluated role=lockd enabled={}",
+            is_lockd_enabled
+        );
+
+        if is_lockd_enabled {
+            execution_policy = "supervisor-restart".to_string();
+            println!(
+                "service=sessiond op=resume_sequence event=watchdog_restart_request role=lockd"
+            );
+            let res = send_watchdog_command(WatchdogCommand::Restart {
+                role: ServiceRole::Lockd,
+                reason: lock_reason.clone(),
+            });
+
+            match res {
+                Ok(envelope) => {
+                    if let MessageKind::WatchdogCommand(WatchdogCommand::Restart { .. }) =
+                        envelope.kind
+                    {
+                        watchdog_request_outcome = "accepted".into();
+                        steps.push(ResumeStep {
+                            name: "watchdog_restart_request".into(),
+                            service: "watchdog".into(),
+                            outcome: "accepted".into(),
+                            detail: Some("lockd recovery execution enabled".into()),
+                        });
+                    } else {
+                        watchdog_request_outcome = "rejected".into();
+                        steps.push(ResumeStep {
+                            name: "watchdog_restart_request".into(),
+                            service: "watchdog".into(),
+                            outcome: "rejected".into(),
+                            detail: Some(format!("{:?}", envelope.kind)),
+                        });
+                    }
+                }
+                Err(err) => {
+                    watchdog_request_outcome = "unreachable".into();
+                    steps.push(ResumeStep {
+                        name: "watchdog_restart_request".into(),
+                        service: "watchdog".into(),
+                        outcome: "unreachable".into(),
+                        detail: Some(err.to_string()),
+                    });
+                }
             }
+        } else {
+            steps.push(ResumeStep {
+                name: "watchdog_restart_request".into(),
+                service: "watchdog".into(),
+                outcome: "skipped".into(),
+                detail: Some("policy-disabled".into()),
+            });
         }
     }
 
@@ -740,6 +842,9 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
         final_state,
         reason: lock_reason,
         unix_timestamp: now_unix_timestamp(),
+        execution_policy,
+        watchdog_request_outcome,
+        execution_result: "pending".into(), // This will be updated by the supervisor later
     };
     write_lock_path_artifact(&lock_artifact)?;
 
@@ -919,6 +1024,7 @@ fn build_launch_state(profile: &DesktopProfile, config: &Config) -> Result<Sessi
         components,
         unix_timestamp: now_unix_timestamp(),
         service_component_bindings: profile.service_component_bindings.clone(),
+        service_recovery_execution_policies: profile.service_recovery_execution_policies.clone(),
     })
 }
 
@@ -958,6 +1064,7 @@ fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<S
         components: components.into_iter().map(|component| component.state).collect(),
         unix_timestamp: now_unix_timestamp(),
         service_component_bindings: profile.service_component_bindings.clone(),
+        service_recovery_execution_policies: profile.service_recovery_execution_policies.clone(),
     })
 }
 
@@ -1341,6 +1448,9 @@ fn watchdog_stream_command(
                 components: state.components.clone(),
                 unix_timestamp: now_unix_timestamp(),
                 service_component_bindings: state.service_component_bindings.clone(),
+                service_recovery_execution_policies: state
+                    .service_recovery_execution_policies
+                    .clone(),
             },
         };
     }
@@ -1370,6 +1480,7 @@ fn watchdog_stream_command(
             components: changed_components,
             unix_timestamp: now_unix_timestamp(),
             service_component_bindings: state.service_component_bindings.clone(),
+            service_recovery_execution_policies: state.service_recovery_execution_policies.clone(),
         },
     }
 }
@@ -1431,6 +1542,7 @@ struct WatchdogExecutionArtifact {
     reason: String,
     resolution_source: String,
     bound_component_id: Option<String>,
+    policy_source: String,
 }
 
 struct SessionSupervisor {
@@ -1574,7 +1686,35 @@ impl SessionSupervisor {
             reason: "no matching component for role".into(),
             resolution_source: "explicit".into(),
             bound_component_id: None,
+            policy_source: "none".into(),
         };
+
+        // Evaluate Policy
+        let policy =
+            self.profile.service_recovery_execution_policies.iter().find(|p| p.service == role);
+
+        let (is_enabled, policy_src) = match policy {
+            Some(pol) => (
+                pol.mode == waybroker_common::RecoveryExecutionMode::SupervisorRestart,
+                "profile-optin".into(),
+            ),
+            None => {
+                // Compd defaults to enabled (for legacy compat), others like Lockd default to disabled
+                if role == ServiceRole::Compd {
+                    (true, "implicit-default".into())
+                } else {
+                    (false, "implicit-default".into())
+                }
+            }
+        };
+
+        artifact.policy_source = policy_src;
+
+        if !is_enabled {
+            artifact.result = "policy-disabled".into();
+            artifact.reason = "recovery execution is disabled by policy".into();
+            return Ok(artifact);
+        }
 
         // Try explicit binding first
         let target_id = self
@@ -1678,6 +1818,10 @@ impl SessionSupervisor {
             components: self.components.iter().map(|component| component.state.clone()).collect(),
             unix_timestamp: now_unix_timestamp(),
             service_component_bindings: self.profile.service_component_bindings.clone(),
+            service_recovery_execution_policies: self
+                .profile
+                .service_recovery_execution_policies
+                .clone(),
         }
     }
 
@@ -1883,6 +2027,7 @@ mod tests {
                 launcher: waybroker_common::DesktopLauncher::System,
             }],
             service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
         };
 
         let config = super::Config::default();
@@ -1936,6 +2081,7 @@ mod tests {
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
             session_components: Vec::new(),
             service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
         };
         let degraded_profile = DesktopProfile {
             id: "demo-x11-degraded".into(),
@@ -1946,6 +2092,7 @@ mod tests {
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
             session_components: Vec::new(),
             service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
         };
         let report = SessionWatchdogReport {
             profile_id: "demo-x11-crashy".into(),
@@ -1998,6 +2145,7 @@ mod tests {
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
             session_components: Vec::new(),
             service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
         };
         let report = SessionWatchdogReport {
             profile_id: "demo-x11".into(),
@@ -2055,6 +2203,7 @@ mod tests {
             }],
             unix_timestamp: 0,
             service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
         };
         let next = SessionLaunchState {
             profile_id: "demo-x11".into(),
@@ -2076,6 +2225,7 @@ mod tests {
             }],
             unix_timestamp: 0,
             service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
         };
 
         let command = watchdog_stream_command(&next, Some(&previous));
@@ -2115,6 +2265,7 @@ mod tests {
             }],
             unix_timestamp: 0,
             service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
         };
         let next = SessionLaunchState {
             profile_id: "demo-x11-degraded".into(),
@@ -2136,6 +2287,7 @@ mod tests {
             }],
             unix_timestamp: 0,
             service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
         };
 
         let command = watchdog_stream_command(&next, Some(&previous));
