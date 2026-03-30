@@ -85,6 +85,21 @@ pub struct ServiceComponentBinding {
     pub component_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecoveryExecutionMode {
+    Disabled,
+    SupervisorRestart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceRecoveryExecutionPolicy {
+    pub service: ServiceRole,
+    pub mode: RecoveryExecutionMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserve_final_state: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesktopProfile {
     pub id: String,
@@ -96,6 +111,8 @@ pub struct DesktopProfile {
     pub session_components: Vec<DesktopComponent>,
     #[serde(default)]
     pub service_component_bindings: Vec<ServiceComponentBinding>,
+    #[serde(default)]
+    pub service_recovery_execution_policies: Vec<ServiceRecoveryExecutionPolicy>,
 }
 
 impl DesktopProfile {
@@ -107,6 +124,7 @@ impl DesktopProfile {
             broker_services: self.broker_services.clone(),
             session_components: self.session_components.clone(),
             service_component_bindings: self.service_component_bindings.clone(),
+            service_recovery_execution_policies: self.service_recovery_execution_policies.clone(),
         }
     }
 }
@@ -120,6 +138,8 @@ pub struct SessionLaunchPlan {
     pub session_components: Vec<DesktopComponent>,
     #[serde(default)]
     pub service_component_bindings: Vec<ServiceComponentBinding>,
+    #[serde(default)]
+    pub service_recovery_execution_policies: Vec<ServiceRecoveryExecutionPolicy>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +189,8 @@ pub struct SessionLaunchState {
     pub unix_timestamp: u64,
     #[serde(default)]
     pub service_component_bindings: Vec<ServiceComponentBinding>,
+    #[serde(default)]
+    pub service_recovery_execution_policies: Vec<ServiceRecoveryExecutionPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +208,8 @@ pub struct SessionLaunchDelta {
     pub unix_timestamp: u64,
     #[serde(default)]
     pub service_component_bindings: Vec<ServiceComponentBinding>,
+    #[serde(default)]
+    pub service_recovery_execution_policies: Vec<ServiceRecoveryExecutionPolicy>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +311,7 @@ mod tests {
                 launcher: DesktopLauncher::System,
             }],
             service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
         };
 
         let plan = profile.launch_plan();

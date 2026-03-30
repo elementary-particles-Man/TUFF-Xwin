@@ -9,9 +9,10 @@ pub use ipc::{
 };
 pub use profile::{
     DesktopComponent, DesktopComponentRole, DesktopComponentState, DesktopHealthStatus,
-    DesktopLauncher, DesktopProfile, DesktopProtocol, DesktopRecoveryAction,
-    SessionLaunchComponentState, SessionLaunchDelta, SessionLaunchPlan, SessionLaunchState,
-    SessionProfileTransition, SessionWatchdogComponentReport, SessionWatchdogReport,
+    DesktopLauncher, DesktopProfile, DesktopProtocol, DesktopRecoveryAction, RecoveryExecutionMode,
+    ServiceComponentBinding, ServiceRecoveryExecutionPolicy, SessionLaunchComponentState,
+    SessionLaunchDelta, SessionLaunchPlan, SessionLaunchState, SessionProfileTransition,
+    SessionWatchdogComponentReport, SessionWatchdogReport,
 };
 pub use transport::{
     bind_service_socket, connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir,
@@ -231,6 +232,7 @@ mod tests {
                     }],
                     unix_timestamp: 0,
                     service_component_bindings: Vec::new(),
+                    service_recovery_execution_policies: Vec::new(),
                 },
             }),
         );
@@ -269,6 +271,7 @@ mod tests {
                     }],
                     unix_timestamp: 0,
                     service_component_bindings: Vec::new(),
+                    service_recovery_execution_policies: Vec::new(),
                 },
             }),
         );
