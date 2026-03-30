@@ -71,6 +71,7 @@ cargo check
 ./scripts/run-role-scoped-recovery-execution.sh
 ./scripts/run-component-identity-mapping-smoke.sh
 ./scripts/run-lockd-identity-and-ui-path-smoke.sh
+./scripts/run-lockd-recovery-execution-optionalization.sh
 ./scripts/run-stack.sh
 ./scripts/run-profile-demo.sh
 ./LeyerX11/scripts/run-rootless-demo.sh

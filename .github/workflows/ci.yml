@@ -29,3 +29,5 @@ jobs:
         run: ./scripts/run-component-identity-mapping-smoke.sh
       - name: Lockd Identity and UI Path Smoke Test
         run: ./scripts/run-lockd-identity-and-ui-path-smoke.sh
+      - name: Lockd Recovery Execution Optionalization Smoke Test
+        run: ./scripts/run-lockd-recovery-execution-optionalization.sh
