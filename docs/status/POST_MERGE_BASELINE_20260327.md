@@ -29,7 +29,8 @@
 - **Role-Scoped Recovery Execution**: Watchdog が受理したリカバリ要求に基づき、`manage-active` なスーパーバイザーが対象コンポーネントを実際に再起動するフローが `main` に統合された。
 - **Component Identity Mapping Hardening**: ServiceRole から実コンポーネントへの解決を、曖昧な推測ではなく Profile で定義された明示的なバインディング (`service_component_bindings`) へ刷新する変更が `main` に統合された。
 - **Lockd Identity and UI Path Stabilization**: Lockd を explicit binding と専用のコンポーネント ID (`LockScreen` role) で安定化させ、認証およびブランク時の実行経路をより明示的にする変更が `main` に統合された。
+- **Lockd Recovery Execution Optionalization**: Lockd のリカバリ実行を、安全のため既定で無効化し、Profile での明示的な opt-in 時のみ許可するポリシー管理機能が `main` に統合された。
 - **IPC**: `SessionLaunchState` および `SessionLaunchDelta` に `unix_timestamp` が追加され、watchdog 連携の堅牢性が向上した。
 
 ## 次のステップ
-- `P7-LOCKD-RECOVERY-EXECUTION-OPTIONALIZATION`: Lockd の explicit binding を前提に、必要であれば role-scoped recovery execution を Lockd にも限定的に拡張する。
+- `P8-MULTI-COMPONENT-ROLE-COLLISION-HANDLING`: 同一 role を持つ複数 component や複数候補 binding に対する deterministic collision policy を整備する。

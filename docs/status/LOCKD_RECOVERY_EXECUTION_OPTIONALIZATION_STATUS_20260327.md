@@ -1,4 +1,4 @@
-# Lockd Recovery Execution Optionalization Status (2026-03-27)
+# Lockd Recovery Execution Optionalization Status (2026-03-27) [Merged to main]
 
 ## 概要
 Lockd の explicit binding と UI path stabilization を前提に、Lockd のリカバリ実行（再起動）を「既定では無効」「profile での明示 opt-in 時のみ有効」「final_state=blank-only は維持」という安全モデルで追加しました。これにより、Lockd trouble 時の画面状態は安全側に倒しつつ、必要な構成だけがバックグラウンドで lockd 再起動を試みられるようになりました。
