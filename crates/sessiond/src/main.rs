@@ -18,6 +18,109 @@ use waybroker_common::{
     now_unix_timestamp, read_json_line, runtime_dir, send_json_line,
 };
 
+#[derive(Debug, serde::Serialize)]
+struct BindingResolutionResult {
+    service: String,
+    resolution_source: String,
+    candidate_component_ids: Vec<String>,
+    selected_component_id: Option<String>,
+    result: String,
+    reason: String,
+    unix_timestamp: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct BindingCollisionReport {
+    profile_id: String,
+    duplicate_service_bindings: Vec<String>,
+    missing_binding_targets: Vec<String>,
+    role_mismatch_bindings: Vec<String>,
+    role_ambiguities: Vec<String>,
+    unix_timestamp: u64,
+}
+
+fn validate_profile_bindings(profile: &DesktopProfile) -> BindingCollisionReport {
+    let mut report = BindingCollisionReport {
+        profile_id: profile.id.clone(),
+        duplicate_service_bindings: Vec::new(),
+        missing_binding_targets: Vec::new(),
+        role_mismatch_bindings: Vec::new(),
+        role_ambiguities: Vec::new(),
+        unix_timestamp: now_unix_timestamp(),
+    };
+
+    let mut service_counts = std::collections::HashMap::new();
+    for binding in &profile.service_component_bindings {
+        *service_counts.entry(binding.service).or_insert(0) += 1;
+    }
+
+    for (service, count) in service_counts {
+        if count > 1 {
+            report.duplicate_service_bindings.push(service.as_str().to_string());
+        }
+    }
+
+    for binding in &profile.service_component_bindings {
+        let target = profile.session_components.iter().find(|c| c.id == binding.component_id);
+        if target.is_none() {
+            report.missing_binding_targets.push(format!(
+                "{}: {}",
+                binding.service.as_str(),
+                binding.component_id
+            ));
+        } else if let Some(component) = target {
+            // Check role compatibility
+            let expected_role = match binding.service {
+                ServiceRole::Compd => Some(waybroker_common::DesktopComponentRole::WindowManager),
+                ServiceRole::Lockd => Some(waybroker_common::DesktopComponentRole::LockScreen),
+                ServiceRole::X11Bridge => Some(waybroker_common::DesktopComponentRole::CompatLayer),
+                _ => None,
+            };
+
+            if let Some(expected) = expected_role {
+                if component.role != expected {
+                    report.role_mismatch_bindings.push(format!(
+                        "{}: {} (expected {:?}, got {:?})",
+                        binding.service.as_str(),
+                        component.id,
+                        expected,
+                        component.role
+                    ));
+                }
+            }
+        }
+    }
+
+    report
+}
+
+fn write_binding_collision_report(report: &BindingCollisionReport) -> Result<PathBuf> {
+    let dir = ensure_runtime_dir()?;
+    let path = dir.join("binding-collision-report.json");
+    let json =
+        serde_json::to_string_pretty(report).context("failed to serialize collision report")?;
+    fs::write(&path, json)?;
+    Ok(path)
+}
+
+fn write_binding_resolution_artifact(resolution: &BindingResolutionResult) -> Result<PathBuf> {
+    let dir = ensure_runtime_dir()?;
+    let path = dir.join(format!("binding-resolution-{}.json", resolution.service));
+    let json = serde_json::to_string_pretty(resolution)
+        .context("failed to serialize resolution artifact")?;
+    fs::write(&path, json)?;
+    Ok(path)
+}
+
+fn write_watchdog_execution_artifact(execution: &WatchdogExecutionArtifact) -> Result<PathBuf> {
+    let dir = ensure_runtime_dir()?;
+    let path = dir.join(format!("watchdog-action-execution-{}.json", execution.role));
+    let json = serde_json::to_string_pretty(execution)
+        .context("failed to serialize execution artifact")?;
+    fs::write(&path, json)?;
+    Ok(path)
+}
+
 fn main() -> Result<()> {
     let config = Config::from_args(env::args().skip(1))?;
     let profiles_dir = config.profiles_dir();
@@ -53,6 +156,23 @@ fn main() -> Result<()> {
             .with_context(|| format!("unknown profile id: {profile_id}"))?;
         let plan = profile.launch_plan();
 
+        let report = validate_profile_bindings(profile);
+        write_binding_collision_report(&report)?;
+        if !report.duplicate_service_bindings.is_empty()
+            || !report.missing_binding_targets.is_empty()
+            || !report.role_mismatch_bindings.is_empty()
+        {
+            println!(
+                "service=sessiond op=binding_validation event=warning profile={} duplicates={:?} missing={:?} mismatch={:?}",
+                profile.id,
+                report.duplicate_service_bindings,
+                report.missing_binding_targets,
+                report.role_mismatch_bindings
+            );
+        } else {
+            println!("service=sessiond op=binding_validation event=ok profile={}", profile.id);
+        }
+
         println!(
             "service=sessiond op=select_profile id={} protocol={} components={}",
             profile.id,
@@ -64,7 +184,6 @@ fn main() -> Result<()> {
             for service in &plan.broker_services {
                 println!("service=sessiond op=broker_service id={}", service.as_str());
             }
-
             for component in &plan.session_components {
                 println!(
                     "service=sessiond op=component_entry id={} role={:?} critical={} command=\"{}\"",
@@ -87,6 +206,10 @@ fn main() -> Result<()> {
             .iter()
             .find(|profile| profile.id == profile_id)
             .with_context(|| format!("unknown launch profile id: {profile_id}"))?;
+
+        let report = validate_profile_bindings(profile);
+        write_binding_collision_report(&report)?;
+
         let launch_state = launch_state_for_profile(profile, &config)?;
         let state_path = write_launch_state(&launch_state)?;
 
@@ -96,6 +219,10 @@ fn main() -> Result<()> {
 
     if config.launch_active {
         let profile = read_active_profile()?;
+
+        let report = validate_profile_bindings(&profile);
+        write_binding_collision_report(&report)?;
+
         let launch_state = launch_state_for_profile(&profile, &config)?;
         let state_path = write_launch_state(&launch_state)?;
 
@@ -402,13 +529,133 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
     let mut lock_reason = "normal".to_string();
 
     let profile = read_active_profile().ok();
-    let lockd_binding = profile.as_ref().and_then(|p| {
-        p.service_component_bindings.iter().find(|b| b.service == ServiceRole::Lockd)
-    });
 
-    let binding_source = if lockd_binding.is_some() { "explicit" } else { "missing" };
-    let bound_component_id = lockd_binding.map(|b| b.component_id.clone());
-    let ui_component_present = if let (Some(p), Some(id)) = (&profile, &bound_component_id) {
+    // 0. Pre-validate bindings for all involved services in resume
+    let report = if let Some(ref p) = profile {
+        validate_profile_bindings(p)
+    } else {
+        BindingCollisionReport {
+            profile_id: "unknown".into(),
+            duplicate_service_bindings: Vec::new(),
+            missing_binding_targets: Vec::new(),
+            role_mismatch_bindings: Vec::new(),
+            role_ambiguities: Vec::new(),
+            unix_timestamp: now_unix_timestamp(),
+        }
+    };
+    write_binding_collision_report(&report)?;
+
+    // Resolve Lockd binding
+    let lockd_binding_count = profile
+        .as_ref()
+        .map(|p| {
+            p.service_component_bindings.iter().filter(|b| b.service == ServiceRole::Lockd).count()
+        })
+        .unwrap_or(0);
+
+    let (lockd_bound_id, lockd_binding_source, lockd_res_result, lockd_res_reason) =
+        if lockd_binding_count > 1 {
+            (None, "collision", "collision", "multiple bindings found for lockd")
+        } else if let Some(b) = profile.as_ref().and_then(|p| {
+            p.service_component_bindings.iter().find(|b| b.service == ServiceRole::Lockd)
+        }) {
+            (Some(b.component_id.clone()), "explicit", "selected", "")
+        } else {
+            (None, "missing", "missing", "no lockd binding found")
+        };
+
+    let lockd_res_artifact = BindingResolutionResult {
+        service: "lockd".into(),
+        resolution_source: lockd_binding_source.into(),
+        candidate_component_ids: profile
+            .as_ref()
+            .map(|p| {
+                p.service_component_bindings
+                    .iter()
+                    .filter(|b| b.service == ServiceRole::Lockd)
+                    .map(|b| b.component_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        selected_component_id: lockd_bound_id.clone(),
+        result: lockd_res_result.into(),
+        reason: lockd_res_reason.into(),
+        unix_timestamp: now_unix_timestamp(),
+    };
+    write_binding_resolution_artifact(&lockd_res_artifact)?;
+
+    // Resolve Compd binding
+    let compd_binding_count = profile
+        .as_ref()
+        .map(|p| {
+            p.service_component_bindings.iter().filter(|b| b.service == ServiceRole::Compd).count()
+        })
+        .unwrap_or(0);
+
+    let (compd_bound_id, compd_binding_source, compd_res_result, compd_res_reason) =
+        if compd_binding_count > 1 {
+            (None, "collision", "collision", "multiple bindings found for compd")
+        } else if let Some(b) = profile.as_ref().and_then(|p| {
+            p.service_component_bindings.iter().find(|b| b.service == ServiceRole::Compd)
+        }) {
+            (Some(b.component_id.clone()), "explicit", "selected", "")
+        } else {
+            // Check legacy fallback candidates for Compd
+            let candidates: Vec<String> = profile
+                .as_ref()
+                .map(|p| {
+                    p.session_components
+                        .iter()
+                        .filter(|c| c.role == waybroker_common::DesktopComponentRole::WindowManager)
+                        .map(|c| c.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if candidates.len() == 1 {
+                (Some(candidates[0].clone()), "legacy_fallback", "selected", "")
+            } else if candidates.len() > 1 {
+                (None, "legacy_fallback", "collision", "multiple legacy candidates found")
+            } else {
+                (None, "missing", "missing", "no compd binding or legacy candidate found")
+            }
+        };
+
+    let compd_res_artifact = BindingResolutionResult {
+        service: "compd".into(),
+        resolution_source: compd_binding_source.into(),
+        candidate_component_ids: if compd_binding_source == "explicit"
+            || compd_res_result == "collision" && compd_binding_source == "collision"
+        {
+            profile
+                .as_ref()
+                .map(|p| {
+                    p.service_component_bindings
+                        .iter()
+                        .filter(|b| b.service == ServiceRole::Compd)
+                        .map(|b| b.component_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            profile
+                .as_ref()
+                .map(|p| {
+                    p.session_components
+                        .iter()
+                        .filter(|c| c.role == waybroker_common::DesktopComponentRole::WindowManager)
+                        .map(|c| c.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        },
+        selected_component_id: compd_bound_id.clone(),
+        result: compd_res_result.into(),
+        reason: compd_res_reason.into(),
+        unix_timestamp: now_unix_timestamp(),
+    };
+    write_binding_resolution_artifact(&compd_res_artifact)?;
+
+    let ui_component_present = if let (Some(p), Some(id)) = (&profile, &lockd_bound_id) {
         p.session_components
             .iter()
             .any(|c| c.id == *id && c.role == waybroker_common::DesktopComponentRole::LockScreen)
@@ -416,24 +663,45 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
         false
     };
 
-    if binding_source == "missing" {
+    let lockd_res_artifact = BindingResolutionResult {
+        service: "lockd".into(),
+        resolution_source: lockd_binding_source.into(),
+        candidate_component_ids: profile
+            .as_ref()
+            .map(|p| {
+                p.service_component_bindings
+                    .iter()
+                    .filter(|b| b.service == ServiceRole::Lockd)
+                    .map(|b| b.component_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        selected_component_id: lockd_bound_id.clone(),
+        result: lockd_res_result.into(),
+        reason: lockd_res_reason.into(),
+        unix_timestamp: now_unix_timestamp(),
+    };
+    write_binding_resolution_artifact(&lockd_res_artifact)?;
+
+    if lockd_res_result != "selected" {
         println!(
-            "service=sessiond op=resume_sequence event=lockd_binding_missing action=blank-only"
+            "service=sessiond op=resume_sequence event=lockd_resolution_failed result={} action=blank-only",
+            lockd_res_result
         );
         final_state = "blank-only".into();
-        lock_reason = "missing lockd binding".into();
+        lock_reason = lockd_res_reason.into();
         steps.push(ResumeStep {
             name: "lockd_binding_resolution".into(),
             service: "sessiond".into(),
-            outcome: "missing".into(),
-            detail: Some("no lockd binding found in profile".into()),
+            outcome: lockd_res_result.into(),
+            detail: Some(lockd_res_reason.into()),
         });
     } else {
         steps.push(ResumeStep {
             name: "lockd_binding_resolution".into(),
             service: "sessiond".into(),
             outcome: "explicit".into(),
-            detail: Some(format!("bound to {:?}", bound_component_id)),
+            detail: Some(format!("bound to {:?}", lockd_bound_id)),
         });
     }
 
@@ -696,7 +964,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
             None => true, // default for compd is enabled
         };
 
-        if is_compd_enabled {
+        if is_compd_enabled && compd_res_result == "selected" {
             println!(
                 "service=sessiond op=resume_sequence event=watchdog_restart_request role=compd"
             );
@@ -735,14 +1003,40 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                 }
             }
         } else {
+            let reason = if !is_compd_enabled { "policy-disabled" } else { compd_res_result };
             println!(
-                "service=sessiond op=resume_sequence event=watchdog_restart_request_skipped role=compd reason=policy-disabled"
+                "service=sessiond op=resume_sequence event=watchdog_restart_request_skipped role=compd reason={}",
+                reason
             );
+
+            if is_compd_enabled {
+                let exec_artifact = WatchdogExecutionArtifact {
+                    role: ServiceRole::Compd.as_str().into(),
+                    action: "restart".into(),
+                    requested_at: now_unix_timestamp(),
+                    executed_at: now_unix_timestamp(),
+                    result: "config-error".into(),
+                    component_id: None,
+                    previous_pid: None,
+                    new_pid: None,
+                    reason: reason.to_string(),
+                    resolution_source: compd_binding_source.to_string(),
+                    bound_component_id: compd_bound_id,
+                    policy_source: if compd_policy.is_some() {
+                        "profile-optin".into()
+                    } else {
+                        "implicit-default".into()
+                    },
+                    recovery_command_args: Vec::new(),
+                };
+                write_watchdog_execution_artifact(&exec_artifact)?;
+            }
+
             steps.push(ResumeStep {
                 name: "watchdog_restart_request".into(),
                 service: "watchdog".into(),
                 outcome: "skipped".into(),
-                detail: Some("policy-disabled".into()),
+                detail: Some(reason.into()),
             });
         }
     }
@@ -751,6 +1045,8 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
     let mut watchdog_request_outcome = "skipped".to_string();
 
     if final_state == "blank-only" {
+        // We already resolved lockd_res_result earlier.
+        // Gating watchdog request by policy AND resolution result.
         let lockd_policy = profile.as_ref().and_then(|p| {
             p.service_recovery_execution_policies
                 .iter()
@@ -767,7 +1063,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
             is_lockd_enabled
         );
 
-        if is_lockd_enabled {
+        if is_lockd_enabled && lockd_res_result == "selected" {
             execution_policy = "supervisor-restart".to_string();
             println!(
                 "service=sessiond op=resume_sequence event=watchdog_restart_request role=lockd"
@@ -810,11 +1106,36 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                 }
             }
         } else {
+            let reason = if !is_lockd_enabled { "policy-disabled" } else { lockd_res_result };
+
+            if is_lockd_enabled {
+                let exec_artifact = WatchdogExecutionArtifact {
+                    role: ServiceRole::Lockd.as_str().into(),
+                    action: "restart".into(),
+                    requested_at: now_unix_timestamp(),
+                    executed_at: now_unix_timestamp(),
+                    result: "config-error".into(),
+                    component_id: None,
+                    previous_pid: None,
+                    new_pid: None,
+                    reason: reason.to_string(),
+                    resolution_source: lockd_binding_source.to_string(),
+                    bound_component_id: lockd_bound_id.clone(),
+                    policy_source: if lockd_policy.is_some() {
+                        "profile-optin".into()
+                    } else {
+                        "implicit-default".into()
+                    },
+                    recovery_command_args: Vec::new(),
+                };
+                write_watchdog_execution_artifact(&exec_artifact)?;
+            }
+
             steps.push(ResumeStep {
                 name: "watchdog_restart_request".into(),
                 service: "watchdog".into(),
                 outcome: "skipped".into(),
-                detail: Some("policy-disabled".into()),
+                detail: Some(reason.into()),
             });
         }
     }
@@ -833,8 +1154,8 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
     let lock_artifact = LockPathArtifact {
         scenario: scenario.as_str().into(),
         service: "lockd".into(),
-        binding_source: binding_source.into(),
-        bound_component_id,
+        binding_source: lockd_binding_source.into(),
+        bound_component_id: lockd_bound_id,
         component_role: Some("lockscreen".into()),
         ui_component_present,
         lock_state_outcome,
@@ -1543,6 +1864,7 @@ struct WatchdogExecutionArtifact {
     resolution_source: String,
     bound_component_id: Option<String>,
     policy_source: String,
+    recovery_command_args: Vec<String>,
 }
 
 struct SessionSupervisor {
@@ -1647,11 +1969,7 @@ impl SessionSupervisor {
             );
 
             let execution = self.execute_recovery(role, &recovery, config)?;
-
-            let execution_path =
-                runtime.join(format!("watchdog-action-execution-{}.json", role.as_str()));
-            let json = serde_json::to_string_pretty(&execution)?;
-            fs::write(execution_path, json)?;
+            write_watchdog_execution_artifact(&execution)?;
 
             println!(
                 "service=sessiond op=recovery_execution event=finished role={} result={} component={:?} new_pid={:?}",
@@ -1687,7 +2005,41 @@ impl SessionSupervisor {
             resolution_source: "explicit".into(),
             bound_component_id: None,
             policy_source: "none".into(),
+            recovery_command_args: Vec::new(),
         };
+
+        // Resolve Resolution Result for Artifact
+        let mut resolution = BindingResolutionResult {
+            service: role.as_str().into(),
+            resolution_source: "explicit".into(),
+            candidate_component_ids: Vec::new(),
+            selected_component_id: None,
+            result: "unknown".into(),
+            reason: "".into(),
+            unix_timestamp: now_unix_timestamp(),
+        };
+
+        // 1. Validate Bindings for this specific request
+        let report = validate_profile_bindings(&self.profile);
+
+        // Check for duplicate bindings for THIS service
+        let is_duplicate = report.duplicate_service_bindings.iter().any(|s| s == role.as_str());
+        if is_duplicate {
+            resolution.result = "collision".into();
+            resolution.reason = "multiple bindings found for service".into();
+            resolution.candidate_component_ids = self
+                .profile
+                .service_component_bindings
+                .iter()
+                .filter(|b| b.service == role)
+                .map(|b| b.component_id.clone())
+                .collect();
+            write_binding_resolution_artifact(&resolution)?;
+
+            artifact.result = "config-error".into();
+            artifact.reason = "binding collision detected".into();
+            return Ok(artifact);
+        }
 
         // Evaluate Policy
         let policy =
@@ -1709,14 +2061,20 @@ impl SessionSupervisor {
         };
 
         artifact.policy_source = policy_src;
+        artifact.recovery_command_args =
+            policy.map(|pol| pol.restart_command_args.clone()).unwrap_or_default();
 
         if !is_enabled {
+            resolution.result = "policy-disabled".into();
+            resolution.reason = "recovery execution disabled by policy".into();
+            write_binding_resolution_artifact(&resolution)?;
+
             artifact.result = "policy-disabled".into();
             artifact.reason = "recovery execution is disabled by policy".into();
             return Ok(artifact);
         }
 
-        // Try explicit binding first
+        // Try explicit binding
         let target_id = self
             .profile
             .service_component_bindings
@@ -1725,6 +2083,46 @@ impl SessionSupervisor {
             .map(|b| b.component_id.clone());
 
         let target_component = if let Some(id) = target_id {
+            resolution.selected_component_id = Some(id.clone());
+            resolution.candidate_component_ids = vec![id.clone()];
+
+            // Verify target exists
+            if !self.components.iter().any(|c| c.component.id == id) {
+                resolution.result = "missing-target".into();
+                resolution.reason = format!("bound component {} not found in profile", id);
+                write_binding_resolution_artifact(&resolution)?;
+
+                artifact.result = "config-error".into();
+                artifact.bound_component_id = Some(id);
+                artifact.reason = "binding target missing".into();
+                return Ok(artifact);
+            }
+
+            // Verify role mismatch
+            let expected_role = match role {
+                ServiceRole::Compd => Some(waybroker_common::DesktopComponentRole::WindowManager),
+                ServiceRole::Lockd => Some(waybroker_common::DesktopComponentRole::LockScreen),
+                _ => None,
+            };
+
+            if let Some(expected) = expected_role {
+                let comp = self.components.iter().find(|c| c.component.id == id).unwrap();
+                if comp.component.role != expected {
+                    resolution.result = "role-mismatch".into();
+                    resolution.reason =
+                        format!("expected {:?}, got {:?}", expected, comp.component.role);
+                    write_binding_resolution_artifact(&resolution)?;
+
+                    artifact.result = "config-error".into();
+                    artifact.bound_component_id = Some(id);
+                    artifact.reason = "binding role mismatch".into();
+                    return Ok(artifact);
+                }
+            }
+
+            resolution.result = "selected".into();
+            write_binding_resolution_artifact(&resolution)?;
+
             artifact.bound_component_id = Some(id.clone());
             println!(
                 "service=sessiond op=recovery_resolution event=bound role={} component_id={}",
@@ -1733,19 +2131,57 @@ impl SessionSupervisor {
             );
             self.components.iter_mut().find(|c| c.component.id == id)
         } else {
-            // Legacy fallback
-            artifact.resolution_source = "legacy_fallback".into();
-            let target_role_str = match role {
-                ServiceRole::Compd => "window-manager",
-                ServiceRole::Lockd => "lockscreen",
-                other => other.as_str(),
-            };
-            println!(
-                "service=sessiond op=recovery_resolution event=legacy_fallback role={} target_role={}",
-                role.as_str(),
-                target_role_str
-            );
-            self.components.iter_mut().find(|c| c.component.role.as_str() == target_role_str)
+            // Legacy fallback (only for Compd)
+            if role == ServiceRole::Compd {
+                resolution.resolution_source = "legacy_fallback".into();
+                artifact.resolution_source = "legacy_fallback".into();
+                let target_role_str = "window-manager";
+
+                let candidates: Vec<String> = self
+                    .components
+                    .iter()
+                    .filter(|c| c.component.role.as_str() == target_role_str)
+                    .map(|c| c.component.id.clone())
+                    .collect();
+
+                resolution.candidate_component_ids = candidates.clone();
+
+                if candidates.len() > 1 {
+                    resolution.result = "collision".into();
+                    resolution.reason = "multiple candidates found for legacy role search".into();
+                    write_binding_resolution_artifact(&resolution)?;
+
+                    artifact.result = "config-error".into();
+                    artifact.reason = "legacy role ambiguity".into();
+                    return Ok(artifact);
+                }
+
+                println!(
+                    "service=sessiond op=recovery_resolution event=legacy_fallback role={} target_role={}",
+                    role.as_str(),
+                    target_role_str
+                );
+
+                if candidates.len() == 1 {
+                    resolution.result = "selected".into();
+                    resolution.selected_component_id = Some(candidates[0].clone());
+                    write_binding_resolution_artifact(&resolution)?;
+                    self.components
+                        .iter_mut()
+                        .find(|c| c.component.role.as_str() == target_role_str)
+                } else {
+                    resolution.result = "missing".into();
+                    resolution.reason = "no component found for legacy role".into();
+                    write_binding_resolution_artifact(&resolution)?;
+                    None
+                }
+            } else {
+                resolution.result = "missing".into();
+                resolution.reason =
+                    "no explicit binding found and no legacy fallback allowed".into();
+                write_binding_resolution_artifact(&resolution)?;
+                None
+            }
         };
 
         let Some(component) = target_component else {
@@ -1764,10 +2200,10 @@ impl SessionSupervisor {
         component.stop()?;
 
         println!(
-            "service=sessiond op=recovery_execution event=spawning_component id={}",
-            component.component.id
+            "service=sessiond op=recovery_execution event=spawning_component id={} extra_args={:?}",
+            component.component.id, artifact.recovery_command_args
         );
-        component.spawn(&self.profile.id)?;
+        component.spawn_with_args(&self.profile.id, &artifact.recovery_command_args)?;
 
         if component.state.state == DesktopComponentState::Spawned {
             artifact.result = "succeeded".into();
@@ -1893,6 +2329,10 @@ impl RuntimeComponent {
     }
 
     fn spawn(&mut self, profile_id: &str) -> Result<()> {
+        self.spawn_with_args(profile_id, &[])
+    }
+
+    fn spawn_with_args(&mut self, profile_id: &str, extra_args: &[String]) -> Result<()> {
         let Some(command_path) = self.state.resolved_command.as_ref() else {
             self.state.state = DesktopComponentState::Missing;
             self.state.pid = None;
@@ -1901,6 +2341,7 @@ impl RuntimeComponent {
 
         let child = Command::new(command_path)
             .args(self.component.command.iter().skip(1))
+            .args(extra_args)
             .env("WAYBROKER_PROFILE_ID", profile_id)
             .env("WAYBROKER_COMPONENT_ID", &self.component.id)
             .spawn();

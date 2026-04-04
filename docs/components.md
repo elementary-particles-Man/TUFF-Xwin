@@ -40,6 +40,8 @@
 
 `compositor` が死んでも、client 接続そのものは維持しやすくする。`KWin` や `Mutter` を一度落としたら全 client が道連れになる現状を避ける。
 
+現時点の試作では、`waylandd` は `surface registry snapshot` を IPC で返せます。`compd` restart 後は `displayd` の last scene とこの registry を突き合わせ、生きている surface だけで scene を再構成します。
+
 ## compd
 
 ### 役割

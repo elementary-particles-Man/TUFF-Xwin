@@ -3,9 +3,10 @@ mod profile;
 mod transport;
 
 pub use ipc::{
-    CommitTarget, DisplayCommand, DisplayEvent, FocusTarget, HealthState, IpcEnvelope, LockCommand,
-    LockState, MessageKind, OutputMode, ResumeStage, SessionCommand, SurfacePlacement,
-    SurfaceSnapshot, WatchdogCommand,
+    CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget, HealthState,
+    IpcEnvelope, LockCommand, LockState, MessageKind, OutputMode, ResumeStage, SessionCommand,
+    SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand, WaylandCommand,
+    WaylandEvent, WaylandSurfaceRole, WaylandSurfaceState,
 };
 pub use profile::{
     DesktopComponent, DesktopComponentRole, DesktopComponentState, DesktopHealthStatus,
@@ -25,7 +26,7 @@ pub fn now_unix_timestamp() -> u64 {
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum ServiceRole {
     Displayd,
@@ -71,8 +72,10 @@ impl ServiceBanner {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitTarget, DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope, MessageKind,
-        OutputMode, ServiceBanner, ServiceRole, SurfacePlacement, SurfaceSnapshot,
+        CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope,
+        MessageKind, OutputMode, ServiceBanner, ServiceRole, SurfacePlacement,
+        SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent, WaylandSurfaceRole,
+        WaylandSurfaceState,
     };
 
     #[test]
@@ -169,6 +172,93 @@ mod tests {
 
         assert!(json.contains("\"kind\":\"display-event\""));
         assert!(json.contains("\"op\":\"output-inventory\""));
+    }
+
+    #[test]
+    fn roundtrips_display_scene_snapshot() {
+        let envelope = IpcEnvelope::new(
+            ServiceRole::Displayd,
+            ServiceRole::Compd,
+            MessageKind::DisplayEvent(DisplayEvent::SceneSnapshot {
+                snapshot: Some(CommittedSceneState {
+                    source: ServiceRole::Compd,
+                    target: CommitTarget::Output { name: "eDP-1".into() },
+                    focus: FocusTarget::Surface { id: "terminal-1".into() },
+                    surfaces: vec![SurfaceSnapshot {
+                        id: "terminal-1".into(),
+                        app_id: "org.kde.konsole".into(),
+                        placement: SurfacePlacement {
+                            x: 10,
+                            y: 20,
+                            width: 1280,
+                            height: 720,
+                            z: 5,
+                            visible: true,
+                        },
+                    }],
+                    commit_id: 7,
+                    unix_timestamp: 1_778_000_001,
+                }),
+            }),
+        );
+
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let decoded: IpcEnvelope = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded, envelope);
+        assert!(json.contains("\"op\":\"scene-snapshot\""));
+        assert!(json.contains("\"commit_id\":7"));
+    }
+
+    #[test]
+    fn roundtrips_wayland_surface_registry() {
+        let envelope = IpcEnvelope::new(
+            ServiceRole::Waylandd,
+            ServiceRole::Compd,
+            MessageKind::WaylandEvent(WaylandEvent::SurfaceRegistry {
+                snapshot: SurfaceRegistrySnapshot {
+                    generation: 2,
+                    surfaces: vec![
+                        WaylandSurfaceState {
+                            id: "terminal-1".into(),
+                            app_id: "org.kde.konsole".into(),
+                            role: WaylandSurfaceRole::Toplevel,
+                            mapped: true,
+                            buffer_attached: true,
+                        },
+                        WaylandSurfaceState {
+                            id: "panel-1".into(),
+                            app_id: "org.kde.plasma.panel".into(),
+                            role: WaylandSurfaceRole::Layer,
+                            mapped: false,
+                            buffer_attached: false,
+                        },
+                    ],
+                    unix_timestamp: 1_778_000_200,
+                },
+            }),
+        );
+
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let decoded: IpcEnvelope = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded, envelope);
+        assert!(json.contains("\"kind\":\"wayland-event\""));
+        assert!(json.contains("\"op\":\"surface-registry\""));
+    }
+
+    #[test]
+    fn serializes_wayland_registry_query() {
+        let envelope = IpcEnvelope::new(
+            ServiceRole::Compd,
+            ServiceRole::Waylandd,
+            MessageKind::WaylandCommand(WaylandCommand::GetSurfaceRegistry),
+        );
+
+        let json = serde_json::to_string(&envelope).expect("serialize");
+
+        assert!(json.contains("\"kind\":\"wayland-command\""));
+        assert!(json.contains("\"op\":\"get-surface-registry\""));
     }
 
     #[test]

@@ -14,6 +14,7 @@
 - `demo-x11.json`
 - `demo-x11-crashy.json`
 - `demo-x11-degraded.json`
+- `demo-wayland-compd-recovery.json`
 - `xfce-x11.json`
 - `openbox-x11.json`
 
@@ -23,6 +24,8 @@
   - critical component の再起動と crash-loop 判定を確認する profile
 - `demo-x11-degraded`
   - crash-loop 後に切り替える最小 fallback profile
+- `demo-wayland-compd-recovery`
+  - `sessiond/watchdog` 経由で `compd` broker を restart し、`displayd + waylandd` snapshot から scene を rebuild する `Wayland native` demo profile
 - `xfce-x11`, `openbox-x11`
   - 実際の package 導入を前提にする rootless `X11` profile
 

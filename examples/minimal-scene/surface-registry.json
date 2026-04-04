@@ -1,0 +1,20 @@
+{
+  "generation": 2,
+  "surfaces": [
+    {
+      "id": "terminal-1",
+      "app_id": "org.kde.konsole",
+      "role": "toplevel",
+      "mapped": true,
+      "buffer_attached": true
+    },
+    {
+      "id": "panel-1",
+      "app_id": "org.kde.plasma.panel",
+      "role": "layer",
+      "mapped": false,
+      "buffer_attached": false
+    }
+  ],
+  "unix_timestamp": 1775260800
+}

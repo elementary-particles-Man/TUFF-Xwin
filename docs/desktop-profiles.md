@@ -59,6 +59,8 @@ launch state は次の用途に使います。
 
 profile manifest は `degraded_profile_id` を持てます。`watchdog` は launch state から `watchdog-report-<profile>.json` を作るだけでなく、Unix socket server として `sessiond` から full state / delta update の両方を受け取れます。`sessiond --serve-ipc --spawn-components --manage-active --notify-watchdog` で動かしていれば、active profile の component を常駐で poll し、その更新を watchdog へ stream し、返ってきた report に `degraded-profile` action が含まれていれば `active-profile.json` を fallback profile に差し替えます。profile 切替時は新しい `generation` で stream を再開するため、旧 profile から遅れて届いた delta は watchdog 側で捨てられます。結果は `profile-transition-<from>-to-<to>.json` と新しい `launch-state-<profile>.json` に記録されます。
 
+`service_recovery_execution_policies` には `restart_command_args` を持たせられます。これは常時の launch command を差し替えるものではなく、`watchdog -> sessiond` recovery execution で supervisor restart する時だけ追記される引数です。`demo-wayland-compd-recovery` ではここに `--restore-from-displayd --reconcile-waylandd --require-displayd --require-waylandd` を入れ、平常時の `compd --serve-ipc --fail-resume` と、障害復旧時の broker rebuild 起動を分けています。
+
 ## Failure Boundary
 
 - `xfce4-panel` が死んでも kernel は死なない

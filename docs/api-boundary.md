@@ -29,6 +29,7 @@ Outputs:
 
 - output inventory
 - frame commit result
+- committed scene snapshot
 - input event stream
 - hotplug event
 - VT / seat ownership event
@@ -65,6 +66,7 @@ Must not expose:
 Inputs:
 
 - surface registry snapshot from `waylandd`
+- committed scene snapshot from `displayd`
 - input routing event from `displayd`
 - lock state from `lockd`
 - session hints from `sessiond`
@@ -149,6 +151,12 @@ Must not expose:
 - restart-safe state snapshot: file-backed or socket query
 
 重要なのは serialization 形式ではなく、境界を越える state を最小化することです。
+
+現時点の `displayd` は、最後に成功した scene を file-backed snapshot と socket query の両方で保持します。`compd` は restart 後にこの snapshot を読み戻して内部 scene graph を再構築し、hardware broker が保持する最終表示状態と policy service の寿命を切り離します。
+
+同時に `waylandd` は、現在 still-alive な mapped surface の registry snapshot を保持します。`compd` rebuild では `displayd` snapshot を配置の真実、`waylandd` registry を lifecycle の真実として扱い、両者を交差させて scene を再構築します。
+
+将来 `Vulkan` や GPU submit path を足す場合も、この考え方は変えません。`/media/flux/THPDOC/Develop/TUFF-OS/docs/architecture/GPU_OFFLOAD_CONTRACT.md` と同様に、capability 判定、timeout、fallback、driver 差分吸収は hardware broker 側へ閉じ込め、`compd` や `waylandd` へ raw handle や driver 依存 state を漏らさない前提で進めます。
 
 ## Invariants
 

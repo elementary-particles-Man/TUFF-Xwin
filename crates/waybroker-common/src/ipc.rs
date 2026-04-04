@@ -23,6 +23,8 @@ impl IpcEnvelope {
 pub enum MessageKind {
     DisplayCommand(DisplayCommand),
     DisplayEvent(DisplayEvent),
+    WaylandCommand(WaylandCommand),
+    WaylandEvent(WaylandEvent),
     LockCommand(LockCommand),
     SessionCommand(SessionCommand),
     WatchdogCommand(WatchdogCommand),
@@ -35,6 +37,7 @@ pub enum DisplayCommand {
     EnumerateOutputs,
     SetMode { output: String, mode: OutputMode },
     CommitScene { target: CommitTarget, focus: FocusTarget, surfaces: Vec<SurfaceSnapshot> },
+    GetSceneSnapshot { output: Option<String> },
     SecureBlank { output: Option<String> },
     ResumeBegin,
 }
@@ -42,12 +45,42 @@ pub enum DisplayCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum DisplayEvent {
-    OutputInventory { outputs: Vec<OutputMode> },
-    ModeApplied { output: String, mode: OutputMode },
-    SceneCommitted { target: CommitTarget, focus: FocusTarget, surface_count: usize },
-    BlankApplied { output: Option<String> },
-    Rejected { reason: String },
+    OutputInventory {
+        outputs: Vec<OutputMode>,
+    },
+    ModeApplied {
+        output: String,
+        mode: OutputMode,
+    },
+    SceneCommitted {
+        target: CommitTarget,
+        focus: FocusTarget,
+        surface_count: usize,
+        commit_id: u64,
+    },
+    SceneSnapshot {
+        snapshot: Option<CommittedSceneState>,
+    },
+    BlankApplied {
+        output: Option<String>,
+    },
+    Rejected {
+        reason: String,
+    },
     ResumeStarted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "kebab-case")]
+pub enum WaylandCommand {
+    GetSurfaceRegistry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "kebab-case")]
+pub enum WaylandEvent {
+    SurfaceRegistry { snapshot: SurfaceRegistrySnapshot },
+    Rejected { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +155,43 @@ pub struct OutputMode {
     pub width: u32,
     pub height: u32,
     pub refresh_hz: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedSceneState {
+    pub source: ServiceRole,
+    pub target: CommitTarget,
+    pub focus: FocusTarget,
+    pub surfaces: Vec<SurfaceSnapshot>,
+    pub commit_id: u64,
+    pub unix_timestamp: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceRegistrySnapshot {
+    pub generation: u64,
+    pub surfaces: Vec<WaylandSurfaceState>,
+    pub unix_timestamp: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaylandSurfaceState {
+    pub id: String,
+    pub app_id: String,
+    pub role: WaylandSurfaceRole,
+    pub mapped: bool,
+    pub buffer_attached: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WaylandSurfaceRole {
+    Toplevel,
+    Popup,
+    Layer,
+    Background,
+    Lock,
+    Cursor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

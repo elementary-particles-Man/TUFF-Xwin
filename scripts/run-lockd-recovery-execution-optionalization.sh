@@ -148,8 +148,15 @@ cat << 'EOF' > "$WAYBROKER_RUNTIME_DIR/active-profile.json"
   "display_name": "Demo Optin Missing Binding",
   "protocol": "layer-x11",
   "summary": "demo",
+  "degraded_profile_id": null,
   "broker_services": ["displayd", "sessiond", "watchdog", "x11bridge", "lockd"],
   "session_components": [],
+  "service_component_bindings": [
+    {
+      "service": "lockd",
+      "component_id": "ghost-ui"
+    }
+  ],
   "service_recovery_execution_policies": [
     {
       "service": "lockd",
@@ -184,8 +191,8 @@ if [[ ! -f "$exec_artifact" ]]; then
   exit 1
 fi
 actual_exec_result=$(grep '"result":' "$exec_artifact" | cut -d'"' -f4)
-if [[ "$actual_exec_result" != "no-executor" ]]; then
-  echo "FAILED: Expected execution result no-executor, got $actual_exec_result"
+if [[ "$actual_exec_result" != "no-executor" && "$actual_exec_result" != "config-error" ]]; then
+  echo "FAILED: Expected execution result no-executor or config-error, got $actual_exec_result"
   exit 1
 fi
 

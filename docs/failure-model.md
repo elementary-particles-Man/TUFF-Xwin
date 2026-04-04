@@ -18,7 +18,7 @@
 - `waylandd` は client 接続を維持する
 - `displayd` は最後の安定 frame を保つ
 - `watchdog` が `compd` を再起動する
-- 復帰後に scene を再構成する
+- 復帰後に `displayd` の last scene と `waylandd` の surface registry から scene を再構成する
 
 ### 2. lockd crash
 

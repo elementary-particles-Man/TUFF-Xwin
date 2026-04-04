@@ -1,0 +1,52 @@
+{
+  "id": "demo-wayland-compd-recovery",
+  "display_name": "Demo Native Wayland Compd Recovery",
+  "protocol": "wayland-native",
+  "summary": "sessiond/watchdog から compd broker を restart し、displayd/waylandd snapshot で scene rebuild するための demo profile。",
+  "degraded_profile_id": null,
+  "broker_services": [
+    "displayd",
+    "sessiond",
+    "watchdog",
+    "waylandd",
+    "lockd"
+  ],
+  "session_components": [
+    {
+      "id": "broker-compd",
+      "role": "window-manager",
+      "command": ["compd", "--serve-ipc", "--fail-resume"],
+      "critical": true,
+      "launcher": "repo-binary"
+    },
+    {
+      "id": "demo-lockui",
+      "role": "lockscreen",
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-lockui", "--hold-seconds", "40"],
+      "critical": false,
+      "launcher": "repo-script"
+    }
+  ],
+  "service_component_bindings": [
+    {
+      "service": "compd",
+      "component_id": "broker-compd"
+    },
+    {
+      "service": "lockd",
+      "component_id": "demo-lockui"
+    }
+  ],
+  "service_recovery_execution_policies": [
+    {
+      "service": "compd",
+      "mode": "supervisor-restart",
+      "restart_command_args": [
+        "--restore-from-displayd",
+        "--reconcile-waylandd",
+        "--require-displayd",
+        "--require-waylandd"
+      ]
+    }
+  ]
+}

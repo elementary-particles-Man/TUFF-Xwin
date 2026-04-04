@@ -55,12 +55,19 @@
   - output enumerate
   - mode set
   - scene commit
+  - scene snapshot query
   - secure blank
 - `DisplayEvent`
   - output inventory
   - mode applied
   - scene committed
+  - scene snapshot
   - secure blank applied
+  - rejected
+- `WaylandCommand`
+  - surface registry query
+- `WaylandEvent`
+  - surface registry snapshot
   - rejected
 - `LockCommand`
   - lock state transition
@@ -93,6 +100,10 @@
 - kernel / driver internal state
 
 境界を越えてよいのは「意図」と「最小 state snapshot / delta」だけです。
+
+`displayd` は `CommitScene` を受けた後、最後に成功した scene を `WAYBROKER_RUNTIME_DIR/displayd-last-scene.json` へ書き出します。`compd` は restart 後に `get-scene-snapshot` を使ってこの snapshot を再取得し、scene policy の再構築を始めます。これにより、hardware broker が保持する最後の表示状態と、policy service の再起動寿命を分離します。
+
+`waylandd` は別に `surface registry snapshot` を持ち、`get-surface-registry` で応答します。`compd` の restart 後 rebuild では、`displayd` の last-scene snapshot をそのまま信じ込まず、`waylandd` registry にまだ存在する mapped surface だけを残します。これにより、既に死んだ client surface を復元 scene に混ぜるのを避けます。
 
 `sessiond -> watchdog` の launch-state stream では、各 message に `generation` と `sequence` を持たせます。`generation` は active profile runtime の世代、`sequence` はその世代内の更新順序です。`watchdog` はこれを使って stale delta を無視し、欠番が出た場合だけ `resync-launch-state` を返して full state の再送を要求します。
 

@@ -1,0 +1,55 @@
+{
+  "id": "demo-x11-compd-binding-collision",
+  "display_name": "Demo Desktop with Compd Binding Collision",
+  "protocol": "layer-x11",
+  "summary": "compd に対して 2 つの binding を持たせ、衝突検出をテストする profile。",
+  "broker_services": ["displayd", "sessiond", "watchdog", "x11bridge", "lockd"],
+  "session_components": [
+    {
+      "id": "demo-x11bridge",
+      "role": "compat-layer",
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-x11bridge", "--hold-seconds", "20"],
+      "critical": true,
+      "launcher": "repo-script"
+    },
+    {
+      "id": "demo-wm-1",
+      "role": "window-manager",
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-wm-1", "--hold-seconds", "20"],
+      "critical": true,
+      "launcher": "repo-script"
+    },
+    {
+      "id": "demo-wm-2",
+      "role": "window-manager",
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-wm-2", "--hold-seconds", "20"],
+      "critical": true,
+      "launcher": "repo-script"
+    },
+    {
+      "id": "demo-lockui",
+      "role": "lockscreen",
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-lockui", "--hold-seconds", "20"],
+      "critical": false,
+      "launcher": "repo-script"
+    }
+  ],
+  "service_component_bindings": [
+    {
+      "service": "compd",
+      "component_id": "demo-wm-1"
+    },
+    {
+      "service": "compd",
+      "component_id": "demo-wm-2"
+    },
+    {
+      "service": "x11bridge",
+      "component_id": "demo-x11bridge"
+    },
+    {
+      "service": "lockd",
+      "component_id": "demo-lockui"
+    }
+  ]
+}

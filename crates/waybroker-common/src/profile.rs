@@ -98,6 +98,8 @@ pub struct ServiceRecoveryExecutionPolicy {
     pub mode: RecoveryExecutionMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preserve_final_state: Option<String>,
+    #[serde(default)]
+    pub restart_command_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 # HANDOFF
 
-更新日: `2026-03-27`  
+更新日: `2026-04-04`  
 対象 repository: `/media/flux/THPDOC/Develop/TUFF-Xwin`
 
 ## 前提
@@ -15,7 +15,7 @@
 
 - branch: `main`
 - remote: `origin = git@github.com:elementary-particles-Man/TUFF-Xwin.git`
-- 状態: `main...origin/main` で clean
+- 状態: local 変更あり（`compd` broker recovery / `Wayland native` demo 追加中）
 
 ## ここまでの進捗
 
@@ -74,6 +74,10 @@
   - `displayd` と `waylandd` の Unix socket stub 通信を含めて起動確認する
 - `./scripts/run-watchdog-resync-demo.sh`
   - `watchdog` を再起動しても `sessiond` が full state を再送し、監視と degraded fallback が継続することを確認する
+- `./scripts/run-scene-recovery-demo.sh`
+  - `displayd` が最後に commit された scene を保持し、再起動後も `compd` が再取得できることを確認する
+- `./scripts/run-compd-broker-recovery.sh`
+  - `watchdog -> sessiond` recovery execution で `compd` を再起動し、`displayd + waylandd` snapshot から scene rebuild して再commit できることを確認する
 
 ### 6. 最小 IPC transport
 
@@ -167,6 +171,61 @@
 - `scripts/run-watchdog-resync-demo.sh`
   - `watchdog` 再起動直後の cache miss に対して `sessiond` が `ResyncLaunchState` を受けて full launch-state を再送することを確認する
 
+### 13. displayd authoritative scene snapshot
+
+- `DisplayCommand`
+  - `GetSceneSnapshot { output }` を追加
+- `DisplayEvent`
+  - `SceneCommitted` に `commit_id` を追加
+  - `SceneSnapshot { snapshot }` を追加
+- `CommittedSceneState`
+  - `source` / `target` / `focus` / `surfaces` / `commit_id` / `unix_timestamp` を持つ restart-safe scene snapshot 型を追加
+- `displayd`
+  - `CommitScene` 成功時に `WAYBROKER_RUNTIME_DIR/displayd-last-scene.json` へ snapshot を書き出す
+  - 起動時に既存 snapshot を再読込し、`GetSceneSnapshot` へ応答できる
+- `compd`
+  - `--restore-from-displayd` で `displayd` の最後の committed scene を再取得し、内部 scene として復元できる
+- `scripts/run-scene-recovery-demo.sh`
+  - scene commit -> `displayd` 再起動 -> `compd` restore の流れを確認する導線を追加
+
+### 14. waylandd surface registry snapshot
+
+- `WaylandCommand`
+  - `GetSurfaceRegistry` を追加
+- `WaylandEvent`
+  - `SurfaceRegistry { snapshot }` を追加
+- `SurfaceRegistrySnapshot`
+  - `generation` / `surfaces` / `unix_timestamp` を持つ wayland lifecycle snapshot 型を追加
+- `WaylandSurfaceState`
+  - `id` / `app_id` / `role` / `mapped` / `buffer_attached` を持つ
+- `waylandd`
+  - `--serve-ipc` で Unix socket server として surface registry を返せる
+  - `--registry PATH` で fixture から registry を読み込める
+- `compd`
+  - `--reconcile-waylandd [--require-waylandd]` で `displayd` last-scene を `waylandd` registry と突き合わせて rebuild できる
+  - 消えた surface を drop し、必要なら focus を再選定する
+- `examples/minimal-scene/surface-registry.json`
+  - `panel-1` が inactive、`terminal-1` だけ生存している fixture
+- `scripts/run-scene-recovery-demo.sh`
+  - `displayd` 再起動後に `waylandd` registry も使って `compd` の broker rebuild まで確認する
+
+### 15. compd broker recovery execution
+
+- `ServiceRecoveryExecutionPolicy`
+  - `restart_command_args` を追加
+  - supervisor restart 時だけ recovery 専用引数を追記できる
+- `sessiond`
+  - `watchdog-action-execution-<role>.json` に `recovery_command_args` を記録する
+  - recovery 実行時は通常 launch command に `restart_command_args` を追加して spawn する
+- `compd`
+  - `--serve-ipc --restore-from-displayd --reconcile-waylandd` で待受前に startup rebuild を実行する
+  - rebuild 成功後は `displayd` へ再commit し、その scene を authoritative snapshot として更新する
+- `profiles/demo-wayland-compd-recovery.json`
+  - `Wayland native` の最小 skeleton
+  - repo 内 `compd` binary を session component として supervisor 管理し、recovery 時だけ rebuild 引数を追加する
+- `scripts/run-compd-broker-recovery.sh`
+  - `compd-trouble` resume failure から `watchdog` restart request、`sessiond` recovery execution、`displayd-last-scene.json` 更新までを確認する
+
 ## 現在のコード上の要点
 
 ### 共有型
@@ -178,6 +237,12 @@
   - `IpcEnvelope`
   - `MessageKind`
   - `DisplayCommand`
+  - `DisplayEvent`
+  - `CommittedSceneState`
+  - `WaylandCommand`
+  - `WaylandEvent`
+  - `SurfaceRegistrySnapshot`
+  - `WaylandSurfaceState`
   - `LockCommand`
   - `SessionCommand`
   - `WatchdogCommand`
@@ -188,7 +253,7 @@
 
 ### 現在の stub binary
 
-各 binary はまだ本処理を持っていませんが、`displayd` と `waylandd` は最小 IPC 往復、`x11bridge` は rootless `X11` scene の commit デモまで実装済みです。
+各 binary はまだ本処理を持っていませんが、`displayd` と `waylandd` は最小 IPC 往復、`displayd` は last-scene snapshot 保持、`waylandd` は surface-registry snapshot 応答、`compd` はその broker rebuild、`x11bridge` は rootless `X11` scene の commit デモまで実装済みです。
 
 - `displayd`
 - `waylandd`
@@ -209,9 +274,9 @@
 
 優先順はこのあたりです。
 
-1. `sessiond` から実際に selected profile を起動する launcher stub を足す
-2. `compd` と `displayd` の scene commit stub を足して policy と hardware broker を分ける
-3. `watchdog` に health report と restart request の最小実装を生やす
+1. `waylandd` surface registry を clipboard / selection owner と結びつけ、`compd` rebuild 後の focus/selection handoff を作る
+2. `sessiond/watchdog` stream に `source_id` か session instance id を足し、multi-session supervisor 化でも cache key が衝突しないようにする
+3. `Wayland native` profile に shell / panel の最小 skeleton を追加し、mock lock UI 依存を減らす
 4. `LeyerX11` に clipboard / selection の最小橋渡しを足す
 5. degraded profile 切替後の component 再起動と state 収束を `watchdog` / `sessiond` 間で自動化する
 

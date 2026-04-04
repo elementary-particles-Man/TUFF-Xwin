@@ -23,6 +23,7 @@ name = "displayd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde_json",
  "waybroker-common",
 ]
 
@@ -166,6 +167,7 @@ name = "waylandd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde_json",
  "waybroker-common",
 ]
 
