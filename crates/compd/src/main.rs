@@ -691,30 +691,54 @@ fn reconcile_selection(
     focus: &FocusTarget,
     active_registry: &BTreeMap<&str, &WaylandSurfaceState>,
 ) -> (WaylandSelectionState, usize) {
-    let (clipboard_owner, clipboard_changed) = reconcile_selection_owner(
-        previous_selection.clipboard_owner.as_deref(),
-        focus,
-        active_registry,
-    );
-    let (primary_selection_owner, primary_changed) = reconcile_selection_owner(
+    let (clipboard_owner, clipboard_payload_id, clipboard_source_serial, clipboard_changed) =
+        reconcile_selection_slot(
+            previous_selection.clipboard_owner.as_deref(),
+            previous_selection.clipboard_payload_id.as_deref(),
+            previous_selection.clipboard_source_serial,
+            focus,
+            active_registry,
+        );
+    let (
+        primary_selection_owner,
+        primary_selection_payload_id,
+        primary_selection_source_serial,
+        primary_changed,
+    ) = reconcile_selection_slot(
         previous_selection.primary_selection_owner.as_deref(),
+        previous_selection.primary_selection_payload_id.as_deref(),
+        previous_selection.primary_selection_source_serial,
         focus,
         active_registry,
     );
 
     (
-        WaylandSelectionState { clipboard_owner, primary_selection_owner },
+        WaylandSelectionState {
+            clipboard_owner,
+            clipboard_payload_id,
+            clipboard_source_serial,
+            primary_selection_owner,
+            primary_selection_payload_id,
+            primary_selection_source_serial,
+        },
         usize::from(clipboard_changed) + usize::from(primary_changed),
     )
 }
 
-fn reconcile_selection_owner(
+fn reconcile_selection_slot(
     previous_owner: Option<&str>,
+    previous_payload_id: Option<&str>,
+    previous_source_serial: Option<u64>,
     focus: &FocusTarget,
     active_registry: &BTreeMap<&str, &WaylandSurfaceState>,
-) -> (Option<String>, bool) {
+) -> (Option<String>, Option<String>, Option<u64>, bool) {
     match previous_owner {
-        Some(id) if active_registry.contains_key(id) => (Some(id.to_owned()), false),
+        Some(id) if active_registry.contains_key(id) => (
+            Some(id.to_owned()),
+            previous_payload_id.map(str::to_owned),
+            previous_source_serial,
+            false,
+        ),
         Some(_) => {
             let handoff = match focus {
                 FocusTarget::Surface { id }
@@ -726,9 +750,13 @@ fn reconcile_selection_owner(
                 }
                 _ => None,
             };
-            (handoff, true)
+            (handoff, None, None, true)
         }
-        None => (None, false),
+        None => {
+            let metadata_changed =
+                previous_payload_id.is_some() || previous_source_serial.is_some();
+            (None, None, None, metadata_changed)
+        }
     }
 }
 
@@ -843,7 +871,11 @@ mod tests {
                 focus: FocusTarget::Surface { id: "panel-1".into() },
                 selection: WaylandSelectionState {
                     clipboard_owner: Some("panel-1".into()),
+                    clipboard_payload_id: Some("panel-clipboard-v1".into()),
+                    clipboard_source_serial: Some(41),
                     primary_selection_owner: Some("terminal-1".into()),
+                    primary_selection_payload_id: Some("terminal-primary-v7".into()),
+                    primary_selection_source_serial: Some(77),
                 },
                 surfaces: vec![
                     SurfaceSnapshot {
@@ -883,7 +915,11 @@ mod tests {
                 }],
                 selection: WaylandSelectionState {
                     clipboard_owner: Some("panel-1".into()),
+                    clipboard_payload_id: Some("panel-clipboard-v1".into()),
+                    clipboard_source_serial: Some(41),
                     primary_selection_owner: Some("terminal-1".into()),
+                    primary_selection_payload_id: Some("terminal-primary-v7".into()),
+                    primary_selection_source_serial: Some(77),
                 },
                 unix_timestamp: 1,
             },
@@ -894,10 +930,17 @@ mod tests {
         assert_eq!(reconciled.scene.surfaces[0].app_id, "org.kde.konsole");
         assert_eq!(reconciled.scene.focus, FocusTarget::Surface { id: "terminal-1".into() });
         assert_eq!(reconciled.scene.selection.clipboard_owner.as_deref(), Some("terminal-1"));
+        assert_eq!(reconciled.scene.selection.clipboard_payload_id, None);
+        assert_eq!(reconciled.scene.selection.clipboard_source_serial, None);
         assert_eq!(
             reconciled.scene.selection.primary_selection_owner.as_deref(),
             Some("terminal-1")
         );
+        assert_eq!(
+            reconciled.scene.selection.primary_selection_payload_id.as_deref(),
+            Some("terminal-primary-v7")
+        );
+        assert_eq!(reconciled.scene.selection.primary_selection_source_serial, Some(77));
         assert_eq!(reconciled.dropped_surface_ids, vec!["panel-1"]);
         assert_eq!(reconciled.updated_app_ids, 1);
         assert_eq!(reconciled.selection_handoffs, 1);
@@ -911,7 +954,11 @@ mod tests {
                 focus: FocusTarget::Surface { id: "terminal-1".into() },
                 selection: WaylandSelectionState {
                     clipboard_owner: Some("terminal-1".into()),
+                    clipboard_payload_id: Some("terminal-clipboard-v1".into()),
+                    clipboard_source_serial: Some(51),
                     primary_selection_owner: Some("terminal-1".into()),
+                    primary_selection_payload_id: Some("terminal-primary-v7".into()),
+                    primary_selection_source_serial: Some(77),
                 },
                 surfaces: vec![SurfaceSnapshot {
                     id: "background-1".into(),
@@ -937,7 +984,11 @@ mod tests {
                 }],
                 selection: WaylandSelectionState {
                     clipboard_owner: Some("terminal-1".into()),
+                    clipboard_payload_id: Some("terminal-clipboard-v1".into()),
+                    clipboard_source_serial: Some(51),
                     primary_selection_owner: Some("terminal-1".into()),
+                    primary_selection_payload_id: Some("terminal-primary-v7".into()),
+                    primary_selection_source_serial: Some(77),
                 },
                 unix_timestamp: 1,
             },
@@ -945,7 +996,11 @@ mod tests {
 
         assert_eq!(reconciled.scene.focus, FocusTarget::None);
         assert_eq!(reconciled.scene.selection.clipboard_owner, None);
+        assert_eq!(reconciled.scene.selection.clipboard_payload_id, None);
+        assert_eq!(reconciled.scene.selection.clipboard_source_serial, None);
         assert_eq!(reconciled.scene.selection.primary_selection_owner, None);
+        assert_eq!(reconciled.scene.selection.primary_selection_payload_id, None);
+        assert_eq!(reconciled.scene.selection.primary_selection_source_serial, None);
         assert!(reconciled.dropped_surface_ids.is_empty());
         assert_eq!(reconciled.selection_handoffs, 2);
     }

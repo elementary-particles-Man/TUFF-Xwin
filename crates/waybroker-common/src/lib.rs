@@ -237,7 +237,11 @@ mod tests {
                     ],
                     selection: WaylandSelectionState {
                         clipboard_owner: Some("panel-1".into()),
+                        clipboard_payload_id: Some("panel-clipboard-v1".into()),
+                        clipboard_source_serial: Some(41),
                         primary_selection_owner: Some("terminal-1".into()),
+                        primary_selection_payload_id: Some("terminal-primary-v7".into()),
+                        primary_selection_source_serial: Some(77),
                     },
                     unix_timestamp: 1_778_000_200,
                 },
@@ -276,7 +280,11 @@ mod tests {
                     focus: FocusTarget::Surface { id: "terminal-1".into() },
                     selection: WaylandSelectionState {
                         clipboard_owner: Some("terminal-1".into()),
+                        clipboard_payload_id: None,
+                        clipboard_source_serial: None,
                         primary_selection_owner: Some("terminal-1".into()),
+                        primary_selection_payload_id: Some("terminal-primary-v7".into()),
+                        primary_selection_source_serial: Some(77),
                     },
                 },
             }),
@@ -288,6 +296,7 @@ mod tests {
         assert_eq!(decoded, envelope);
         assert!(json.contains("\"op\":\"apply-selection-handoff\""));
         assert!(json.contains("\"clipboard_owner\":\"terminal-1\""));
+        assert!(json.contains("\"primary_selection_source_serial\":77"));
     }
 
     #[test]

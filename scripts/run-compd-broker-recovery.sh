@@ -130,6 +130,8 @@ wait_for_file "$snapshot_file"
 rg -q '"id": "panel-1"' "$snapshot_file"
 wait_for_file "$wayland_registry_file"
 rg -q '"clipboard_owner": "panel-1"' "$wayland_registry_file"
+rg -q '"clipboard_payload_id": "panel-clipboard-v1"' "$wayland_registry_file"
+rg -q '"clipboard_source_serial": 41' "$wayland_registry_file"
 
 echo "==> Selecting profile $profile_id"
 "$target_dir/sessiond" --select-profile "$profile_id" --write-selection > /dev/null
@@ -186,7 +188,11 @@ fi
 
 wait_for_file "$wayland_registry_file"
 rg -q '"clipboard_owner": "terminal-1"' "$wayland_registry_file"
+rg -q '"clipboard_payload_id": null' "$wayland_registry_file"
+rg -q '"clipboard_source_serial": null' "$wayland_registry_file"
 rg -q '"primary_selection_owner": "terminal-1"' "$wayland_registry_file"
+rg -q '"primary_selection_payload_id": "terminal-primary-v7"' "$wayland_registry_file"
+rg -q '"primary_selection_source_serial": 77' "$wayland_registry_file"
 
 echo "==> Recovery artifact"
 cat "$execution_artifact"

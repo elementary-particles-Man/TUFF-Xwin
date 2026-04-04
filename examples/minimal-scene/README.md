@@ -8,6 +8,7 @@
 - client は 2 つ
 - foreground window は 1 つ
 - stale clipboard owner は 1 つ
+- stale clipboard payload metadata は 1 組
 - lock state は off
 - animation は無し
 

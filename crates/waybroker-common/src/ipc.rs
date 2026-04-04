@@ -200,7 +200,15 @@ pub struct WaylandSelectionState {
     #[serde(default)]
     pub clipboard_owner: Option<String>,
     #[serde(default)]
+    pub clipboard_payload_id: Option<String>,
+    #[serde(default)]
+    pub clipboard_source_serial: Option<u64>,
+    #[serde(default)]
     pub primary_selection_owner: Option<String>,
+    #[serde(default)]
+    pub primary_selection_payload_id: Option<String>,
+    #[serde(default)]
+    pub primary_selection_source_serial: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

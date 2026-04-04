@@ -18,7 +18,11 @@
   ],
   "selection": {
     "clipboard_owner": "panel-1",
-    "primary_selection_owner": "terminal-1"
+    "clipboard_payload_id": "panel-clipboard-v1",
+    "clipboard_source_serial": 41,
+    "primary_selection_owner": "terminal-1",
+    "primary_selection_payload_id": "terminal-primary-v7",
+    "primary_selection_source_serial": 77
   },
   "unix_timestamp": 1775260800
 }

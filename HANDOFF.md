@@ -232,7 +232,7 @@
 
 - `SurfaceRegistrySnapshot`
   - `selection` を追加
-  - `clipboard_owner` / `primary_selection_owner` を保持する
+  - `clipboard_owner` / `primary_selection_owner` と `payload_id` / `source_serial` を保持する
 - `WaylandCommand`
   - `ApplySelectionHandoff { handoff }` を追加
 - `WaylandEvent`
@@ -242,9 +242,10 @@
   - current registry を `WAYBROKER_RUNTIME_DIR/waylandd-surface-registry.json` へ書き出す
 - `compd`
   - `--handoff-selection` を追加
-  - dead selection owner だけを復元後 focus へ handoff し、`waylandd` へ apply する
+  - dead selection owner だけを復元後 focus へ handoff し、dead owner の payload metadata は clear したうえで `waylandd` へ apply する
 - `examples/minimal-scene/surface-registry.json`
   - `panel-1` が stale clipboard owner、`terminal-1` が primary selection owner の fixture を追加
+  - clipboard / primary selection の payload metadata も含める
 - `profiles/demo-wayland-compd-recovery.json`
   - lock UI は broker-owned `lockd` に任せ、`shell` / `panel` / `settings-daemon` / `applet` を持つ `Wayland native` の最小 desktop skeleton に拡張
 
@@ -273,6 +274,22 @@
   - mock lockscreen component を外し、`shell` / `panel` / `settings-daemon` / `applet` skeleton に更新
 - `scripts/run-compd-broker-recovery.sh`
   - recovery 成功に加えて `service-only` lock path と native skeleton component の起動も確認する
+
+### 19. selection payload metadata hardening
+
+- `WaylandSelectionState`
+  - clipboard / primary selection ごとに `payload_id` と `source_serial` を追加
+- `waylandd`
+  - selection handoff で owner だけでなく metadata の整合性も validate する
+- `compd`
+  - live owner の metadata は保持する
+  - dead owner を focus へ handoff する時は `payload_id` / `source_serial` を clear する
+- `examples/minimal-scene/surface-registry.json`
+  - stale clipboard payload metadata と live primary selection metadata を含める
+- `scripts/run-scene-recovery-demo.sh`
+  - stale clipboard metadata は clear、live primary selection metadata は保持されることを確認する
+- `scripts/run-compd-broker-recovery.sh`
+  - broker recovery 後の runtime registry でも同じ metadata 条件を確認する
 
 ## 現在のコード上の要点
 
@@ -322,11 +339,11 @@
 
 優先順はこのあたりです。
 
-1. `waylandd` registry に clipboard owner の payload/source serial も足し、owner id だけでない再送条件を固定する
-2. `LeyerX11` に clipboard / selection の最小橋渡しを足す
-3. degraded profile 切替後の component 再起動と state 収束を `watchdog` / `sessiond` 間で自動化する
-4. multi-session supervisor を本当に始める前に、runtime artifact 名も `session_instance_id` 付きへ拡張する
-5. `Wayland native` profile 用に `portal` / notification bridge の最小 skeleton を足す
+1. `LeyerX11` に clipboard / selection の最小橋渡しを足す
+2. degraded profile 切替後の component 再起動と state 収束を `watchdog` / `sessiond` 間で自動化する
+3. multi-session supervisor を本当に始める前に、runtime artifact 名も `session_instance_id` 付きへ拡張する
+4. `Wayland native` profile 用に `portal` / notification bridge の最小 skeleton を足す
+5. selection payload metadata を実 payload export / resend token と結び、focus handoff 後の再publish 条件を固定する
 
 ## 注意点
 

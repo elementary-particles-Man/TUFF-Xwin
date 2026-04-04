@@ -114,7 +114,11 @@ if [[ ! -f "$wayland_registry_snapshot" ]]; then
 fi
 
 rg -q '"clipboard_owner": "terminal-1"' "$wayland_registry_snapshot"
+rg -q '"clipboard_payload_id": null' "$wayland_registry_snapshot"
+rg -q '"clipboard_source_serial": null' "$wayland_registry_snapshot"
 rg -q '"primary_selection_owner": "terminal-1"' "$wayland_registry_snapshot"
+rg -q '"primary_selection_payload_id": "terminal-primary-v7"' "$wayland_registry_snapshot"
+rg -q '"primary_selection_source_serial": 77' "$wayland_registry_snapshot"
 
 echo
 echo "==> waylandd runtime registry after handoff"

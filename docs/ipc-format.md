@@ -105,9 +105,9 @@
 
 `displayd` は `CommitScene` を受けた後、最後に成功した scene を `WAYBROKER_RUNTIME_DIR/displayd-last-scene.json` へ書き出します。`compd` は restart 後に `get-scene-snapshot` を使ってこの snapshot を再取得し、scene policy の再構築を始めます。これにより、hardware broker が保持する最後の表示状態と、policy service の再起動寿命を分離します。
 
-`waylandd` は別に `surface registry snapshot` を持ち、`get-surface-registry` で応答します。snapshot には mapped surface だけでなく clipboard / primary selection owner も含めます。`compd` の restart 後 rebuild では、`displayd` の last-scene snapshot をそのまま信じ込まず、`waylandd` registry にまだ存在する mapped surface だけを残します。これにより、既に死んだ client surface を復元 scene に混ぜるのを避けます。
+`waylandd` は別に `surface registry snapshot` を持ち、`get-surface-registry` で応答します。snapshot には mapped surface だけでなく clipboard / primary selection owner と、その owner が最後に publish した `payload_id` / `source_serial` も含めます。`compd` の restart 後 rebuild では、`displayd` の last-scene snapshot をそのまま信じ込まず、`waylandd` registry にまだ存在する mapped surface だけを残します。これにより、既に死んだ client surface を復元 scene に混ぜるのを避けます。
 
-復元後に selection owner が死んでいた場合だけ、`compd` は `apply-selection-handoff` を `waylandd` へ送り、再計算後 focus へ handoff します。`waylandd` は validate 後に registry を更新し、`selection-handoff-applied` を返します。これにより、復元直後に clipboard / primary selection が dangling owner を指したままになるのを避けます。
+復元後に selection owner が死んでいた場合だけ、`compd` は `apply-selection-handoff` を `waylandd` へ送り、再計算後 focus へ handoff します。ここで `compd` は dead owner の `payload_id` / `source_serial` までは引き継がず、owner だけを新しい focus へ寄せ、payload metadata は clear します。`waylandd` は validate 後に registry を更新し、`selection-handoff-applied` を返します。これにより、復元直後に clipboard / primary selection が dangling owner を指したままになるのを避けつつ、owner id だけで誤って stale payload を再送することも避けます。
 
 `sessiond -> watchdog` の launch-state stream では、各 message に `session_instance_id` と `generation` と `sequence` を持たせます。`session_instance_id` は supervisor instance 単位の識別子、`generation` はその instance 上の active profile runtime 世代、`sequence` はその世代内の更新順序です。`watchdog` は `profile_id + session_instance_id` ごとに cache を分離し、これを使って stale delta を無視し、欠番が出た場合だけ `resync-launch-state` を返して同じ instance からの full state 再送を要求します。
 

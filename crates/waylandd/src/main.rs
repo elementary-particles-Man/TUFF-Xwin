@@ -215,6 +215,36 @@ fn validate_selection_handoff(
         }
     }
 
+    validate_selection_metadata(
+        "clipboard",
+        handoff.selection.clipboard_owner.as_deref(),
+        handoff.selection.clipboard_payload_id.as_deref(),
+        handoff.selection.clipboard_source_serial,
+    )?;
+    validate_selection_metadata(
+        "primary-selection",
+        handoff.selection.primary_selection_owner.as_deref(),
+        handoff.selection.primary_selection_payload_id.as_deref(),
+        handoff.selection.primary_selection_source_serial,
+    )?;
+
+    Ok(())
+}
+
+fn validate_selection_metadata(
+    label: &str,
+    owner: Option<&str>,
+    payload_id: Option<&str>,
+    source_serial: Option<u64>,
+) -> std::result::Result<(), String> {
+    if owner.is_none() && (payload_id.is_some() || source_serial.is_some()) {
+        return Err(format!("{label} metadata requires an active owner"));
+    }
+
+    if payload_id.is_some() ^ source_serial.is_some() {
+        return Err(format!("{label} payload_id and source_serial must be paired"));
+    }
+
     Ok(())
 }
 
@@ -291,7 +321,11 @@ fn mock_surface_registry() -> SurfaceRegistrySnapshot {
         ],
         selection: WaylandSelectionState {
             clipboard_owner: Some("konsole-1".into()),
+            clipboard_payload_id: Some("konsole-clipboard-v1".into()),
+            clipboard_source_serial: Some(11),
             primary_selection_owner: None,
+            primary_selection_payload_id: None,
+            primary_selection_source_serial: None,
         },
         unix_timestamp: now_unix_timestamp(),
     }
@@ -376,7 +410,11 @@ mod tests {
                     focus: FocusTarget::Surface { id: "konsole-1".into() },
                     selection: WaylandSelectionState {
                         clipboard_owner: Some("konsole-1".into()),
+                        clipboard_payload_id: Some("konsole-clipboard-v2".into()),
+                        clipboard_source_serial: Some(12),
                         primary_selection_owner: Some("konsole-1".into()),
+                        primary_selection_payload_id: Some("konsole-primary-v1".into()),
+                        primary_selection_source_serial: Some(13),
                     },
                 },
             },
@@ -391,6 +429,16 @@ mod tests {
             other => panic!("expected handoff applied event, got {other:?}"),
         }
         assert_eq!(registry.selection.clipboard_owner.as_deref(), Some("konsole-1"));
+        assert_eq!(
+            registry.selection.clipboard_payload_id.as_deref(),
+            Some("konsole-clipboard-v2")
+        );
+        assert_eq!(registry.selection.clipboard_source_serial, Some(12));
         assert_eq!(registry.selection.primary_selection_owner.as_deref(), Some("konsole-1"));
+        assert_eq!(
+            registry.selection.primary_selection_payload_id.as_deref(),
+            Some("konsole-primary-v1")
+        );
+        assert_eq!(registry.selection.primary_selection_source_serial, Some(13));
     }
 }
