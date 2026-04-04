@@ -1,96 +1,101 @@
-# TUFF-Xwin
+# TUFF-Xwin (Project Waybroker)
 
-`TUFF-Xwin` はリポジトリ名であり、表示系アーキテクチャの正式名は `Waybroker` です。狙いは `Debian Linux kernel` を置き換えることではなく、`KDE Plasma` や `GNOME` の display stack を `displayd / waylandd / compd / lockd / sessiond` に分割し、単一障害点を細くすることです。
+[日本語](#japanese) | [English](#english)
 
-## Current Component Status
+---
 
-- **compd**: (P1 - Minimal runtime) Composition service. Manages scene graph, focus, and policies. Can commit mock scenes to `displayd`, rebuild from `displayd` plus `waylandd`, hand off selection ownership, and re-commit rebuilt scene during supervisor restart.
-- **displayd**: (P0 - Baseline) Hardware broker for DRM/KMS and libinput. Stub but functional IPC, with persisted last-scene snapshot.
-- **waylandd**: (P1 - Minimal runtime) Wayland protocol endpoint and surface broker. Can serve surface-registry snapshots for `compd` rebuild and accept post-recovery focus/selection handoff.
-- **sessiond**: (P0 - Baseline) Session and desktop profile policy manager.
-- **watchdog**: (P0 - Baseline) Recovery orchestrator and crash-loop supervisor. Supports session-aware recovery requests and path-safe artifact management.
-- **lockd**: (Stub) Lockscreen and authentication UI service.
-- **x11bridge**: (Demo) Rootless X11 compatibility island (LeyerX11).
+<a name="japanese"></a>
+## 日本語 (Japanese)
 
-## Repository Layout
+### 概要
+`TUFF-Xwin` は、次世代セキュアOS「TUFF-OS」向けに設計された、堅牢かつモジュール化された表示系アーキテクチャ **Waybroker** のリファレンス実装です。
 
-```text
-TUFF-Xwin/
-├── Cargo.toml
-├── LeyerX11/
-├── profiles/
-├── crates/
-│   ├── waybroker-common/
-│   ├── displayd/
-│   ├── waylandd/
-│   ├── compd/
-│   ├── lockd/
-│   ├── sessiond/
-│   └── watchdog/
-├── docs/
-├── examples/
-├── scripts/
-└── .github/workflows/
-```
+従来のモノリシックなディスプレイスタック（KDE Plasma や GNOME 等）を、役割ごとに独立したマイクロサービス（`displayd`, `waylandd`, `compd`, `lockd`, `sessiond`, `watchdog`）に分割することで、単一障害点を排除し、表示系の一部がクラッシュしてもメインシステムやカーネルの継続稼働を保証します。
 
-## Workspace Members
+### 主要機能
+- **モジュール型ディスプレイサーバ**: ハードウェア制御、プロトコル処理、ポリシー、認証 UI を分離。
+- **マルチセッション・リカバリ**: セッションごとに隔離されたリカバリ制御を実現。
+- **安全なパス管理**: `session_instance_id` のバリデーションとサニタイズによるパス安全性の確保。
+- **Vulkan GPU 加速 (実験的)**: Vulkan™ API を活用した非同期 Compute Pipeline によるパケットフィルタリングや監査スキャンの高速化。
+- **自己修復機構**: Watchdog による各コンポーネントの死活監視と自動復旧。
 
-- `waybroker-common`: 共通型と service metadata
-- `displayd`: `DRM/KMS`、`input`、`seat` の broker
-- `waylandd`: Wayland 接続口と object lifetime 管理
-- `compd`: scene、focus、composition policy
-- `lockd`: lockscreen と認証 UI
-- `sessiond`: lid、idle、power、polkit policy、desktop profile manager
-- `watchdog`: display stack の監視と再起動制御
-- `LeyerX11/layerx11-common`: rootless `X11` scene の共通型
-- `LeyerX11/x11bridge`: optional な `X11` 互換レイヤ実験
-- `profiles/`: 選択可能な GUI profile manifest
+### Vulkan™ に関する告知
+本プロジェクトは、利用可能な環境において Vulkan API 上に構築された計算バックエンドを使用することがあります。
+Vulkan および Khronos ロゴは、The Khronos Group Inc. の登録商標です。
+本プロジェクトは、The Khronos Group Inc. によって開発、配布、運営、認定、支援、推奨、または承認されたものではありません。本プロジェクトの設計、実装、動作、安全性に関する全ての責任は、本プロジェクト自体に帰属します。
 
-## Documentation
+詳細は [TRADEMARKS.md](TRADEMARKS.md) および [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください。
 
-- [docs/README.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/README.md)
-- [docs/design-memo.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/design-memo.md)
-- [docs/session-instance-id-contract.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/session-instance-id-contract.md) (Safety Contract)
-- [docs/status/FINAL_PASS_BASELINE_2026-04-04.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/status/FINAL_PASS_BASELINE_2026-04-04.md) (Final Pass Evidence)
-- [docs/status/MULTI_SESSION_RECOVERY_ISOLATION_2026-04-04.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/status/MULTI_SESSION_RECOVERY_ISOLATION_2026-04-04.md) (E2E Evidence)
-- [docs/repo-layout.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/repo-layout.md)
-- [docs/api-boundary.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/api-boundary.md)
-- [docs/sequence-resume.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/sequence-resume.md)
-- [docs/ipc-format.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/ipc-format.md)
-- [docs/crash-loop-policy.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/crash-loop-policy.md)
-- [docs/desktop-profiles.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/desktop-profiles.md)
-- [LeyerX11/README.md](/media/flux/THPDOC/Develop/TUFF-Xwin/LeyerX11/README.md)
-- [profiles/README.md](/media/flux/THPDOC/Develop/TUFF-Xwin/profiles/README.md)
-- [CONTRIBUTING.md](/media/flux/THPDOC/Develop/TUFF-Xwin/CONTRIBUTING.md)
-
-## Quick Start
+### ビルドとインストール
+Rust ツールチェーンがインストールされていることを確認してください。
 
 ```bash
-cargo check
-./scripts/dev-check.sh
-./scripts/run-integration-smoke.sh
-./scripts/run-resume-scenarios.sh
-./scripts/run-watchdog-auto-recovery.sh
-./scripts/run-role-scoped-recovery-execution.sh
-./scripts/run-component-identity-mapping-smoke.sh
-./scripts/run-lockd-identity-and-ui-path-smoke.sh
-./scripts/run-lockd-recovery-execution-optionalization.sh
-./scripts/run-stack.sh
-./scripts/run-scene-recovery-demo.sh
-./scripts/run-compd-broker-recovery.sh
-./scripts/run-profile-demo.sh
-./LeyerX11/scripts/run-rootless-demo.sh
+# 全パッケージのビルド
+cargo build --workspace --release
+
+# テストの実行
+cargo test --workspace
 ```
 
-現時点では `displayd` / `waylandd` の最小 IPC、`displayd` の last-scene snapshot、`waylandd` の surface-registry + selection snapshot、`sessiond/watchdog` 経由の `compd` broker restart + startup rebuild + selection handoff、ならびに `LeyerX11` の rootless `X11` commit デモまで入っています。本物の `DRM` / `Wayland` / `X11` 実装はこれからです。
+### クイックスタート
+```bash
+# 統合動作確認（スモークテスト）の実行
+./scripts/run-integration-smoke.sh
 
-## Local Build Note
+# マルチセッション隔離テストの実行
+./scripts/run-multi-session-recovery-isolation-smoke.sh
+```
 
-repository は `CIFS` 共有上にあるため、`cargo target-dir` は `.cargo/config.toml` で `/home/flux/.cache/tuff-xwin-target` に逃がしています。source tree は共有上に置いたまま、build artifact だけローカル実行可能領域を使う想定です。
+---
+
+<a name="english"></a>
+## English
+
+### Overview
+`TUFF-Xwin` is the reference implementation of **Waybroker**, a robust and modular display architecture designed for the next-generation secure operating system, TUFF-OS.
+
+By splitting the traditional monolithic display stack into independent microservices (`displayd`, `waylandd`, `compd`, `lockd`, `sessiond`, and `watchdog`), TUFF-Xwin eliminates single points of failure, ensuring that the main system and kernel remain operational even if components of the display stack crash.
+
+### Key Features
+- **Modular Display Server**: Separation of hardware brokerage, protocol handling, policy, and auth UI.
+- **Multi-Session Recovery**: Strictly scoped recovery orchestration per session instance.
+- **Path-Safe Identity**: Robust validation and sanitization of `session_instance_id` for filesystem safety.
+- **Vulkan GPU Acceleration (Experimental)**: Optional GPU compute backend built on the Vulkan™ API for high-performance packet filtering and audit scanning.
+- **Self-Healing**: Watchdog-driven health monitoring and automated service recovery.
+
+### Vulkan™ Notice
+This project may use a compute backend built on the Vulkan API where available.
+Vulkan and the Vulkan logo are registered trademarks of The Khronos Group Inc.
+This project is NOT developed, distributed, operated, certified, supported, endorsed, or approved by The Khronos Group Inc. All responsibilities regarding design, implementation, behavior, and safety belong solely to this project.
+
+For details, see [TRADEMARKS.md](TRADEMARKS.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+### Build & Install
+Ensure you have the Rust toolchain installed.
+
+```bash
+# Build all packages
+cargo build --workspace --release
+
+# Run unit tests
+cargo test --workspace
+```
+
+### Quick Start
+```bash
+# Run integration smoke test
+./scripts/run-integration-smoke.sh
+
+# Run multi-session recovery isolation test
+./scripts/run-multi-session-recovery-isolation-smoke.sh
+```
+
+## Documentation
+- [docs/architecture.md](docs/architecture.md) - High-level architecture
+- [docs/session-instance-id-contract.md](docs/session-instance-id-contract.md) - Safety & Path Contracts
+- [docs/status/FINAL_PASS_BASELINE_2026-04-04.md](docs/status/FINAL_PASS_BASELINE_2026-04-04.md) - Verification Evidence
 
 ## License
-
-この repository は `MIT OR Apache-2.0` の dual license です。
-
-- [LICENSE-MIT](/media/flux/THPDOC/Develop/TUFF-Xwin/LICENSE-MIT)
-- [LICENSE-APACHE](/media/flux/THPDOC/Develop/TUFF-Xwin/LICENSE-APACHE)
+Dual-licensed under `MIT OR Apache-2.0`.
+- [LICENSE-MIT](LICENSE-MIT)
+- [LICENSE-APACHE](LICENSE-APACHE)
