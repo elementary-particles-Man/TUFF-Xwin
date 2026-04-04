@@ -50,6 +50,9 @@ TUFF-Xwin/
 
 - [docs/README.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/README.md)
 - [docs/design-memo.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/design-memo.md)
+- [docs/session-instance-id-contract.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/session-instance-id-contract.md) (Safety Contract)
+- [docs/status/FINAL_PASS_BASELINE_2026-04-04.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/status/FINAL_PASS_BASELINE_2026-04-04.md) (Final Pass Evidence)
+- [docs/status/MULTI_SESSION_RECOVERY_ISOLATION_2026-04-04.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/status/MULTI_SESSION_RECOVERY_ISOLATION_2026-04-04.md) (E2E Evidence)
 - [docs/repo-layout.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/repo-layout.md)
 - [docs/api-boundary.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/api-boundary.md)
 - [docs/sequence-resume.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/sequence-resume.md)

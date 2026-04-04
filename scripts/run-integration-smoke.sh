@@ -85,8 +85,10 @@ echo "==> [4/6] Testing sessiond profile loading and selection"
 # 5. Recovery & Health (watchdog)
 echo "==> [5/6] Testing watchdog report generation"
 "$target_dir/watchdog" --profile-id demo-x11 --write-reports
-if [[ ! -f "$WAYBROKER_RUNTIME_DIR/watchdog-report-demo-x11.json" ]]; then
+# Use wildcard because session instance IDs contain dynamic parts (PID/Timestamp)
+if ! ls "$WAYBROKER_RUNTIME_DIR"/session-*-watchdog-report.json > /dev/null 2>&1; then
   echo "Error: Watchdog report not generated" >&2
+  ls -la "$WAYBROKER_RUNTIME_DIR"
   exit 1
 fi
 

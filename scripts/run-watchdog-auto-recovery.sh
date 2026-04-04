@@ -71,22 +71,24 @@ echo "==> Executing resume scenario: compd-trouble"
 echo "==> Verifying artifacts..."
 
 # 1. Watchdog recovery artifact
-recovery_artifact="$WAYBROKER_RUNTIME_DIR/watchdog-recovery-compd.json"
-if [[ ! -f "$recovery_artifact" ]]; then
-  echo "FAILED: Watchdog recovery artifact not found at $recovery_artifact"
+recovery_artifact=$(ls "$WAYBROKER_RUNTIME_DIR"/session-*-watchdog-recovery-compd.json 2>/dev/null | head -n 1)
+if [[ -z "$recovery_artifact" ]] || [[ ! -f "$recovery_artifact" ]]; then
+  echo "FAILED: Watchdog recovery artifact not found"
+  ls -la "$WAYBROKER_RUNTIME_DIR"
   exit 1
 fi
-echo "Watchdog recovery artifact found."
+echo "Watchdog recovery artifact found: $recovery_artifact"
 grep '"action": "restart-request-accepted"' "$recovery_artifact" > /dev/null
 echo "Watchdog artifact content verified (action accepted)."
 
 # 2. Sessiond resume trace
-resume_trace="$WAYBROKER_RUNTIME_DIR/resume-trace-compd-trouble.json"
-if [[ ! -f "$resume_trace" ]]; then
-  echo "FAILED: Resume trace not found at $resume_trace"
+resume_trace=$(ls "$WAYBROKER_RUNTIME_DIR"/session-*-resume-trace-compd-trouble.json 2>/dev/null | head -n 1)
+if [[ -z "$resume_trace" ]] || [[ ! -f "$resume_trace" ]]; then
+  echo "FAILED: Resume trace not found"
+  ls -la "$WAYBROKER_RUNTIME_DIR"
   exit 1
 fi
-echo "Resume trace found."
+echo "Resume trace found: $resume_trace"
 grep '"name": "watchdog_restart_request"' "$resume_trace" > /dev/null
 grep '"outcome": "accepted"' "$resume_trace" > /dev/null
 echo "Resume trace content verified (watchdog accepted step found)."

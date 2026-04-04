@@ -7,8 +7,8 @@
 
 1.  **Session-aware Recovery & Path-safe Identity** (Final Pass Criteria)
     *   `watchdog` の recovery request を `session_instance_id` 対応に拡張し、複数セッション並列実行時のリカバリ対象を厳密に特定。
-    *   `session_instance_id` に対するバリデーションとサニタイズを導入し、不正な文字列によるパス破壊やディレクトリトラバーサルを完全に防御。
-    *   ユニットテストを追加し、マルチセッション環境でのリカバリ分離とパス安全性を実証。
+    *   `session_instance_id` に対するバリデーションとサニタイズを導入し、不正な文字列によるパス破壊やディレクトリトラバーサルを防御。
+    *   詳細は [FINAL_PASS_BASELINE_2026-04-04.md](docs/status/FINAL_PASS_BASELINE_2026-04-04.md) および [MULTI_SESSION_RECOVERY_ISOLATION_2026-04-04.md](docs/status/MULTI_SESSION_RECOVERY_ISOLATION_2026-04-04.md) を参照。
 
 2.  **Vulkan GPGPU 加速の統合**
     *   `crates/vulkan-backend` を新設し、ASH クレートによる非同期 GPU 演算バックエンドを実装。
