@@ -15,7 +15,7 @@
 
 - branch: `main`
 - remote: `origin = git@github.com:elementary-particles-Man/TUFF-Xwin.git`
-- 状態: local 変更あり（selection handoff / `Wayland native` skeleton / session instance stream 拡張中）
+- 状態: local 変更なし、`origin/main` と同期済み
 
 ## ここまでの進捗
 
@@ -330,10 +330,26 @@
 
 ## 直近のコミット
 
-- `0010c70` Add initial IPC model types
-- `e9ca84a` Add boundary and resume design seeds
-- `bdf45d2` Add licensing and contribution templates
-- `39f4419` Initial commit
+- `d2d6b61` `feat: track selection payload metadata in recovery`
+- `1c771b5` `feat: decouple native lock path from recovery demo`
+- `d4b6309` `feat: harden wayland recovery and watchdog streams`
+- `8f629a3` `feat: advance broker recovery and demo coverage`
+- `a4004c2` `docs: clean up P7 status reports and update baseline`
+
+## 後続へのメッセージ
+
+- ここまでの broker recovery 系は `main` に push 済みです。作業開始時点で追加の local 差分はありません。
+- まず確認するなら次の 3 本で十分です。
+  - `./scripts/run-scene-recovery-demo.sh`
+  - `./scripts/run-compd-broker-recovery.sh`
+  - `./scripts/run-watchdog-resync-demo.sh`
+- `Wayland native` 側は、いま `lockd` を broker-owned UI path として扱い、profile 側は `shell` / `panel` / `settings-daemon` / `applet` skeleton に寄せてあります。
+- selection 復元は owner id だけでなく `payload_id` / `source_serial` まで持ちます。
+  - live owner の metadata は保持
+  - dead owner を focus へ handoff する時は metadata を clear
+- 次の着手点は `LeyerX11` の clipboard / selection bridge です。ここを進めると `X11 first` 路線と `Wayland native` 路線の recovery 契約が揃います。
+- `sessiond/watchdog` は `session_instance_id` 対応済みですが、runtime artifact 名はまだ `profile_id` ベースです。multi-session 実装に入る前にここを分離する余地があります。
+- 既知の軽微事項は `lockd` の unused assignment warning 1 件だけです。機能には影響していません。
 
 ## 次にやるなら
 
