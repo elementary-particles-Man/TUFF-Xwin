@@ -1,0 +1,24 @@
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+confidence-threshold = 0.8
+copyleft = "deny"
+
+[licenses.private]
+ignore = true
+
+[advisories]
+vulnerability = "deny"
+unmaintained = "warn"
+unsound = "warn"
+notice = "warn"
+
+[bans]
+multiple-versions = "warn"

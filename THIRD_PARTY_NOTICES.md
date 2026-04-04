@@ -28,4 +28,31 @@ If any Khronos specification text is redistributed, keep it unmodified where req
 
 All project-specific design choices, implementation behavior, runtime behavior, operational risks, safety properties, security properties, and support obligations belong solely to this project and its own developers, distributors, integrators, and operators.
 
-The Khronos Group Inc. is not the developer, vendor, maintainer, support provider, or operator of this project.
+## 4. Direct Rust Dependencies
+
+This project directly depends on the following third-party Rust crates. All are licensed under terms compatible with our dual `MIT OR Apache-2.0` license. No copyleft dependencies are distributed.
+
+- **anyhow**
+  - Version: 1.0
+  - License: MIT OR Apache-2.0
+  - Upstream URL: https://github.com/dtolnay/anyhow
+  - Notice Required: No explicit NOTICE file required beyond standard license text redistribution.
+
+- **serde**
+  - Version: 1.0
+  - License: MIT OR Apache-2.0
+  - Upstream URL: https://github.com/serde-rs/serde
+  - Notice Required: No explicit NOTICE file required beyond standard license text redistribution.
+
+- **serde_json**
+  - Version: 1.0
+  - License: MIT OR Apache-2.0
+  - Upstream URL: https://github.com/serde-rs/json
+  - Notice Required: No explicit NOTICE file required beyond standard license text redistribution.
+
+- **tokio**
+  - Version: 1.0
+  - License: MIT
+  - Upstream URL: https://github.com/tokio-rs/tokio
+  - Notice Required: No explicit NOTICE file required beyond standard license text redistribution.
+

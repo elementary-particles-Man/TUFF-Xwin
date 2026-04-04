@@ -93,9 +93,17 @@ cargo test --workspace
 ## Documentation
 - [docs/architecture.md](docs/architecture.md) - High-level architecture
 - [docs/session-instance-id-contract.md](docs/session-instance-id-contract.md) - Safety & Path Contracts
+- [docs/privacy-artifacts.md](docs/privacy-artifacts.md) - Privacy & Artifacts Policy
+- [docs/runtime-security.md](docs/runtime-security.md) - Runtime Security Guidelines
 - [docs/status/FINAL_PASS_BASELINE_2026-04-04.md](docs/status/FINAL_PASS_BASELINE_2026-04-04.md) - Verification Evidence
 
 ## License
 Dual-licensed under `MIT OR Apache-2.0`.
 - [LICENSE-MIT](LICENSE-MIT)
 - [LICENSE-APACHE](LICENSE-APACHE)
+
+## Legal / Distribution Notes
+- This repository is licensed under `MIT OR Apache-2.0`.
+- For third-party dependency licenses, please refer to [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- Runtime artifacts may contain operational metadata (see [Privacy Policy](docs/privacy-artifacts.md)).
+- This repository explores compatibility and separation designs regarding projects like `KDE Plasma`, `GNOME`, `Wayland`, and `X11`. However, this does not imply any official endorsement, certification, or support from those respective projects.
