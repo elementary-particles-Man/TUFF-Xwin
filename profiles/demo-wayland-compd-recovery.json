@@ -2,7 +2,7 @@
   "id": "demo-wayland-compd-recovery",
   "display_name": "Demo Native Wayland Compd Recovery",
   "protocol": "wayland-native",
-  "summary": "sessiond/watchdog から compd broker を restart し、displayd/waylandd snapshot で scene rebuild と selection handoff を行う Wayland native demo profile。",
+  "summary": "sessiond/watchdog から compd broker を restart し、displayd/waylandd snapshot で scene rebuild と selection handoff を行う。lock UI は broker-owned lockd に任せ、shell/panel/settings-daemon/applet を載せる Wayland native demo profile。",
   "degraded_profile_id": null,
   "broker_services": [
     "displayd",
@@ -20,13 +20,6 @@
       "launcher": "repo-binary"
     },
     {
-      "id": "demo-lockui",
-      "role": "lockscreen",
-      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-lockui", "--hold-seconds", "40"],
-      "critical": false,
-      "launcher": "repo-script"
-    },
-    {
       "id": "demo-shell",
       "role": "shell",
       "command": ["scripts/mock-desktop-component.sh", "--component", "demo-shell", "--hold-seconds", "40"],
@@ -39,16 +32,26 @@
       "command": ["scripts/mock-desktop-component.sh", "--component", "demo-panel", "--hold-seconds", "40"],
       "critical": false,
       "launcher": "repo-script"
+    },
+    {
+      "id": "demo-settingsd",
+      "role": "settings-daemon",
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-settingsd", "--hold-seconds", "40"],
+      "critical": false,
+      "launcher": "repo-script"
+    },
+    {
+      "id": "demo-status-applet",
+      "role": "applet",
+      "command": ["scripts/mock-desktop-component.sh", "--component", "demo-status-applet", "--hold-seconds", "40"],
+      "critical": false,
+      "launcher": "repo-script"
     }
   ],
   "service_component_bindings": [
     {
       "service": "compd",
       "component_id": "broker-compd"
-    },
-    {
-      "service": "lockd",
-      "component_id": "demo-lockui"
     }
   ],
   "service_recovery_execution_policies": [

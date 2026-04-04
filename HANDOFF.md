@@ -246,7 +246,7 @@
 - `examples/minimal-scene/surface-registry.json`
   - `panel-1` が stale clipboard owner、`terminal-1` が primary selection owner の fixture を追加
 - `profiles/demo-wayland-compd-recovery.json`
-  - mock `shell` / `panel` を足し、`Wayland native` の最小 desktop skeleton に拡張
+  - lock UI は broker-owned `lockd` に任せ、`shell` / `panel` / `settings-daemon` / `applet` を持つ `Wayland native` の最小 desktop skeleton に拡張
 
 ### 17. session instance aware watchdog stream
 
@@ -263,6 +263,16 @@
   - 同じ profile でも別 session instance の state merge をしない
 - `scripts/run-watchdog-resync-demo.sh`
   - resync 後も同じ session instance id が維持されることを確認する
+
+### 18. broker-owned lock path for native profile
+
+- `sessiond`
+  - `Wayland native` profile で `lockd` binding が無くても、`lockd` service 自体が broker-owned UI を持つ前提で resume sequence を継続できる
+  - `lock-ui-path-*.json` に `binding_source=service-only` を記録できる
+- `profiles/demo-wayland-compd-recovery.json`
+  - mock lockscreen component を外し、`shell` / `panel` / `settings-daemon` / `applet` skeleton に更新
+- `scripts/run-compd-broker-recovery.sh`
+  - recovery 成功に加えて `service-only` lock path と native skeleton component の起動も確認する
 
 ## 現在のコード上の要点
 
@@ -312,11 +322,11 @@
 
 優先順はこのあたりです。
 
-1. `demo-wayland-compd-recovery` から mock lock UI 依存を減らし、native applet/settings-daemon skeleton へ広げる
-2. `waylandd` registry に clipboard owner の payload/source serial も足し、owner id だけでない再送条件を固定する
-3. `LeyerX11` に clipboard / selection の最小橋渡しを足す
-4. degraded profile 切替後の component 再起動と state 収束を `watchdog` / `sessiond` 間で自動化する
-5. multi-session supervisor を本当に始める前に、runtime artifact 名も `session_instance_id` 付きへ拡張する
+1. `waylandd` registry に clipboard owner の payload/source serial も足し、owner id だけでない再送条件を固定する
+2. `LeyerX11` に clipboard / selection の最小橋渡しを足す
+3. degraded profile 切替後の component 再起動と state 収束を `watchdog` / `sessiond` 間で自動化する
+4. multi-session supervisor を本当に始める前に、runtime artifact 名も `session_instance_id` 付きへ拡張する
+5. `Wayland native` profile 用に `portal` / notification bridge の最小 skeleton を足す
 
 ## 注意点
 

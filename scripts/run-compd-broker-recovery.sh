@@ -15,6 +15,7 @@ waylandd_pid=""
 watchdog_pid=""
 lockd_pid=""
 sessiond_pid=""
+lock_path_artifact=""
 
 cleanup_launch_states() {
   local launch_state
@@ -144,18 +145,30 @@ wait_for_socket "$WAYBROKER_RUNTIME_DIR/compd.sock"
 wait_for_file "$launch_state_file"
 rg -q '"id": "demo-shell"' "$launch_state_file"
 rg -q '"id": "demo-panel"' "$launch_state_file"
+rg -q '"id": "demo-settingsd"' "$launch_state_file"
+rg -q '"id": "demo-status-applet"' "$launch_state_file"
+
+if rg -q '"role": "lockscreen"' "$launch_state_file"; then
+  echo "FAILED: wayland native recovery profile should not depend on a mock lockscreen component" >&2
+  cat "$launch_state_file" >&2
+  exit 1
+fi
 
 echo "==> Triggering resume scenario: compd-trouble"
 "$target_dir/sessiond" --resume-scenario "compd-trouble" \
   > "$WAYBROKER_RUNTIME_DIR/resume-trigger.log" 2>&1
 
 execution_artifact="$WAYBROKER_RUNTIME_DIR/watchdog-action-execution-compd.json"
+lock_path_artifact="$WAYBROKER_RUNTIME_DIR/lock-ui-path-compd-trouble.json"
 wait_for_file "$execution_artifact"
+wait_for_file "$lock_path_artifact"
 
 rg -q '"result": "succeeded"' "$execution_artifact"
 rg -q '"--restore-from-displayd"' "$execution_artifact"
 rg -q '"--reconcile-waylandd"' "$execution_artifact"
 rg -q '"--handoff-selection"' "$execution_artifact"
+rg -q '"binding_source": "service-only"' "$lock_path_artifact"
+rg -q '"ui_component_present": false' "$lock_path_artifact"
 
 wait_for_log 'service=compd op=scene_recover event=success' "$managed_log"
 wait_for_log 'service=compd op=scene_reconcile dropped_ids=panel-1' "$managed_log"
@@ -177,6 +190,10 @@ rg -q '"primary_selection_owner": "terminal-1"' "$wayland_registry_file"
 
 echo "==> Recovery artifact"
 cat "$execution_artifact"
+
+echo
+echo "==> Lock Path Artifact"
+cat "$lock_path_artifact"
 
 echo
 echo "==> Rebuilt displayd snapshot"

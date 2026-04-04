@@ -73,6 +73,8 @@
 
 lockscreen を `compositor` 本体に抱え込むと、「席を外した時の認証」の失敗が「画面系すべての停止」に化けやすいからです。
 
+`Wayland native` の session profile では、lock UI を毎回 profile component としてぶら下げなくてもよい形を目指します。最低限の desktop skeleton は `shell` / `panel` / `settings-daemon` / `applet` に集中させ、認証 UI 自体は broker-owned `lockd` が持つ前提に寄せます。
+
 ## sessiond
 
 ### 役割

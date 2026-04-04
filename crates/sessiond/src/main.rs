@@ -524,6 +524,47 @@ fn read_watchdog_report(
         .with_context(|| format!("failed to decode watchdog report {}", path.display()))
 }
 
+fn resolve_lockd_resume_binding(
+    profile: Option<&DesktopProfile>,
+) -> (Option<String>, String, String, String) {
+    let Some(profile) = profile else {
+        return (None, "missing".into(), "missing".into(), "no active profile loaded".into());
+    };
+
+    let lockd_bindings: Vec<String> = profile
+        .service_component_bindings
+        .iter()
+        .filter(|binding| binding.service == ServiceRole::Lockd)
+        .map(|binding| binding.component_id.clone())
+        .collect();
+
+    if lockd_bindings.len() > 1 {
+        return (
+            None,
+            "collision".into(),
+            "collision".into(),
+            "multiple bindings found for lockd".into(),
+        );
+    }
+
+    if let Some(component_id) = lockd_bindings.first() {
+        return (Some(component_id.clone()), "explicit".into(), "selected".into(), String::new());
+    }
+
+    if profile.protocol == waybroker_common::DesktopProtocol::WaylandNative
+        && profile.broker_services.iter().any(|service| *service == ServiceRole::Lockd)
+    {
+        return (
+            None,
+            "service-only".into(),
+            "selected".into(),
+            "using broker-owned lockd UI path".into(),
+        );
+    }
+
+    (None, "missing".into(), "missing".into(), "no lockd binding found".into())
+}
+
 fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()> {
     println!("service=sessiond op=resume_sequence event=begin scenario={}", scenario.as_str());
 
@@ -551,43 +592,8 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
     write_binding_collision_report(&report)?;
 
     // Resolve Lockd binding
-    let lockd_binding_count = profile
-        .as_ref()
-        .map(|p| {
-            p.service_component_bindings.iter().filter(|b| b.service == ServiceRole::Lockd).count()
-        })
-        .unwrap_or(0);
-
     let (lockd_bound_id, lockd_binding_source, lockd_res_result, lockd_res_reason) =
-        if lockd_binding_count > 1 {
-            (None, "collision", "collision", "multiple bindings found for lockd")
-        } else if let Some(b) = profile.as_ref().and_then(|p| {
-            p.service_component_bindings.iter().find(|b| b.service == ServiceRole::Lockd)
-        }) {
-            (Some(b.component_id.clone()), "explicit", "selected", "")
-        } else {
-            (None, "missing", "missing", "no lockd binding found")
-        };
-
-    let lockd_res_artifact = BindingResolutionResult {
-        service: "lockd".into(),
-        resolution_source: lockd_binding_source.into(),
-        candidate_component_ids: profile
-            .as_ref()
-            .map(|p| {
-                p.service_component_bindings
-                    .iter()
-                    .filter(|b| b.service == ServiceRole::Lockd)
-                    .map(|b| b.component_id.clone())
-                    .collect()
-            })
-            .unwrap_or_default(),
-        selected_component_id: lockd_bound_id.clone(),
-        result: lockd_res_result.into(),
-        reason: lockd_res_reason.into(),
-        unix_timestamp: now_unix_timestamp(),
-    };
-    write_binding_resolution_artifact(&lockd_res_artifact)?;
+        resolve_lockd_resume_binding(profile.as_ref());
 
     // Resolve Compd binding
     let compd_binding_count = profile
@@ -670,7 +676,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
 
     let lockd_res_artifact = BindingResolutionResult {
         service: "lockd".into(),
-        resolution_source: lockd_binding_source.into(),
+        resolution_source: lockd_binding_source.clone(),
         candidate_component_ids: profile
             .as_ref()
             .map(|p| {
@@ -682,8 +688,8 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
             })
             .unwrap_or_default(),
         selected_component_id: lockd_bound_id.clone(),
-        result: lockd_res_result.into(),
-        reason: lockd_res_reason.into(),
+        result: lockd_res_result.clone(),
+        reason: lockd_res_reason.clone(),
         unix_timestamp: now_unix_timestamp(),
     };
     write_binding_resolution_artifact(&lockd_res_artifact)?;
@@ -694,19 +700,23 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
             lockd_res_result
         );
         final_state = "blank-only".into();
-        lock_reason = lockd_res_reason.into();
+        lock_reason = lockd_res_reason.clone();
         steps.push(ResumeStep {
             name: "lockd_binding_resolution".into(),
             service: "sessiond".into(),
-            outcome: lockd_res_result.into(),
-            detail: Some(lockd_res_reason.into()),
+            outcome: lockd_res_result.clone(),
+            detail: Some(lockd_res_reason.clone()),
         });
     } else {
+        let binding_detail = lockd_bound_id
+            .as_ref()
+            .map(|component_id| format!("bound to {component_id}"))
+            .or_else(|| (!lockd_res_reason.is_empty()).then_some(lockd_res_reason.clone()));
         steps.push(ResumeStep {
             name: "lockd_binding_resolution".into(),
             service: "sessiond".into(),
-            outcome: "explicit".into(),
-            detail: Some(format!("bound to {:?}", lockd_bound_id)),
+            outcome: lockd_binding_source.clone(),
+            detail: binding_detail,
         });
     }
 
@@ -1111,7 +1121,11 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                 }
             }
         } else {
-            let reason = if !is_lockd_enabled { "policy-disabled" } else { lockd_res_result };
+            let reason = if !is_lockd_enabled {
+                "policy-disabled".to_string()
+            } else {
+                lockd_res_result.clone()
+            };
 
             if is_lockd_enabled {
                 let exec_artifact = WatchdogExecutionArtifact {
@@ -1123,7 +1137,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                     component_id: None,
                     previous_pid: None,
                     new_pid: None,
-                    reason: reason.to_string(),
+                    reason: reason.clone(),
                     resolution_source: lockd_binding_source.to_string(),
                     bound_component_id: lockd_bound_id.clone(),
                     policy_source: if lockd_policy.is_some() {
@@ -1140,7 +1154,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                 name: "watchdog_restart_request".into(),
                 service: "watchdog".into(),
                 outcome: "skipped".into(),
-                detail: Some(reason.into()),
+                detail: Some(reason),
             });
         }
     }
@@ -1161,7 +1175,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
         service: "lockd".into(),
         binding_source: lockd_binding_source.into(),
         bound_component_id: lockd_bound_id,
-        component_role: Some("lockscreen".into()),
+        component_role: ui_component_present.then_some("lockscreen".into()),
         ui_component_present,
         lock_state_outcome,
         auth_outcome,
@@ -2435,7 +2449,7 @@ impl RuntimeComponent {
 mod tests {
     use super::{
         apply_watchdog_report, build_launch_state, is_executable, resolve_command_path,
-        watchdog_stream_command,
+        resolve_lockd_resume_binding, watchdog_stream_command,
     };
     use std::{
         fs,
@@ -2843,5 +2857,63 @@ mod tests {
             }
             other => panic!("expected replace delta, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn uses_service_only_lockd_path_for_wayland_native_profile() {
+        let profile = DesktopProfile {
+            id: "demo-wayland".into(),
+            display_name: "Demo Wayland".into(),
+            protocol: DesktopProtocol::WaylandNative,
+            summary: "demo".into(),
+            degraded_profile_id: None,
+            broker_services: vec![ServiceRole::Displayd, ServiceRole::Sessiond, ServiceRole::Lockd],
+            session_components: vec![DesktopComponent {
+                id: "demo-shell".into(),
+                role: DesktopComponentRole::Shell,
+                command: vec!["demo-shell".into()],
+                critical: true,
+                launcher: waybroker_common::DesktopLauncher::System,
+            }],
+            service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
+        };
+
+        let (component_id, binding_source, result, reason) =
+            resolve_lockd_resume_binding(Some(&profile));
+
+        assert_eq!(component_id, None);
+        assert_eq!(binding_source, "service-only");
+        assert_eq!(result, "selected");
+        assert_eq!(reason, "using broker-owned lockd UI path");
+    }
+
+    #[test]
+    fn keeps_missing_lockd_path_for_x11_profile_without_binding() {
+        let profile = DesktopProfile {
+            id: "demo-x11".into(),
+            display_name: "Demo X11".into(),
+            protocol: DesktopProtocol::LayerX11,
+            summary: "demo".into(),
+            degraded_profile_id: None,
+            broker_services: vec![ServiceRole::Displayd, ServiceRole::Sessiond, ServiceRole::Lockd],
+            session_components: vec![DesktopComponent {
+                id: "demo-shell".into(),
+                role: DesktopComponentRole::Shell,
+                command: vec!["demo-shell".into()],
+                critical: true,
+                launcher: waybroker_common::DesktopLauncher::System,
+            }],
+            service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
+        };
+
+        let (component_id, binding_source, result, reason) =
+            resolve_lockd_resume_binding(Some(&profile));
+
+        assert_eq!(component_id, None);
+        assert_eq!(binding_source, "missing");
+        assert_eq!(result, "missing");
+        assert_eq!(reason, "no lockd binding found");
     }
 }

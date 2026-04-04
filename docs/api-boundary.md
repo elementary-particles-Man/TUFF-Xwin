@@ -102,6 +102,8 @@ Must not expose:
 - normal window policy
 - direct hardware control
 
+`Wayland native` profile では、lockscreen session component が無くても `lockd` service 自体は機能できる前提を保ちます。profile が持つのは desktop skeleton であり、認証 UI の authoritative owner は `lockd` 本体です。
+
 ### sessiond
 
 Inputs:
