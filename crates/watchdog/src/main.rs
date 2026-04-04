@@ -13,6 +13,7 @@ use waybroker_common::{
     SessionLaunchState, SessionWatchdogComponentReport, SessionWatchdogReport, WatchdogCommand,
     bind_service_socket, connect_service_socket, ensure_runtime_dir, now_unix_timestamp,
     read_json_line, runtime_dir, send_json_line, session_artifact_path,
+    validate_session_instance_id,
 };
 
 fn main() -> Result<()> {
@@ -77,6 +78,12 @@ impl Config {
                 }
                 "--session-instance-id" => {
                     let id = args.next().context("--session-instance-id requires an id")?;
+                    if !validate_session_instance_id(&id) {
+                        bail!(
+                            "invalid session-instance-id: \"{}\". Must be 1-128 chars of [A-Za-z0-9._-]",
+                            id
+                        );
+                    }
                     config.session_instance_id = Some(id);
                 }
                 "--inspect-all" => config.inspect_all = true,
@@ -183,16 +190,8 @@ fn handle_watchdog_command(
     server: &mut WatchdogServer,
 ) -> Result<WatchdogCommand> {
     match command {
-        WatchdogCommand::Restart { role, reason } => {
+        WatchdogCommand::Restart { role, session_instance_id, reason } => {
             if role == ServiceRole::Compd || role == ServiceRole::Lockd {
-                // IPC経由の場合、どのセッションのコンポーネントかを特定する必要があるが、
-                // 現状の WatchdogCommand::Restart は role しか持たないため、
-                // キャッシュされている最新のセッション（または唯一のセッション）をターゲットにする。
-                // 厳密にはコマンドを拡張して session_instance_id を含めるべきだが、
-                // まずはパス解決をセッションID対応にする。
-                
-                let session_instance_id = server.latest_session_instance_id().unwrap_or_else(|| "legacy-single-session".to_string());
-
                 println!(
                     "service=watchdog op=recovery_request event=accepted role={} reason=\"{}\" requested_by={} session_instance_id={}",
                     role.as_str(),
@@ -216,7 +215,7 @@ fn handle_watchdog_command(
                     artifact_path.display()
                 );
 
-                Ok(WatchdogCommand::Restart { role, reason })
+                Ok(WatchdogCommand::Restart { role, session_instance_id, reason })
             } else {
                 println!(
                     "service=watchdog op=recovery_request event=rejected role={} reason=\"unsupported role\"",
@@ -248,7 +247,11 @@ fn handle_watchdog_command(
             StateUpdateOutcome::Ignored { state, reason } => {
                 println!(
                     "watchdog ignored_launch_state profile={} session_instance={} generation={} sequence={} reason={}",
-                    state.profile_id, state.session_instance_id, state.generation, state.sequence, reason
+                    state.profile_id,
+                    state.session_instance_id,
+                    state.generation,
+                    state.sequence,
+                    reason
                 );
 
                 let report = inspect_launch_state(&state);
@@ -646,8 +649,12 @@ fn process_exists(pid: u32) -> bool {
     PathBuf::from("/proc").join(pid.to_string()).exists()
 }
 
-fn write_recovery_artifact(artifact: &WatchdogRecoveryArtifact, session_instance_id: &str) -> Result<PathBuf> {
-    let path = session_artifact_path(session_instance_id, &format!("watchdog-recovery-{}", artifact.role));
+fn write_recovery_artifact(
+    artifact: &WatchdogRecoveryArtifact,
+    session_instance_id: &str,
+) -> Result<PathBuf> {
+    let path =
+        session_artifact_path(session_instance_id, &format!("watchdog-recovery-{}", artifact.role));
     let json = serde_json::to_string_pretty(artifact)
         .context("failed to serialize watchdog recovery artifact")?;
     fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
@@ -1171,5 +1178,41 @@ mod tests {
             .expect("cached state for second session");
         assert_eq!(cached_other.components[0].id, "wm-b");
         assert_eq!(cached_other.components[0].state, DesktopComponentState::Spawned);
+    }
+
+    #[test]
+    fn recovery_request_is_session_aware() {
+        use crate::{
+            Config, ServiceRole, WatchdogCommand, WatchdogServer, handle_watchdog_command,
+            session_artifact_path,
+        };
+        use std::fs;
+
+        let mut server = WatchdogServer::default();
+        let config = Config::default();
+        let source = ServiceRole::Sessiond;
+
+        let command_a = WatchdogCommand::Restart {
+            role: ServiceRole::Compd,
+            session_instance_id: "session-a".into(),
+            reason: "test-a".into(),
+        };
+
+        // session-a 向けのリクエスト
+        let res_a =
+            handle_watchdog_command(command_a, source, &config, &mut server).expect("handle a");
+        match res_a {
+            WatchdogCommand::Restart { ref session_instance_id, .. } => {
+                assert_eq!(session_instance_id, "session-a");
+            }
+            _ => panic!("expected restart command"),
+        }
+
+        let path_a = session_artifact_path("session-a", "watchdog-recovery-compd");
+        assert!(path_a.exists(), "artifact for session-a should exist at {}", path_a.display());
+        let _ = fs::remove_file(&path_a);
+
+        let path_b = session_artifact_path("session-b", "watchdog-recovery-compd");
+        assert!(!path_b.exists(), "artifact for session-b should not exist");
     }
 }

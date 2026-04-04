@@ -8,7 +8,7 @@
 - **displayd**: (P0 - Baseline) Hardware broker for DRM/KMS and libinput. Stub but functional IPC, with persisted last-scene snapshot.
 - **waylandd**: (P1 - Minimal runtime) Wayland protocol endpoint and surface broker. Can serve surface-registry snapshots for `compd` rebuild and accept post-recovery focus/selection handoff.
 - **sessiond**: (P0 - Baseline) Session and desktop profile policy manager.
-- **watchdog**: (P0 - Baseline) Recovery orchestrator and crash-loop supervisor.
+- **watchdog**: (P0 - Baseline) Recovery orchestrator and crash-loop supervisor. Supports session-aware recovery requests and path-safe artifact management.
 - **lockd**: (Stub) Lockscreen and authentication UI service.
 - **x11bridge**: (Demo) Rootless X11 compatibility island (LeyerX11).
 

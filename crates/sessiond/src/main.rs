@@ -16,6 +16,7 @@ use waybroker_common::{
     SessionLaunchDelta, SessionLaunchState, SessionProfileTransition, SessionWatchdogReport,
     WatchdogCommand, bind_service_socket, connect_service_socket, ensure_runtime_dir,
     now_unix_timestamp, read_json_line, runtime_dir, send_json_line, session_artifact_path,
+    validate_session_instance_id,
 };
 
 #[derive(Debug, serde::Serialize)]
@@ -144,7 +145,8 @@ fn main() -> Result<()> {
     );
     println!("{}", banner.render());
 
-    let session_instance_id = config.session_instance_id.clone().unwrap_or_else(|| "legacy-single-session".to_string());
+    let session_instance_id =
+        config.session_instance_id.clone().unwrap_or_else(|| "legacy-single-session".to_string());
 
     println!(
         "service=sessiond op=load_profiles dir={} count={} session_instance_id={}",
@@ -425,6 +427,12 @@ impl Config {
                 }
                 "--session-instance-id" => {
                     let id = args.next().context("--session-instance-id requires an id")?;
+                    if !validate_session_instance_id(&id) {
+                        bail!(
+                            "invalid session-instance-id: \"{}\". Must be 1-128 chars of [A-Za-z0-9._-]",
+                            id
+                        );
+                    }
                     config.session_instance_id = Some(id);
                 }
                 "--supervise-seconds" => {
@@ -1015,6 +1023,7 @@ fn run_resume_scenario(
             );
             let res = send_watchdog_command(WatchdogCommand::Restart {
                 role: ServiceRole::Compd,
+                session_instance_id: session_instance_id.to_string(),
                 reason: "resume failure (restart-request)".into(),
             });
 
@@ -1115,6 +1124,7 @@ fn run_resume_scenario(
             );
             let res = send_watchdog_command(WatchdogCommand::Restart {
                 role: ServiceRole::Lockd,
+                session_instance_id: session_instance_id.to_string(),
                 reason: lock_reason.clone(),
             });
 
@@ -1221,11 +1231,12 @@ fn run_resume_scenario(
     Ok(())
 }
 
-fn write_lock_path_artifact(artifact: &LockPathArtifact, session_instance_id: &str) -> Result<PathBuf> {
-    let path = session_artifact_path(
-        session_instance_id,
-        &format!("lock-ui-path-{}", artifact.scenario),
-    );
+fn write_lock_path_artifact(
+    artifact: &LockPathArtifact,
+    session_instance_id: &str,
+) -> Result<PathBuf> {
+    let path =
+        session_artifact_path(session_instance_id, &format!("lock-ui-path-{}", artifact.scenario));
     let json =
         serde_json::to_string_pretty(artifact).context("failed to serialize lock path artifact")?;
     fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
@@ -1234,7 +1245,8 @@ fn write_lock_path_artifact(artifact: &LockPathArtifact, session_instance_id: &s
 }
 
 fn write_resume_trace(trace: &ResumeTrace, session_instance_id: &str) -> Result<PathBuf> {
-    let path = session_artifact_path(session_instance_id, &format!("resume-trace-{}", trace.scenario));
+    let path =
+        session_artifact_path(session_instance_id, &format!("resume-trace-{}", trace.scenario));
     let json = serde_json::to_string_pretty(trace).context("failed to serialize resume trace")?;
     fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
     println!("service=sessiond op=write_resume_trace event=success path={}", path.display());
@@ -1402,10 +1414,8 @@ fn build_launch_state(profile: &DesktopProfile, config: &Config) -> Result<Sessi
 }
 
 fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<SessionLaunchState> {
-    let session_instance_id = config
-        .session_instance_id
-        .clone()
-        .unwrap_or_else(|| new_session_instance_id(&profile.id));
+    let session_instance_id =
+        config.session_instance_id.clone().unwrap_or_else(|| new_session_instance_id(&profile.id));
     let mut components = Vec::with_capacity(profile.session_components.len());
 
     for component in &profile.session_components {
@@ -1421,7 +1431,11 @@ fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<S
         let mut had_event = false;
 
         for component in &mut components {
-            if component.poll_and_restart(&profile.id, &session_instance_id, config.restart_limit)? {
+            if component.poll_and_restart(
+                &profile.id,
+                &session_instance_id,
+                config.restart_limit,
+            )? {
                 had_event = true;
             }
         }
@@ -1580,12 +1594,11 @@ fn write_profile_transition(
     session_instance_id: &str,
 ) -> Result<PathBuf> {
     let path = session_artifact_path(session_instance_id, "profile-transition");
-    let json =
-        serde_json::to_string_pretty(transition).context("failed to serialize profile transition")?;
+    let json = serde_json::to_string_pretty(transition)
+        .context("failed to serialize profile transition")?;
     fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
 }
-
 
 fn print_launch_state(state: &SessionLaunchState) {
     println!(
@@ -1951,8 +1964,10 @@ struct SessionSupervisor {
 
 impl SessionSupervisor {
     fn bootstrap(config: &Config, profiles: &[DesktopProfile]) -> Result<Self> {
-        let session_instance_id =
-            config.session_instance_id.clone().unwrap_or_else(|| "legacy-single-session".to_string());
+        let session_instance_id = config
+            .session_instance_id
+            .clone()
+            .unwrap_or_else(|| "legacy-single-session".to_string());
         let profile = read_active_profile(&session_instance_id)?;
         let mut supervisor = Self::new(profile, profiles.to_vec(), session_instance_id, 1, config)?;
         supervisor.activate(config)?;
@@ -1995,7 +2010,6 @@ impl SessionSupervisor {
 
         self.write_snapshot("managed_active_profile", config)
     }
-
 
     fn switch_to(&mut self, profile: DesktopProfile, config: &Config) -> Result<()> {
         self.stop_all()?;
@@ -2640,6 +2654,7 @@ mod tests {
         };
         let report = SessionWatchdogReport {
             profile_id: "demo-x11-crashy".into(),
+            session_instance_id: "test-session".into(),
             display_name: "Crashy Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             healthy_components: 1,
@@ -2693,6 +2708,7 @@ mod tests {
         };
         let report = SessionWatchdogReport {
             profile_id: "demo-x11".into(),
+            session_instance_id: "test-session".into(),
             display_name: "Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             healthy_components: 1,

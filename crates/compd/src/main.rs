@@ -185,7 +185,10 @@ impl Config {
     }
 }
 
-async fn prepare_scene(config: &Config, vulkan: Option<&VulkanBackend>) -> Result<Option<CompdScene>> {
+async fn prepare_scene(
+    config: &Config,
+    vulkan: Option<&VulkanBackend>,
+) -> Result<Option<CompdScene>> {
     if !config.restore_from_displayd
         && config.scene_path.is_none()
         && !config.reconcile_waylandd
@@ -886,9 +889,10 @@ mod tests {
     #[test]
     fn rebuilds_scene_from_displayd_snapshot() {
         let scene = scene_from_snapshot(&CommittedSceneState {
-            source: ServiceRole::X11Bridge,
+            source: ServiceRole::Compd,
             target: CommitTarget::Output { name: "HDMI-1".into() },
             focus: FocusTarget::Surface { id: "xterm-1".into() },
+            selection: waybroker_common::WaylandSelectionState::default(),
             surfaces: vec![SurfaceSnapshot {
                 id: "xterm-1".into(),
                 app_id: "org.xterm".into(),

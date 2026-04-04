@@ -123,6 +123,8 @@ pub enum SessionCommand {
 pub enum WatchdogCommand {
     Restart {
         role: ServiceRole,
+        #[serde(default = "default_session_instance_id")]
+        session_instance_id: String,
         reason: String,
     },
     Escalate {

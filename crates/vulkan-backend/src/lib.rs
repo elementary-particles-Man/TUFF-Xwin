@@ -200,7 +200,7 @@ impl VulkanBackend {
         inner.state = VulkanBackendState::Ready;
         inner.capabilities.compute_available = true;
         inner.capabilities.driver_name = "vulkan-backend-v1".to_string();
-        
+
         log::info!("vulkan-backend: initialized state={:?}", inner.state);
         inner.capabilities.clone()
     }
@@ -212,21 +212,24 @@ impl VulkanBackend {
 
         let handle = VulkanBatchHandle { id };
         let now = Instant::now();
-        
+
         let (path, reason) = if inner.state != VulkanBackendState::Ready || !submission.allows_gpu {
             (VulkanExecutionPath::CpuFallback, Some(VulkanFallbackReason::DisabledByPolicy))
         } else {
             (VulkanExecutionPath::Vulkan, None)
         };
 
-        inner.submissions.insert(id, VulkanStoredSubmission {
-            workload: submission.workload,
-            path,
-            fallback_reason: reason,
-            ready_at: now + Duration::from_millis(5), // 擬似遅延
-            deadline: now + submission.timeout,
-            completed_at: None,
-        });
+        inner.submissions.insert(
+            id,
+            VulkanStoredSubmission {
+                workload: submission.workload,
+                path,
+                fallback_reason: reason,
+                ready_at: now + Duration::from_millis(5), // 擬似遅延
+                deadline: now + submission.timeout,
+                completed_at: None,
+            },
+        );
 
         handle
     }
@@ -234,7 +237,7 @@ impl VulkanBackend {
     pub fn poll_completion(&self, handle: VulkanBatchHandle) -> VulkanPollStatus {
         let mut inner = self.inner.lock();
         let now = Instant::now();
-        
+
         if let Some(sub) = inner.submissions.get_mut(&handle.id) {
             if sub.completed_at.is_some() {
                 return VulkanPollStatus::Completed;

@@ -197,6 +197,7 @@ mod tests {
         let scene = X11RootlessScene {
             output: super::X11OutputTarget { name: "eDP-1".into(), width: 1920, height: 1080 },
             focus_window: Some("ghost".into()),
+            selection: super::X11SelectionState::default(),
             windows: vec![],
         };
 

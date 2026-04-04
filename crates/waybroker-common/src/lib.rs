@@ -18,7 +18,8 @@ pub use profile::{
 };
 pub use transport::{
     bind_service_socket, connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir,
-    send_json_line, service_socket_path, session_artifact_path,
+    sanitize_session_instance_id, send_json_line, service_socket_path, session_artifact_path,
+    validate_session_instance_id,
 };
 
 pub fn now_unix_timestamp() -> u64 {
@@ -96,6 +97,7 @@ mod tests {
             MessageKind::DisplayCommand(DisplayCommand::CommitScene {
                 target: CommitTarget::Output { name: "eDP-1".into() },
                 focus: FocusTarget::Surface { id: "terminal-1".into() },
+                selection: WaylandSelectionState::default(),
                 surfaces: vec![
                     SurfaceSnapshot {
                         id: "terminal-1".into(),
@@ -185,6 +187,7 @@ mod tests {
                     source: ServiceRole::Compd,
                     target: CommitTarget::Output { name: "eDP-1".into() },
                     focus: FocusTarget::Surface { id: "terminal-1".into() },
+                    selection: WaylandSelectionState::default(),
                     surfaces: vec![SurfaceSnapshot {
                         id: "terminal-1".into(),
                         app_id: "org.kde.konsole".into(),
@@ -307,6 +310,7 @@ mod tests {
             MessageKind::SessionCommand(super::SessionCommand::ApplyWatchdogReport {
                 report: super::SessionWatchdogReport {
                     profile_id: "demo-x11-crashy".into(),
+                    session_instance_id: "legacy-single-session".into(),
                     display_name: "Crashy Demo".into(),
                     protocol: super::DesktopProtocol::LayerX11,
                     healthy_components: 1,

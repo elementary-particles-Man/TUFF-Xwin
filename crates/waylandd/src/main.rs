@@ -460,23 +460,24 @@ mod tests {
     #[test]
     fn applies_selection_handoff_to_active_surface() {
         let mut registry = mock_surface_registry();
-        let (event, changed) = tokio::runtime::Runtime::new().unwrap().block_on(handle_wayland_command(
-            WaylandCommand::ApplySelectionHandoff {
-                handoff: WaylandSelectionHandoff {
-                    focus: FocusTarget::Surface { id: "konsole-1".into() },
-                    selection: WaylandSelectionState {
-                        clipboard_owner: Some("konsole-1".into()),
-                        clipboard_payload_id: Some("konsole-clipboard-v2".into()),
-                        clipboard_source_serial: Some(12),
-                        primary_selection_owner: Some("konsole-1".into()),
-                        primary_selection_payload_id: Some("konsole-primary-v1".into()),
-                        primary_selection_source_serial: Some(13),
+        let (event, changed) =
+            tokio::runtime::Runtime::new().unwrap().block_on(handle_wayland_command(
+                WaylandCommand::ApplySelectionHandoff {
+                    handoff: WaylandSelectionHandoff {
+                        focus: FocusTarget::Surface { id: "konsole-1".into() },
+                        selection: WaylandSelectionState {
+                            clipboard_owner: Some("konsole-1".into()),
+                            clipboard_payload_id: Some("konsole-clipboard-v2".into()),
+                            clipboard_source_serial: Some(12),
+                            primary_selection_owner: Some("konsole-1".into()),
+                            primary_selection_payload_id: Some("konsole-primary-v1".into()),
+                            primary_selection_source_serial: Some(13),
+                        },
                     },
                 },
-            },
-            &mut registry,
-            None,
-        ));
+                &mut registry,
+                None,
+            ));
 
         assert!(changed);
         match event {

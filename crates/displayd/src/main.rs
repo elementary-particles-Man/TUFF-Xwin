@@ -80,7 +80,9 @@ impl Config {
                         args.next().context("--session-instance-id requires an id")?;
                 }
                 "--help" | "-h" => {
-                    println!("usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID]");
+                    println!(
+                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID]"
+                    );
                     std::process::exit(0);
                 }
                 _ => bail!("unknown argument: {arg}"),
