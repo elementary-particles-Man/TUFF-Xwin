@@ -7,12 +7,14 @@
 - output は 1 枚
 - client は 2 つ
 - foreground window は 1 つ
+- stale clipboard owner は 1 つ
 - lock state は off
 - animation は無し
 
 ## Files
 
-- [scene.toml](/media/flux/THPDOC/Develop/TUFF-Xwin/examples/minimal-scene/scene.toml)
+- [scene.json](/media/flux/THPDOC/Develop/TUFF-Xwin/examples/minimal-scene/scene.json)
+- [surface-registry.json](/media/flux/THPDOC/Develop/TUFF-Xwin/examples/minimal-scene/surface-registry.json)
 
 ## Why It Exists
 

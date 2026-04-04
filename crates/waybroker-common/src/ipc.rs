@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ServiceRole, SessionLaunchDelta, SessionLaunchState, SessionProfileTransition,
-    SessionWatchdogReport,
+    SessionWatchdogReport, profile::default_session_instance_id,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,12 +74,14 @@ pub enum DisplayEvent {
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum WaylandCommand {
     GetSurfaceRegistry,
+    ApplySelectionHandoff { handoff: WaylandSelectionHandoff },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum WaylandEvent {
     SurfaceRegistry { snapshot: SurfaceRegistrySnapshot },
+    SelectionHandoffApplied { generation: u64, handoff: WaylandSelectionHandoff },
     Rejected { reason: String },
 }
 
@@ -104,12 +106,29 @@ pub enum SessionCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum WatchdogCommand {
-    Restart { role: ServiceRole, reason: String },
-    Escalate { level: u8, reason: String },
-    InspectLaunchState { state: SessionLaunchState },
-    UpdateLaunchState { delta: SessionLaunchDelta },
-    ResyncLaunchState { profile_id: String, reason: String },
-    InspectionResult { report: SessionWatchdogReport },
+    Restart {
+        role: ServiceRole,
+        reason: String,
+    },
+    Escalate {
+        level: u8,
+        reason: String,
+    },
+    InspectLaunchState {
+        state: SessionLaunchState,
+    },
+    UpdateLaunchState {
+        delta: SessionLaunchDelta,
+    },
+    ResyncLaunchState {
+        profile_id: String,
+        #[serde(default = "default_session_instance_id")]
+        session_instance_id: String,
+        reason: String,
+    },
+    InspectionResult {
+        report: SessionWatchdogReport,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,7 +190,23 @@ pub struct CommittedSceneState {
 pub struct SurfaceRegistrySnapshot {
     pub generation: u64,
     pub surfaces: Vec<WaylandSurfaceState>,
+    #[serde(default)]
+    pub selection: WaylandSelectionState,
     pub unix_timestamp: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WaylandSelectionState {
+    #[serde(default)]
+    pub clipboard_owner: Option<String>,
+    #[serde(default)]
+    pub primary_selection_owner: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaylandSelectionHandoff {
+    pub focus: FocusTarget,
+    pub selection: WaylandSelectionState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

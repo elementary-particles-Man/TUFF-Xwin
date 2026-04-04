@@ -70,7 +70,7 @@ kernel      sessiond      displayd      waylandd      watchdog      compd
 - `displayd` は最後の安定 frame と committed scene snapshot を維持する
 - `watchdog` が `compd` だけを再起動する
 
-現在の試作では、この snapshot は `displayd-last-scene.json` と `get-scene-snapshot` IPC で露出します。さらに `waylandd` は `get-surface-registry` で still-alive surface を返します。`compd --restore-from-displayd --reconcile-waylandd` は両者を使って restart 後の内部 scene を再構築します。
+現在の試作では、この snapshot は `displayd-last-scene.json` と `get-scene-snapshot` IPC で露出します。さらに `waylandd` は `get-surface-registry` で still-alive surface と selection owner を返します。`compd --restore-from-displayd --reconcile-waylandd --handoff-selection` は両者を使って restart 後の内部 scene を再構築し、死んだ selection owner だけを新しい focus へ handoff します。
 
 ## Rules
 

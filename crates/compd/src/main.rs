@@ -6,8 +6,9 @@ use anyhow::{Context, Result, bail};
 use waybroker_common::{
     CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope,
     MessageKind, ServiceBanner, ServiceRole, SurfacePlacement, SurfaceRegistrySnapshot,
-    SurfaceSnapshot, WaylandCommand, WaylandEvent, WaylandSurfaceRole, WaylandSurfaceState,
-    bind_service_socket, connect_service_socket, read_json_line, send_json_line,
+    SurfaceSnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState,
+    WaylandSurfaceRole, WaylandSurfaceState, bind_service_socket, connect_service_socket,
+    read_json_line, send_json_line,
 };
 
 fn main() -> Result<()> {
@@ -18,8 +19,15 @@ fn main() -> Result<()> {
     if config.restore_from_displayd && config.scene_path.is_some() {
         bail!("--scene cannot be combined with --restore-from-displayd");
     }
+    if config.handoff_selection && !config.reconcile_waylandd {
+        bail!("--handoff-selection requires --reconcile-waylandd");
+    }
 
     let scene = prepare_scene(&config)?;
+
+    if config.handoff_selection {
+        apply_selection_handoff(&config, scene.as_ref())?;
+    }
 
     if config.serve_ipc {
         if config.restore_from_displayd || config.reconcile_waylandd {
@@ -115,6 +123,7 @@ struct Config {
     restore_from_displayd: bool,
     reconcile_waylandd: bool,
     require_waylandd: bool,
+    handoff_selection: bool,
 }
 
 impl Config {
@@ -136,9 +145,10 @@ impl Config {
                 "--restore-from-displayd" => config.restore_from_displayd = true,
                 "--reconcile-waylandd" => config.reconcile_waylandd = true,
                 "--require-waylandd" => config.require_waylandd = true,
+                "--handoff-selection" => config.handoff_selection = true,
                 "--help" | "-h" => {
                     println!(
-                        "usage: compd [--scene PATH] [--print-scene] [--commit-demo] [--require-displayd] [--require-waylandd] [--restore-from-displayd] [--reconcile-waylandd] [--serve-ipc] [--once] [--fail-resume]"
+                        "usage: compd [--scene PATH] [--print-scene] [--commit-demo] [--require-displayd] [--require-waylandd] [--restore-from-displayd] [--reconcile-waylandd] [--handoff-selection] [--serve-ipc] [--once] [--fail-resume]"
                     );
                     std::process::exit(0);
                 }
@@ -233,11 +243,14 @@ fn reconcile_scene(config: &Config, scene: Option<CompdScene>) -> Result<Option<
             );
             let reconciled = reconcile_scene_with_registry(scene, &snapshot);
             println!(
-                "service=compd op=scene_reconcile event=success kept={} dropped={} app_id_updates={} focus={:?}",
+                "service=compd op=scene_reconcile event=success kept={} dropped={} app_id_updates={} selection_handoffs={} focus={:?} clipboard_owner={} primary_selection_owner={}",
                 reconciled.scene.surfaces.len(),
                 reconciled.dropped_surface_ids.len(),
                 reconciled.updated_app_ids,
-                reconciled.scene.focus
+                reconciled.selection_handoffs,
+                reconciled.scene.focus,
+                format_owner(reconciled.scene.selection.clipboard_owner.as_deref()),
+                format_owner(reconciled.scene.selection.primary_selection_owner.as_deref())
             );
             if !reconciled.dropped_surface_ids.is_empty() {
                 println!(
@@ -346,6 +359,8 @@ impl Drop for SocketGuard {
 struct CompdScene {
     target_output: String,
     focus: FocusTarget,
+    #[serde(default)]
+    selection: WaylandSelectionState,
     surfaces: Vec<SurfaceSnapshot>,
 }
 
@@ -365,6 +380,7 @@ fn mock_demo_scene() -> CompdScene {
     CompdScene {
         target_output: "eDP-1".into(),
         focus: FocusTarget::Surface { id: "konsole-1".into() },
+        selection: WaylandSelectionState::default(),
         surfaces: vec![
             SurfaceSnapshot {
                 id: "konsole-1".into(),
@@ -505,12 +521,80 @@ fn query_surface_registry_from_waylandd() -> Result<SurfaceRegistrySnapshot> {
     }
 }
 
+fn send_selection_handoff_to_waylandd(
+    focus: &FocusTarget,
+    selection: &WaylandSelectionState,
+) -> Result<u64> {
+    let mut stream = connect_service_socket(ServiceRole::Waylandd)
+        .context("failed to connect to waylandd socket")?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Compd,
+        ServiceRole::Waylandd,
+        MessageKind::WaylandCommand(WaylandCommand::ApplySelectionHandoff {
+            handoff: WaylandSelectionHandoff { focus: focus.clone(), selection: selection.clone() },
+        }),
+    );
+    send_json_line(&mut stream, &request)
+        .context("failed to send selection handoff to waylandd")?;
+
+    let mut reader = BufReader::new(stream);
+    let response: IpcEnvelope =
+        read_json_line(&mut reader).context("failed to read selection handoff response")?;
+
+    if response.source != ServiceRole::Waylandd {
+        bail!("unexpected response source: {}", response.source.as_str());
+    }
+
+    if response.destination != ServiceRole::Compd {
+        bail!("unexpected response destination: {}", response.destination.as_str());
+    }
+
+    match response.kind {
+        MessageKind::WaylandEvent(WaylandEvent::SelectionHandoffApplied { generation, .. }) => {
+            Ok(generation)
+        }
+        MessageKind::WaylandEvent(WaylandEvent::Rejected { reason }) => {
+            bail!("waylandd rejected selection handoff: {reason}")
+        }
+        other => bail!("unexpected waylandd response: {other:?}"),
+    }
+}
+
+fn apply_selection_handoff(config: &Config, scene: Option<&CompdScene>) -> Result<()> {
+    let Some(scene) = scene else {
+        println!("service=compd op=selection_handoff event=skipped reason=no-scene");
+        return Ok(());
+    };
+
+    match send_selection_handoff_to_waylandd(&scene.focus, &scene.selection) {
+        Ok(generation) => {
+            println!(
+                "service=compd op=selection_handoff event=success generation={} focus={:?} clipboard_owner={} primary_selection_owner={}",
+                generation,
+                scene.focus,
+                format_owner(scene.selection.clipboard_owner.as_deref()),
+                format_owner(scene.selection.primary_selection_owner.as_deref())
+            );
+            Ok(())
+        }
+        Err(err) => {
+            if config.require_waylandd {
+                Err(err).context("failed to apply selection handoff to waylandd")
+            } else {
+                println!("service=compd op=selection_handoff event=failed reason=\"{}\"", err);
+                Ok(())
+            }
+        }
+    }
+}
+
 fn scene_from_snapshot(snapshot: &CommittedSceneState) -> CompdScene {
     CompdScene {
         target_output: match &snapshot.target {
             CommitTarget::Output { name } => name.clone(),
         },
         focus: snapshot.focus.clone(),
+        selection: WaylandSelectionState::default(),
         surfaces: snapshot.surfaces.clone(),
     }
 }
@@ -520,6 +604,7 @@ struct SceneReconcileResult {
     scene: CompdScene,
     dropped_surface_ids: Vec<String>,
     updated_app_ids: usize,
+    selection_handoffs: usize,
 }
 
 fn reconcile_scene_with_registry(
@@ -551,10 +636,18 @@ fn reconcile_scene_with_registry(
     }
 
     let focus = reconcile_focus(&scene.focus, &kept_surfaces, &active_registry);
+    let (selection, selection_handoffs) =
+        reconcile_selection(&registry.selection, &focus, &active_registry);
     SceneReconcileResult {
-        scene: CompdScene { target_output: scene.target_output, focus, surfaces: kept_surfaces },
+        scene: CompdScene {
+            target_output: scene.target_output,
+            focus,
+            selection,
+            surfaces: kept_surfaces,
+        },
         dropped_surface_ids,
         updated_app_ids,
+        selection_handoffs,
     }
 }
 
@@ -593,6 +686,56 @@ fn fallback_focus_target(
         .unwrap_or(FocusTarget::None)
 }
 
+fn reconcile_selection(
+    previous_selection: &WaylandSelectionState,
+    focus: &FocusTarget,
+    active_registry: &BTreeMap<&str, &WaylandSurfaceState>,
+) -> (WaylandSelectionState, usize) {
+    let (clipboard_owner, clipboard_changed) = reconcile_selection_owner(
+        previous_selection.clipboard_owner.as_deref(),
+        focus,
+        active_registry,
+    );
+    let (primary_selection_owner, primary_changed) = reconcile_selection_owner(
+        previous_selection.primary_selection_owner.as_deref(),
+        focus,
+        active_registry,
+    );
+
+    (
+        WaylandSelectionState { clipboard_owner, primary_selection_owner },
+        usize::from(clipboard_changed) + usize::from(primary_changed),
+    )
+}
+
+fn reconcile_selection_owner(
+    previous_owner: Option<&str>,
+    focus: &FocusTarget,
+    active_registry: &BTreeMap<&str, &WaylandSurfaceState>,
+) -> (Option<String>, bool) {
+    match previous_owner {
+        Some(id) if active_registry.contains_key(id) => (Some(id.to_owned()), false),
+        Some(_) => {
+            let handoff = match focus {
+                FocusTarget::Surface { id }
+                    if active_registry
+                        .get(id.as_str())
+                        .is_some_and(|surface| is_focusable_role(surface.role)) =>
+                {
+                    Some(id.clone())
+                }
+                _ => None,
+            };
+            (handoff, true)
+        }
+        None => (None, false),
+    }
+}
+
+fn format_owner(owner: Option<&str>) -> &str {
+    owner.unwrap_or("none")
+}
+
 fn is_focusable_role(role: WaylandSurfaceRole) -> bool {
     matches!(
         role,
@@ -605,7 +748,8 @@ mod tests {
     use super::{CompdScene, mock_demo_scene, reconcile_scene_with_registry, scene_from_snapshot};
     use waybroker_common::{
         CommitTarget, CommittedSceneState, FocusTarget, ServiceRole, SurfacePlacement,
-        SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandSurfaceRole, WaylandSurfaceState,
+        SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandSelectionState, WaylandSurfaceRole,
+        WaylandSurfaceState,
     };
 
     #[test]
@@ -621,6 +765,7 @@ mod tests {
         let scene = CompdScene {
             target_output: "eDP-1".into(),
             focus: FocusTarget::None,
+            selection: WaylandSelectionState::default(),
             surfaces: vec![],
         };
         assert_eq!(scene.focus, FocusTarget::None);
@@ -632,6 +777,7 @@ mod tests {
         let scene = CompdScene {
             target_output: "HDMI-1".into(),
             focus: FocusTarget::None,
+            selection: WaylandSelectionState::default(),
             surfaces: vec![
                 SurfaceSnapshot {
                     id: "s1".into(),
@@ -695,6 +841,10 @@ mod tests {
             CompdScene {
                 target_output: "eDP-1".into(),
                 focus: FocusTarget::Surface { id: "panel-1".into() },
+                selection: WaylandSelectionState {
+                    clipboard_owner: Some("panel-1".into()),
+                    primary_selection_owner: Some("terminal-1".into()),
+                },
                 surfaces: vec![
                     SurfaceSnapshot {
                         id: "terminal-1".into(),
@@ -731,6 +881,10 @@ mod tests {
                     mapped: true,
                     buffer_attached: true,
                 }],
+                selection: WaylandSelectionState {
+                    clipboard_owner: Some("panel-1".into()),
+                    primary_selection_owner: Some("terminal-1".into()),
+                },
                 unix_timestamp: 1,
             },
         );
@@ -739,8 +893,14 @@ mod tests {
         assert_eq!(reconciled.scene.surfaces[0].id, "terminal-1");
         assert_eq!(reconciled.scene.surfaces[0].app_id, "org.kde.konsole");
         assert_eq!(reconciled.scene.focus, FocusTarget::Surface { id: "terminal-1".into() });
+        assert_eq!(reconciled.scene.selection.clipboard_owner.as_deref(), Some("terminal-1"));
+        assert_eq!(
+            reconciled.scene.selection.primary_selection_owner.as_deref(),
+            Some("terminal-1")
+        );
         assert_eq!(reconciled.dropped_surface_ids, vec!["panel-1"]);
         assert_eq!(reconciled.updated_app_ids, 1);
+        assert_eq!(reconciled.selection_handoffs, 1);
     }
 
     #[test]
@@ -749,6 +909,10 @@ mod tests {
             CompdScene {
                 target_output: "eDP-1".into(),
                 focus: FocusTarget::Surface { id: "terminal-1".into() },
+                selection: WaylandSelectionState {
+                    clipboard_owner: Some("terminal-1".into()),
+                    primary_selection_owner: Some("terminal-1".into()),
+                },
                 surfaces: vec![SurfaceSnapshot {
                     id: "background-1".into(),
                     app_id: "org.kde.wallpaper".into(),
@@ -771,11 +935,18 @@ mod tests {
                     mapped: true,
                     buffer_attached: true,
                 }],
+                selection: WaylandSelectionState {
+                    clipboard_owner: Some("terminal-1".into()),
+                    primary_selection_owner: Some("terminal-1".into()),
+                },
                 unix_timestamp: 1,
             },
         );
 
         assert_eq!(reconciled.scene.focus, FocusTarget::None);
+        assert_eq!(reconciled.scene.selection.clipboard_owner, None);
+        assert_eq!(reconciled.scene.selection.primary_selection_owner, None);
         assert!(reconciled.dropped_surface_ids.is_empty());
+        assert_eq!(reconciled.selection_handoffs, 2);
     }
 }

@@ -66,8 +66,10 @@
   - rejected
 - `WaylandCommand`
   - surface registry query
+  - selection handoff apply
 - `WaylandEvent`
   - surface registry snapshot
+  - selection handoff applied
   - rejected
 - `LockCommand`
   - lock state transition
@@ -103,9 +105,11 @@
 
 `displayd` は `CommitScene` を受けた後、最後に成功した scene を `WAYBROKER_RUNTIME_DIR/displayd-last-scene.json` へ書き出します。`compd` は restart 後に `get-scene-snapshot` を使ってこの snapshot を再取得し、scene policy の再構築を始めます。これにより、hardware broker が保持する最後の表示状態と、policy service の再起動寿命を分離します。
 
-`waylandd` は別に `surface registry snapshot` を持ち、`get-surface-registry` で応答します。`compd` の restart 後 rebuild では、`displayd` の last-scene snapshot をそのまま信じ込まず、`waylandd` registry にまだ存在する mapped surface だけを残します。これにより、既に死んだ client surface を復元 scene に混ぜるのを避けます。
+`waylandd` は別に `surface registry snapshot` を持ち、`get-surface-registry` で応答します。snapshot には mapped surface だけでなく clipboard / primary selection owner も含めます。`compd` の restart 後 rebuild では、`displayd` の last-scene snapshot をそのまま信じ込まず、`waylandd` registry にまだ存在する mapped surface だけを残します。これにより、既に死んだ client surface を復元 scene に混ぜるのを避けます。
 
-`sessiond -> watchdog` の launch-state stream では、各 message に `generation` と `sequence` を持たせます。`generation` は active profile runtime の世代、`sequence` はその世代内の更新順序です。`watchdog` はこれを使って stale delta を無視し、欠番が出た場合だけ `resync-launch-state` を返して full state の再送を要求します。
+復元後に selection owner が死んでいた場合だけ、`compd` は `apply-selection-handoff` を `waylandd` へ送り、再計算後 focus へ handoff します。`waylandd` は validate 後に registry を更新し、`selection-handoff-applied` を返します。これにより、復元直後に clipboard / primary selection が dangling owner を指したままになるのを避けます。
+
+`sessiond -> watchdog` の launch-state stream では、各 message に `session_instance_id` と `generation` と `sequence` を持たせます。`session_instance_id` は supervisor instance 単位の識別子、`generation` はその instance 上の active profile runtime 世代、`sequence` はその世代内の更新順序です。`watchdog` は `profile_id + session_instance_id` ごとに cache を分離し、これを使って stale delta を無視し、欠番が出た場合だけ `resync-launch-state` を返して同じ instance からの full state 再送を要求します。
 
 ## Versioning
 
@@ -121,4 +125,4 @@
 
 初期の message type は [lib.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/lib.rs) と [ipc.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/ipc.rs) に置きます。
 
-初期の transport helper は [transport.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/transport.rs) に置き、`displayd <-> waylandd` と `sessiond <-> watchdog` の間で 1 行 1 message の Unix socket 通信を行います。`sessiond` は `--manage-active` 時に active profile runtime を持ち続け、最初の health stream では full launch-state を送り、その後は変更された component だけを delta として watchdog へ stream します。profile 切替時は `generation` を進め、`sequence` は 1 から振り直します。watchdog は profile ごとの cached launch-state に merge したうえで inspection を返し、stale delta は無視し、cache を失った場合や `sequence` 欠番を検出した場合だけ `resync-launch-state` を返して full state の再送を要求します。必要なら degraded fallback の launch-state 更新と component 起動まで連続で行います。
+初期の transport helper は [transport.rs](/media/flux/THPDOC/Develop/TUFF-Xwin/crates/waybroker-common/src/transport.rs) に置き、`displayd <-> waylandd` と `sessiond <-> watchdog` の間で 1 行 1 message の Unix socket 通信を行います。`sessiond` は `--manage-active` 時に supervisor instance ごとの `session_instance_id` を払い出して active profile runtime を持ち続け、最初の health stream では full launch-state を送り、その後は変更された component だけを delta として watchdog へ stream します。profile 切替時は同じ `session_instance_id` を維持したまま `generation` を進め、`sequence` は 1 から振り直します。watchdog は `profile_id + session_instance_id` ごとの cached launch-state に merge したうえで inspection を返し、stale delta は無視し、cache を失った場合や `sequence` 欠番を検出した場合だけ `resync-launch-state` を返して同じ session instance から full state の再送を要求します。必要なら degraded fallback の launch-state 更新と component 起動まで連続で行います。

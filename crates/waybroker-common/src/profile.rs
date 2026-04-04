@@ -2,12 +2,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::ServiceRole;
 
+pub(crate) const LEGACY_SESSION_INSTANCE_ID: &str = "legacy-single-session";
+
 const fn default_stream_generation() -> u64 {
     1
 }
 
 const fn default_stream_sequence() -> u64 {
     1
+}
+
+pub(crate) fn default_session_instance_id() -> String {
+    LEGACY_SESSION_INSTANCE_ID.into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +186,8 @@ pub struct SessionLaunchComponentState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionLaunchState {
     pub profile_id: String,
+    #[serde(default = "default_session_instance_id")]
+    pub session_instance_id: String,
     pub display_name: String,
     pub protocol: DesktopProtocol,
     pub broker_services: Vec<ServiceRole>,
@@ -198,6 +206,8 @@ pub struct SessionLaunchState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionLaunchDelta {
     pub profile_id: String,
+    #[serde(default = "default_session_instance_id")]
+    pub session_instance_id: String,
     pub display_name: String,
     pub protocol: DesktopProtocol,
     pub broker_services: Vec<ServiceRole>,
@@ -289,8 +299,10 @@ pub struct SessionProfileTransition {
 mod tests {
     use super::{
         DesktopComponent, DesktopComponentRole, DesktopLauncher, DesktopProfile, DesktopProtocol,
+        SessionLaunchState, default_session_instance_id,
     };
     use crate::ServiceRole;
+    use serde_json::json;
 
     #[test]
     fn derives_launch_plan_without_mutating_profile() {
@@ -321,5 +333,22 @@ mod tests {
         assert_eq!(plan.profile_id, "xfce-x11");
         assert_eq!(plan.protocol, DesktopProtocol::LayerX11);
         assert_eq!(plan.session_components.len(), 1);
+    }
+
+    #[test]
+    fn defaults_session_instance_id_for_legacy_launch_state() {
+        let decoded: SessionLaunchState = serde_json::from_value(json!({
+            "profile_id": "legacy-demo",
+            "display_name": "Legacy Demo",
+            "protocol": "layer-x11",
+            "broker_services": ["sessiond", "watchdog"],
+            "generation": 1,
+            "sequence": 1,
+            "components": [],
+            "unix_timestamp": 0
+        }))
+        .expect("decode legacy launch state");
+
+        assert_eq!(decoded.session_instance_id, default_session_instance_id());
     }
 }

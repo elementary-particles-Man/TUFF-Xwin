@@ -25,7 +25,8 @@
 - `demo-x11-degraded`
   - crash-loop 後に切り替える最小 fallback profile
 - `demo-wayland-compd-recovery`
-  - `sessiond/watchdog` 経由で `compd` broker を restart し、`displayd + waylandd` snapshot から scene を rebuild する `Wayland native` demo profile
+  - `sessiond/watchdog` 経由で `compd` broker を restart し、`displayd + waylandd` snapshot から scene rebuild と selection handoff を行う `Wayland native` demo profile
+  - mock `shell` / `panel` component を含む最小 skeleton として使う
 - `xfce-x11`, `openbox-x11`
   - 実際の package 導入を前提にする rootless `X11` profile
 

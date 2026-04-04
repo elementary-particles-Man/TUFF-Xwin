@@ -16,5 +16,9 @@
       "buffer_attached": false
     }
   ],
+  "selection": {
+    "clipboard_owner": "panel-1",
+    "primary_selection_owner": "terminal-1"
+  },
   "unix_timestamp": 1775260800
 }

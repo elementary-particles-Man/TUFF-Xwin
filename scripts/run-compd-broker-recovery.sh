@@ -124,19 +124,26 @@ echo "==> Priming displayd committed scene"
   > "$WAYBROKER_RUNTIME_DIR/compd-prime.log" 2>&1
 
 snapshot_file="$WAYBROKER_RUNTIME_DIR/displayd-last-scene.json"
+wayland_registry_file="$WAYBROKER_RUNTIME_DIR/waylandd-surface-registry.json"
 wait_for_file "$snapshot_file"
 rg -q '"id": "panel-1"' "$snapshot_file"
+wait_for_file "$wayland_registry_file"
+rg -q '"clipboard_owner": "panel-1"' "$wayland_registry_file"
 
 echo "==> Selecting profile $profile_id"
 "$target_dir/sessiond" --select-profile "$profile_id" --write-selection > /dev/null
 
 echo "==> Starting managed sessiond"
 managed_log="$WAYBROKER_RUNTIME_DIR/sessiond-managed.log"
+launch_state_file="$WAYBROKER_RUNTIME_DIR/launch-state-$profile_id.json"
 "$target_dir/sessiond" --serve-ipc --manage-active --spawn-components --notify-watchdog \
   > "$managed_log" 2>&1 &
 sessiond_pid=$!
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/sessiond.sock"
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/compd.sock"
+wait_for_file "$launch_state_file"
+rg -q '"id": "demo-shell"' "$launch_state_file"
+rg -q '"id": "demo-panel"' "$launch_state_file"
 
 echo "==> Triggering resume scenario: compd-trouble"
 "$target_dir/sessiond" --resume-scenario "compd-trouble" \
@@ -148,9 +155,11 @@ wait_for_file "$execution_artifact"
 rg -q '"result": "succeeded"' "$execution_artifact"
 rg -q '"--restore-from-displayd"' "$execution_artifact"
 rg -q '"--reconcile-waylandd"' "$execution_artifact"
+rg -q '"--handoff-selection"' "$execution_artifact"
 
 wait_for_log 'service=compd op=scene_recover event=success' "$managed_log"
 wait_for_log 'service=compd op=scene_reconcile dropped_ids=panel-1' "$managed_log"
+wait_for_log 'service=compd op=selection_handoff event=success' "$managed_log"
 wait_for_log 'service=compd op=startup_rebuild event=scene_committed' "$managed_log"
 
 wait_for_file "$snapshot_file"
@@ -162,12 +171,20 @@ if rg -q '"id": "panel-1"' "$snapshot_file"; then
   exit 1
 fi
 
+wait_for_file "$wayland_registry_file"
+rg -q '"clipboard_owner": "terminal-1"' "$wayland_registry_file"
+rg -q '"primary_selection_owner": "terminal-1"' "$wayland_registry_file"
+
 echo "==> Recovery artifact"
 cat "$execution_artifact"
 
 echo
 echo "==> Rebuilt displayd snapshot"
 cat "$snapshot_file"
+
+echo
+echo "==> Updated waylandd registry"
+cat "$wayland_registry_file"
 
 echo
 echo "==> COMPD BROKER RECOVERY SMOKE TEST PASSED"

@@ -10,6 +10,7 @@ degraded_launch_state="$runtime_dir/launch-state-demo-x11-degraded.json"
 degraded_report="$runtime_dir/watchdog-report-demo-x11-degraded.json"
 sessiond_log="$runtime_dir/sessiond-watchdog-resync.log"
 watchdog_log="$runtime_dir/watchdog-watchdog-resync.log"
+session_instance_id=""
 sessiond_pid=""
 watchdog_pid=""
 
@@ -85,6 +86,17 @@ if [[ "$first_update_ready" -ne 1 ]]; then
   exit 1
 fi
 
+session_instance_id="$(
+  rg -o '"session_instance_id":\s*"[^"]+"' "$crashy_launch_state" \
+    | head -n1 \
+    | sed -E 's/.*"([^"]+)"$/\1/'
+)"
+
+if [[ -z "$session_instance_id" ]]; then
+  echo "session instance id was not written to $crashy_launch_state" >&2
+  exit 1
+fi
+
 echo
 echo "==> restarting watchdog to force sessiond resync"
 kill "$watchdog_pid" 2>/dev/null || true
@@ -97,7 +109,7 @@ echo
 echo "==> waiting for sessiond resync log in $sessiond_log"
 resync_ready=0
 for _ in $(seq 1 30); do
-  if rg -q 'watchdog_resync_required profile=demo-x11-crashy' "$sessiond_log"; then
+  if rg -q "watchdog_resync_required profile=demo-x11-crashy session_instance=$session_instance_id" "$sessiond_log"; then
     resync_ready=1
     break
   fi
@@ -128,10 +140,20 @@ if [[ "$degraded_report_ready" -ne 1 ]]; then
   exit 1
 fi
 
+if ! [[ -f "$degraded_launch_state" ]] || ! rg -q "\"session_instance_id\": \"$session_instance_id\"" "$degraded_launch_state"; then
+  echo "degraded launch state did not preserve session instance id" >&2
+  cat "$degraded_launch_state" >&2 || true
+  exit 1
+fi
+
 echo
 echo "==> resync evidence"
-rg 'watchdog_resync_required|profile_transition|auto_launched_profile' "$sessiond_log"
+rg 'watchdog_resync_required|profile_transition|auto_launched_profile|session_instance' "$sessiond_log"
 
 echo
 echo "==> final watchdog state"
 cat "$degraded_report"
+
+echo
+echo "==> final degraded launch state"
+cat "$degraded_launch_state"

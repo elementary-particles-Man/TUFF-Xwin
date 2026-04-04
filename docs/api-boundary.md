@@ -156,6 +156,8 @@ Must not expose:
 
 同時に `waylandd` は、現在 still-alive な mapped surface の registry snapshot を保持します。`compd` rebuild では `displayd` snapshot を配置の真実、`waylandd` registry を lifecycle の真実として扱い、両者を交差させて scene を再構築します。
 
+clipboard / primary selection owner も `waylandd` registry の一部として扱います。ただし owner が既に死んでいる場合だけは、そのまま dangling owner を残さず、`compd` が復元後 focus を使って handoff を提案し、`waylandd` が apply します。owner が `None` の場合や、まだ生きている owner を `compd` が勝手に上書きすることはしません。
+
 将来 `Vulkan` や GPU submit path を足す場合も、この考え方は変えません。`/media/flux/THPDOC/Develop/TUFF-OS/docs/architecture/GPU_OFFLOAD_CONTRACT.md` と同様に、capability 判定、timeout、fallback、driver 差分吸収は hardware broker 側へ閉じ込め、`compd` や `waylandd` へ raw handle や driver 依存 state を漏らさない前提で進めます。
 
 ## Invariants

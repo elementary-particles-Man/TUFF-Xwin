@@ -15,7 +15,7 @@
 
 - branch: `main`
 - remote: `origin = git@github.com:elementary-particles-Man/TUFF-Xwin.git`
-- 状態: local 変更あり（`compd` broker recovery / `Wayland native` demo 追加中）
+- 状態: local 変更あり（selection handoff / `Wayland native` skeleton / session instance stream 拡張中）
 
 ## ここまでの進捗
 
@@ -77,7 +77,7 @@
 - `./scripts/run-scene-recovery-demo.sh`
   - `displayd` が最後に commit された scene を保持し、再起動後も `compd` が再取得できることを確認する
 - `./scripts/run-compd-broker-recovery.sh`
-  - `watchdog -> sessiond` recovery execution で `compd` を再起動し、`displayd + waylandd` snapshot から scene rebuild して再commit できることを確認する
+  - `watchdog -> sessiond` recovery execution で `compd` を再起動し、`displayd + waylandd` snapshot から scene rebuild、selection handoff、再commit まで確認する
 
 ### 6. 最小 IPC transport
 
@@ -163,8 +163,10 @@
 - `sessiond`
   - `--notify-watchdog` で managed active profile の launch-state 更新を watchdog へ stream
   - 初回は full launch-state、以後は component 差分だけを送る
-  - 各 update に `generation` と `sequence` を持たせ、profile 切替時に generation を進める
-  - watchdog が cache miss した場合と sequence gap を検出した場合は `ResyncLaunchState` を受け、full launch-state を再送する
+  - 各 update に `session_instance_id` / `generation` / `sequence` を持たせ、同一 supervisor instance の profile 切替時は `session_instance_id` を維持したまま generation を進める
+  - watchdog が cache miss した場合と sequence gap を検出した場合は、同じ `profile_id + session_instance_id` を返す `ResyncLaunchState` を受け、full launch-state を再送する
+- `watchdog`
+  - cached launch-state を `profile_id + session_instance_id` 単位で保持し、同一 profile の並行 session stream が混線しないようにする
 - watchdog の応答 report をその場で評価し、degraded fallback を自前で適用
 - `scripts/run-degraded-mode.sh`
   - `watchdog` を background server として起動し、manual pull なしで degraded switch と fallback health report 収束まで確認する
@@ -226,6 +228,42 @@
 - `scripts/run-compd-broker-recovery.sh`
   - `compd-trouble` resume failure から `watchdog` restart request、`sessiond` recovery execution、`displayd-last-scene.json` 更新までを確認する
 
+### 16. selection handoff and native skeleton
+
+- `SurfaceRegistrySnapshot`
+  - `selection` を追加
+  - `clipboard_owner` / `primary_selection_owner` を保持する
+- `WaylandCommand`
+  - `ApplySelectionHandoff { handoff }` を追加
+- `WaylandEvent`
+  - `SelectionHandoffApplied { generation, handoff }` を追加
+- `waylandd`
+  - `compd` からの handoff を validate して apply できる
+  - current registry を `WAYBROKER_RUNTIME_DIR/waylandd-surface-registry.json` へ書き出す
+- `compd`
+  - `--handoff-selection` を追加
+  - dead selection owner だけを復元後 focus へ handoff し、`waylandd` へ apply する
+- `examples/minimal-scene/surface-registry.json`
+  - `panel-1` が stale clipboard owner、`terminal-1` が primary selection owner の fixture を追加
+- `profiles/demo-wayland-compd-recovery.json`
+  - mock `shell` / `panel` を足し、`Wayland native` の最小 desktop skeleton に拡張
+
+### 17. session instance aware watchdog stream
+
+- `SessionLaunchState` / `SessionLaunchDelta`
+  - `session_instance_id` を追加
+  - legacy launch-state decode 時は `legacy-single-session` を既定値にする
+- `WatchdogCommand`
+  - `ResyncLaunchState { profile_id, session_instance_id, reason }` に拡張
+- `sessiond`
+  - supervisor bootstrap 時に session instance id を生成する
+  - profile 切替後も同じ session instance id を維持し、stream の replace/resync 判定へ乗せる
+- `watchdog`
+  - cache key を `profile_id + session_instance_id` に変更
+  - 同じ profile でも別 session instance の state merge をしない
+- `scripts/run-watchdog-resync-demo.sh`
+  - resync 後も同じ session instance id が維持されることを確認する
+
 ## 現在のコード上の要点
 
 ### 共有型
@@ -274,11 +312,11 @@
 
 優先順はこのあたりです。
 
-1. `waylandd` surface registry を clipboard / selection owner と結びつけ、`compd` rebuild 後の focus/selection handoff を作る
-2. `sessiond/watchdog` stream に `source_id` か session instance id を足し、multi-session supervisor 化でも cache key が衝突しないようにする
-3. `Wayland native` profile に shell / panel の最小 skeleton を追加し、mock lock UI 依存を減らす
-4. `LeyerX11` に clipboard / selection の最小橋渡しを足す
-5. degraded profile 切替後の component 再起動と state 収束を `watchdog` / `sessiond` 間で自動化する
+1. `demo-wayland-compd-recovery` から mock lock UI 依存を減らし、native applet/settings-daemon skeleton へ広げる
+2. `waylandd` registry に clipboard owner の payload/source serial も足し、owner id だけでない再送条件を固定する
+3. `LeyerX11` に clipboard / selection の最小橋渡しを足す
+4. degraded profile 切替後の component 再起動と state 収束を `watchdog` / `sessiond` 間で自動化する
+5. multi-session supervisor を本当に始める前に、runtime artifact 名も `session_instance_id` 付きへ拡張する
 
 ## 注意点
 

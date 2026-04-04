@@ -2,10 +2,10 @@ use std::{env, fs, io::BufReader, os::unix::net::UnixStream, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use waybroker_common::{
-    DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputMode, ServiceBanner, ServiceRole,
-    SurfaceRegistrySnapshot, WaylandCommand, WaylandEvent, WaylandSurfaceRole, WaylandSurfaceState,
-    bind_service_socket, connect_service_socket, now_unix_timestamp, read_json_line,
-    send_json_line,
+    DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope, MessageKind, OutputMode, ServiceBanner,
+    ServiceRole, SurfaceRegistrySnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff,
+    WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState, bind_service_socket,
+    connect_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line,
 };
 
 fn main() -> Result<()> {
@@ -17,7 +17,8 @@ fn main() -> Result<()> {
     println!("{}", banner.render());
 
     if config.serve_ipc {
-        let registry = load_surface_registry(config.registry_path.as_ref())?;
+        let mut registry = load_surface_registry(config.registry_path.as_ref())?;
+        write_surface_registry_artifact(&registry)?;
         log_surface_registry(&registry);
 
         if config.print_registry {
@@ -32,7 +33,7 @@ fn main() -> Result<()> {
             Err(err) => println!("waylandd displayd_state=unreachable reason={err}"),
         }
 
-        serve_ipc(&config, &registry)?;
+        serve_ipc(&config, &mut registry)?;
         return Ok(());
     }
 
@@ -88,7 +89,7 @@ impl Config {
     }
 }
 
-fn serve_ipc(config: &Config, registry: &SurfaceRegistrySnapshot) -> Result<()> {
+fn serve_ipc(config: &Config, registry: &mut SurfaceRegistrySnapshot) -> Result<()> {
     let (listener, socket_path) = bind_service_socket(ServiceRole::Waylandd)?;
     let _socket_guard = SocketGuard::new(socket_path.clone());
     println!("service=waylandd op=listen event=socket_bound path={}", socket_path.display());
@@ -108,51 +109,124 @@ fn serve_ipc(config: &Config, registry: &SurfaceRegistrySnapshot) -> Result<()> 
     Ok(())
 }
 
-fn handle_client(mut stream: UnixStream, registry: &SurfaceRegistrySnapshot) -> Result<()> {
+fn handle_client(mut stream: UnixStream, registry: &mut SurfaceRegistrySnapshot) -> Result<()> {
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
     };
 
-    let response = build_response(request, registry);
+    let (response, registry_changed) = build_response(request, registry);
     send_json_line(&mut stream, &response)?;
+    if registry_changed {
+        write_surface_registry_artifact(registry)?;
+    }
     Ok(())
 }
 
-fn build_response(request: IpcEnvelope, registry: &SurfaceRegistrySnapshot) -> IpcEnvelope {
+fn build_response(
+    request: IpcEnvelope,
+    registry: &mut SurfaceRegistrySnapshot,
+) -> (IpcEnvelope, bool) {
     let source = request.source;
-    let response_kind = match request.kind {
+    let (response_kind, registry_changed) = match request.kind {
         MessageKind::WaylandCommand(command) if request.destination == ServiceRole::Waylandd => {
-            MessageKind::WaylandEvent(handle_wayland_command(command, registry))
+            let (event, changed) = handle_wayland_command(command, registry);
+            (MessageKind::WaylandEvent(event), changed)
         }
-        MessageKind::WaylandCommand(_) => MessageKind::WaylandEvent(WaylandEvent::Rejected {
-            reason: format!(
-                "waylandd received message addressed to {}",
-                request.destination.as_str()
-            ),
-        }),
-        other => MessageKind::WaylandEvent(WaylandEvent::Rejected {
-            reason: format!("waylandd does not handle {other:?}"),
-        }),
+        MessageKind::WaylandCommand(_) => (
+            MessageKind::WaylandEvent(WaylandEvent::Rejected {
+                reason: format!(
+                    "waylandd received message addressed to {}",
+                    request.destination.as_str()
+                ),
+            }),
+            false,
+        ),
+        other => (
+            MessageKind::WaylandEvent(WaylandEvent::Rejected {
+                reason: format!("waylandd does not handle {other:?}"),
+            }),
+            false,
+        ),
     };
 
-    IpcEnvelope::new(ServiceRole::Waylandd, source, response_kind)
+    (IpcEnvelope::new(ServiceRole::Waylandd, source, response_kind), registry_changed)
 }
 
 fn handle_wayland_command(
     command: WaylandCommand,
-    registry: &SurfaceRegistrySnapshot,
-) -> WaylandEvent {
+    registry: &mut SurfaceRegistrySnapshot,
+) -> (WaylandEvent, bool) {
     match command {
         WaylandCommand::GetSurfaceRegistry => {
             println!(
-                "service=waylandd op=get_surface_registry event=success generation={} surfaces={}",
+                "service=waylandd op=get_surface_registry event=success generation={} surfaces={} clipboard_owner={} primary_selection_owner={}",
                 registry.generation,
-                registry.surfaces.len()
+                registry.surfaces.len(),
+                format_owner(registry.selection.clipboard_owner.as_deref()),
+                format_owner(registry.selection.primary_selection_owner.as_deref())
             );
-            WaylandEvent::SurfaceRegistry { snapshot: registry.clone() }
+            (WaylandEvent::SurfaceRegistry { snapshot: registry.clone() }, false)
+        }
+        WaylandCommand::ApplySelectionHandoff { handoff } => {
+            if let Err(reason) = validate_selection_handoff(&handoff, registry) {
+                return (WaylandEvent::Rejected { reason }, false);
+            }
+
+            registry.selection = handoff.selection.clone();
+            registry.generation = registry.generation.saturating_add(1);
+            registry.unix_timestamp = now_unix_timestamp();
+
+            println!(
+                "service=waylandd op=selection_handoff event=applied generation={} focus={:?} clipboard_owner={} primary_selection_owner={}",
+                registry.generation,
+                handoff.focus,
+                format_owner(registry.selection.clipboard_owner.as_deref()),
+                format_owner(registry.selection.primary_selection_owner.as_deref())
+            );
+            (
+                WaylandEvent::SelectionHandoffApplied { generation: registry.generation, handoff },
+                true,
+            )
         }
     }
+}
+
+fn validate_selection_handoff(
+    handoff: &WaylandSelectionHandoff,
+    registry: &SurfaceRegistrySnapshot,
+) -> std::result::Result<(), String> {
+    let active_registry = active_surface_registry(registry);
+
+    if let FocusTarget::Surface { id } = &handoff.focus {
+        if !active_registry.contains_key(id.as_str()) {
+            return Err(format!("focus target {id} is not active in waylandd registry"));
+        }
+    }
+
+    for (label, owner) in [
+        ("clipboard", handoff.selection.clipboard_owner.as_deref()),
+        ("primary-selection", handoff.selection.primary_selection_owner.as_deref()),
+    ] {
+        if let Some(id) = owner {
+            if !active_registry.contains_key(id) {
+                return Err(format!("{label} owner {id} is not active in waylandd registry"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn active_surface_registry(
+    registry: &SurfaceRegistrySnapshot,
+) -> std::collections::BTreeMap<&str, &WaylandSurfaceState> {
+    registry
+        .surfaces
+        .iter()
+        .filter(|surface| surface.mapped && surface.buffer_attached)
+        .map(|surface| (surface.id.as_str(), surface))
+        .collect()
 }
 
 fn query_output_inventory() -> Result<Vec<OutputMode>> {
@@ -215,17 +289,35 @@ fn mock_surface_registry() -> SurfaceRegistrySnapshot {
                 buffer_attached: true,
             },
         ],
+        selection: WaylandSelectionState {
+            clipboard_owner: Some("konsole-1".into()),
+            primary_selection_owner: None,
+        },
         unix_timestamp: now_unix_timestamp(),
     }
 }
 
 fn log_surface_registry(registry: &SurfaceRegistrySnapshot) {
     println!(
-        "service=waylandd op=surface_registry event=loaded generation={} surfaces={} timestamp={}",
+        "service=waylandd op=surface_registry event=loaded generation={} surfaces={} clipboard_owner={} primary_selection_owner={} timestamp={}",
         registry.generation,
         registry.surfaces.len(),
+        format_owner(registry.selection.clipboard_owner.as_deref()),
+        format_owner(registry.selection.primary_selection_owner.as_deref()),
         registry.unix_timestamp
     );
+}
+
+fn write_surface_registry_artifact(registry: &SurfaceRegistrySnapshot) -> Result<PathBuf> {
+    let dir = ensure_runtime_dir()?;
+    let path = dir.join("waylandd-surface-registry.json");
+    fs::write(&path, serde_json::to_string_pretty(registry)?)
+        .with_context(|| format!("failed to write runtime surface registry {}", path.display()))?;
+    Ok(path)
+}
+
+fn format_owner(owner: Option<&str>) -> &str {
+    owner.unwrap_or("none")
 }
 
 fn format_outputs(outputs: &[OutputMode]) -> String {
@@ -258,8 +350,11 @@ impl Drop for SocketGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::mock_surface_registry;
-    use waybroker_common::WaylandSurfaceRole;
+    use super::{handle_wayland_command, mock_surface_registry};
+    use waybroker_common::{
+        FocusTarget, WaylandCommand, WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState,
+        WaylandSurfaceRole,
+    };
 
     #[test]
     fn mock_registry_contains_mapped_focusable_surface() {
@@ -270,5 +365,32 @@ mod tests {
                 && surface.mapped
                 && surface.buffer_attached
         }));
+    }
+
+    #[test]
+    fn applies_selection_handoff_to_active_surface() {
+        let mut registry = mock_surface_registry();
+        let (event, changed) = handle_wayland_command(
+            WaylandCommand::ApplySelectionHandoff {
+                handoff: WaylandSelectionHandoff {
+                    focus: FocusTarget::Surface { id: "konsole-1".into() },
+                    selection: WaylandSelectionState {
+                        clipboard_owner: Some("konsole-1".into()),
+                        primary_selection_owner: Some("konsole-1".into()),
+                    },
+                },
+            },
+            &mut registry,
+        );
+
+        assert!(changed);
+        match event {
+            WaylandEvent::SelectionHandoffApplied { generation, .. } => {
+                assert_eq!(generation, 2);
+            }
+            other => panic!("expected handoff applied event, got {other:?}"),
+        }
+        assert_eq!(registry.selection.clipboard_owner.as_deref(), Some("konsole-1"));
+        assert_eq!(registry.selection.primary_selection_owner.as_deref(), Some("konsole-1"));
     }
 }

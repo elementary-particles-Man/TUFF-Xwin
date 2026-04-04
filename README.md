@@ -4,9 +4,9 @@
 
 ## Current Component Status
 
-- **compd**: (P1 - Minimal runtime) Composition service. Manages scene graph, focus, and policies. Can commit mock scenes to `displayd`, rebuild from `displayd` plus `waylandd`, and re-commit rebuilt scene during supervisor restart.
+- **compd**: (P1 - Minimal runtime) Composition service. Manages scene graph, focus, and policies. Can commit mock scenes to `displayd`, rebuild from `displayd` plus `waylandd`, hand off selection ownership, and re-commit rebuilt scene during supervisor restart.
 - **displayd**: (P0 - Baseline) Hardware broker for DRM/KMS and libinput. Stub but functional IPC, with persisted last-scene snapshot.
-- **waylandd**: (P1 - Minimal runtime) Wayland protocol endpoint and surface broker. Can serve surface-registry snapshots for `compd` rebuild.
+- **waylandd**: (P1 - Minimal runtime) Wayland protocol endpoint and surface broker. Can serve surface-registry snapshots for `compd` rebuild and accept post-recovery focus/selection handoff.
 - **sessiond**: (P0 - Baseline) Session and desktop profile policy manager.
 - **watchdog**: (P0 - Baseline) Recovery orchestrator and crash-loop supervisor.
 - **lockd**: (Stub) Lockscreen and authentication UI service.
@@ -79,7 +79,7 @@ cargo check
 ./LeyerX11/scripts/run-rootless-demo.sh
 ```
 
-現時点では `displayd` / `waylandd` の最小 IPC、`displayd` の last-scene snapshot、`waylandd` の surface-registry snapshot、`sessiond/watchdog` 経由の `compd` broker restart + startup rebuild、ならびに `LeyerX11` の rootless `X11` commit デモまで入っています。本物の `DRM` / `Wayland` / `X11` 実装はこれからです。
+現時点では `displayd` / `waylandd` の最小 IPC、`displayd` の last-scene snapshot、`waylandd` の surface-registry + selection snapshot、`sessiond/watchdog` 経由の `compd` broker restart + startup rebuild + selection handoff、ならびに `LeyerX11` の rootless `X11` commit デモまで入っています。本物の `DRM` / `Wayland` / `X11` 実装はこれからです。
 
 ## Local Build Note
 

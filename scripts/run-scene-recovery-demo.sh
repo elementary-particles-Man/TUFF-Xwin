@@ -8,6 +8,7 @@ runtime_dir="${WAYBROKER_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/waybroker-scene-r
 displayd_socket="$runtime_dir/displayd.sock"
 waylandd_socket="$runtime_dir/waylandd.sock"
 snapshot_path="$runtime_dir/displayd-last-scene.json"
+wayland_registry_snapshot="$runtime_dir/waylandd-surface-registry.json"
 target_dir="/home/flux/.cache/tuff-xwin-target/debug"
 scene_path="$repo_root/examples/minimal-scene/scene.json"
 registry_path="$repo_root/examples/minimal-scene/surface-registry.json"
@@ -104,5 +105,17 @@ rm -f "$displayd_socket"
 start_displayd
 
 echo
-echo "==> cargo run -p compd -- --restore-from-displayd --reconcile-waylandd --print-scene --require-displayd --require-waylandd"
-cargo run -p compd -- --restore-from-displayd --reconcile-waylandd --print-scene --require-displayd --require-waylandd
+echo "==> cargo run -p compd -- --restore-from-displayd --reconcile-waylandd --handoff-selection --print-scene --require-displayd --require-waylandd"
+cargo run -p compd -- --restore-from-displayd --reconcile-waylandd --handoff-selection --print-scene --require-displayd --require-waylandd
+
+if [[ ! -f "$wayland_registry_snapshot" ]]; then
+  echo "waylandd runtime registry was not written: $wayland_registry_snapshot" >&2
+  exit 1
+fi
+
+rg -q '"clipboard_owner": "terminal-1"' "$wayland_registry_snapshot"
+rg -q '"primary_selection_owner": "terminal-1"' "$wayland_registry_snapshot"
+
+echo
+echo "==> waylandd runtime registry after handoff"
+cat "$wayland_registry_snapshot"

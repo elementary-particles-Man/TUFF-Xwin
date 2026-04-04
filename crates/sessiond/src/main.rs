@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -491,6 +491,11 @@ fn active_profile_path() -> PathBuf {
 
 fn launch_state_path(profile_id: &str) -> PathBuf {
     runtime_dir().join(format!("launch-state-{profile_id}.json"))
+}
+
+fn new_session_instance_id(profile_id: &str) -> String {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos();
+    format!("{profile_id}-{}-{nonce}", std::process::id())
 }
 
 fn watchdog_report_path(profile_id: &str) -> PathBuf {
@@ -1337,6 +1342,7 @@ fn build_launch_state(profile: &DesktopProfile, config: &Config) -> Result<Sessi
 
     Ok(SessionLaunchState {
         profile_id: profile.id.clone(),
+        session_instance_id: new_session_instance_id(&profile.id),
         display_name: profile.display_name.clone(),
         protocol: profile.protocol,
         broker_services: profile.broker_services.clone(),
@@ -1377,6 +1383,7 @@ fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<S
 
     Ok(SessionLaunchState {
         profile_id: profile.id.clone(),
+        session_instance_id: new_session_instance_id(&profile.id),
         display_name: profile.display_name.clone(),
         protocol: profile.protocol,
         broker_services: profile.broker_services.clone(),
@@ -1537,8 +1544,9 @@ fn write_profile_transition(transition: &SessionProfileTransition) -> Result<Pat
 
 fn print_launch_state(state: &SessionLaunchState) {
     println!(
-        "sessiond launch_state profile={} protocol={} generation={} sequence={} components={}",
+        "sessiond launch_state profile={} session_instance={} protocol={} generation={} sequence={} components={}",
         state.profile_id,
+        state.session_instance_id,
         state.protocol.as_str(),
         state.generation,
         state.sequence,
@@ -1705,7 +1713,11 @@ fn notify_watchdog(
 
     match response.kind {
         MessageKind::WatchdogCommand(WatchdogCommand::InspectionResult { report }) => Ok(report),
-        MessageKind::WatchdogCommand(WatchdogCommand::ResyncLaunchState { profile_id, reason }) => {
+        MessageKind::WatchdogCommand(WatchdogCommand::ResyncLaunchState {
+            profile_id,
+            session_instance_id,
+            reason,
+        }) => {
             if profile_id != state.profile_id {
                 bail!(
                     "watchdog requested resync for profile {} while sessiond sent {}",
@@ -1714,7 +1726,18 @@ fn notify_watchdog(
                 );
             }
 
-            println!("sessiond watchdog_resync_required profile={} reason={}", profile_id, reason);
+            if session_instance_id != state.session_instance_id {
+                bail!(
+                    "watchdog requested resync for session instance {} while sessiond sent {}",
+                    session_instance_id,
+                    state.session_instance_id
+                );
+            }
+
+            println!(
+                "sessiond watchdog_resync_required profile={} session_instance={} reason={}",
+                profile_id, session_instance_id, reason
+            );
 
             let retry = send_watchdog_command(WatchdogCommand::InspectLaunchState {
                 state: state.clone(),
@@ -1754,12 +1777,14 @@ fn watchdog_stream_command(
     };
 
     if previous.profile_id != state.profile_id
+        || previous.session_instance_id != state.session_instance_id
         || previous.generation != state.generation
         || previous.components.len() != state.components.len()
     {
         return WatchdogCommand::UpdateLaunchState {
             delta: SessionLaunchDelta {
                 profile_id: state.profile_id.clone(),
+                session_instance_id: state.session_instance_id.clone(),
                 display_name: state.display_name.clone(),
                 protocol: state.protocol,
                 broker_services: state.broker_services.clone(),
@@ -1792,6 +1817,7 @@ fn watchdog_stream_command(
     WatchdogCommand::UpdateLaunchState {
         delta: SessionLaunchDelta {
             profile_id: state.profile_id.clone(),
+            session_instance_id: state.session_instance_id.clone(),
             display_name: state.display_name.clone(),
             protocol: state.protocol,
             broker_services: state.broker_services.clone(),
@@ -1871,6 +1897,7 @@ struct SessionSupervisor {
     profiles: Vec<DesktopProfile>,
     profile: DesktopProfile,
     components: Vec<RuntimeComponent>,
+    session_instance_id: String,
     stream_generation: u64,
     stream_sequence: u64,
     last_streamed_state: Option<SessionLaunchState>,
@@ -1879,7 +1906,8 @@ struct SessionSupervisor {
 impl SessionSupervisor {
     fn bootstrap(config: &Config, profiles: &[DesktopProfile]) -> Result<Self> {
         let profile = read_active_profile()?;
-        let mut supervisor = Self::new(profile, profiles.to_vec(), 1, config)?;
+        let session_instance_id = new_session_instance_id(&profile.id);
+        let mut supervisor = Self::new(profile, profiles.to_vec(), session_instance_id, 1, config)?;
         supervisor.activate(config)?;
         Ok(supervisor)
     }
@@ -1887,6 +1915,7 @@ impl SessionSupervisor {
     fn new(
         profile: DesktopProfile,
         profiles: Vec<DesktopProfile>,
+        session_instance_id: String,
         stream_generation: u64,
         config: &Config,
     ) -> Result<Self> {
@@ -1899,6 +1928,7 @@ impl SessionSupervisor {
             profiles,
             profile,
             components,
+            session_instance_id,
             stream_generation,
             stream_sequence: 0,
             last_streamed_state: None,
@@ -1922,12 +1952,13 @@ impl SessionSupervisor {
     fn switch_to(&mut self, profile: DesktopProfile, config: &Config) -> Result<()> {
         self.stop_all()?;
         let profiles = self.profiles.clone();
+        let session_instance_id = self.session_instance_id.clone();
         let next_generation = self.stream_generation.saturating_add(1);
-        *self = Self::new(profile, profiles, next_generation, config)?;
+        *self = Self::new(profile, profiles, session_instance_id, next_generation, config)?;
         self.activate(config)?;
         println!(
-            "service=sessiond op=profile_transition event=transition_complete profile={} generation={}",
-            self.profile.id, self.stream_generation
+            "service=sessiond op=profile_transition event=transition_complete profile={} session_instance={} generation={}",
+            self.profile.id, self.session_instance_id, self.stream_generation
         );
         Ok(())
     }
@@ -2246,6 +2277,7 @@ impl SessionSupervisor {
 
         SessionLaunchState {
             profile_id: self.profile.id.clone(),
+            session_instance_id: self.session_instance_id.clone(),
             display_name: self.profile.display_name.clone(),
             protocol: self.profile.protocol,
             broker_services: self.profile.broker_services.clone(),
@@ -2266,8 +2298,8 @@ impl SessionSupervisor {
         let state_path = write_launch_state(&launch_state)?;
         print_launch_state(&launch_state);
         println!(
-            "service=sessiond op=snapshot event={} profile={} timestamp={}",
-            label, self.profile.id, launch_state.unix_timestamp
+            "service=sessiond op=snapshot event={} profile={} session_instance={} timestamp={}",
+            label, self.profile.id, self.session_instance_id, launch_state.unix_timestamp
         );
         println!("service=sessiond op=snapshot path={}", state_path.display());
 
@@ -2280,8 +2312,8 @@ impl SessionSupervisor {
                 }
                 Err(err) => {
                     println!(
-                        "sessiond watchdog_stream_failed profile={} reason={err:#}",
-                        self.profile.id
+                        "sessiond watchdog_stream_failed profile={} session_instance={} reason={err:#}",
+                        self.profile.id, self.session_instance_id
                     );
                 }
             }
@@ -2474,6 +2506,7 @@ mod tests {
         let config = super::Config::default();
         let state = build_launch_state(&profile, &config).expect("build launch state");
 
+        assert!(!state.session_instance_id.is_empty());
         assert_eq!(state.components.len(), 1);
         assert_eq!(state.components[0].state, waybroker_common::DesktopComponentState::Missing);
         assert_eq!(state.components[0].restart_count, 0);
@@ -2626,6 +2659,7 @@ mod tests {
     fn emits_delta_stream_for_component_change() {
         let previous = SessionLaunchState {
             profile_id: "demo-x11".into(),
+            session_instance_id: "demo-x11-instance-a".into(),
             display_name: "Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
@@ -2648,6 +2682,7 @@ mod tests {
         };
         let next = SessionLaunchState {
             profile_id: "demo-x11".into(),
+            session_instance_id: "demo-x11-instance-a".into(),
             display_name: "Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
@@ -2688,6 +2723,7 @@ mod tests {
     fn emits_replace_delta_when_profile_changes() {
         let previous = SessionLaunchState {
             profile_id: "demo-x11".into(),
+            session_instance_id: "demo-x11-instance-a".into(),
             display_name: "Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             broker_services: vec![ServiceRole::Sessiond],
@@ -2710,6 +2746,7 @@ mod tests {
         };
         let next = SessionLaunchState {
             profile_id: "demo-x11-degraded".into(),
+            session_instance_id: "demo-x11-instance-a".into(),
             display_name: "Degraded Demo".into(),
             protocol: DesktopProtocol::LayerX11,
             broker_services: vec![ServiceRole::Sessiond],
@@ -2741,6 +2778,68 @@ mod tests {
                 assert_eq!(delta.sequence, 1);
                 assert_eq!(delta.components.len(), 1);
                 assert_eq!(delta.components[0].id, "openbox");
+            }
+            other => panic!("expected replace delta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emits_replace_delta_when_session_instance_changes() {
+        let previous = SessionLaunchState {
+            profile_id: "demo-x11".into(),
+            session_instance_id: "demo-x11-instance-a".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 4,
+            components: vec![SessionLaunchComponentState {
+                id: "demo-wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                command: vec!["demo-wm".into()],
+                resolved_command: Some("/usr/bin/demo-wm".into()),
+                state: DesktopComponentState::Spawned,
+                pid: Some(42),
+                restart_count: 0,
+                last_exit_status: None,
+            }],
+            unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
+        };
+        let next = SessionLaunchState {
+            profile_id: "demo-x11".into(),
+            session_instance_id: "demo-x11-instance-b".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 1,
+            components: vec![SessionLaunchComponentState {
+                id: "demo-wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                command: vec!["demo-wm".into()],
+                resolved_command: Some("/usr/bin/demo-wm".into()),
+                state: DesktopComponentState::Spawned,
+                pid: Some(84),
+                restart_count: 0,
+                last_exit_status: None,
+            }],
+            unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
+        };
+
+        let command = watchdog_stream_command(&next, Some(&previous));
+
+        match command {
+            WatchdogCommand::UpdateLaunchState { delta } => {
+                assert!(delta.replace);
+                assert_eq!(delta.profile_id, "demo-x11");
+                assert_eq!(delta.session_instance_id, "demo-x11-instance-b");
+                assert_eq!(delta.sequence, 1);
             }
             other => panic!("expected replace delta, got {other:?}"),
         }

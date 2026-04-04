@@ -40,7 +40,7 @@
 
 `compositor` が死んでも、client 接続そのものは維持しやすくする。`KWin` や `Mutter` を一度落としたら全 client が道連れになる現状を避ける。
 
-現時点の試作では、`waylandd` は `surface registry snapshot` を IPC で返せます。`compd` restart 後は `displayd` の last scene とこの registry を突き合わせ、生きている surface だけで scene を再構成します。
+現時点の試作では、`waylandd` は `surface registry snapshot` を IPC で返せます。snapshot には clipboard / primary selection owner も含みます。`compd` restart 後は `displayd` の last scene とこの registry を突き合わせ、生きている surface だけで scene を再構成し、dangling owner があれば focus へ handoff した結果を `waylandd` へ返します。
 
 ## compd
 
@@ -58,7 +58,7 @@
 
 ### 死んだらどうなるか
 
-`watchdog` が再起動する。`waylandd` と `displayd` が残っていれば、接続維持と最終画面保持ができます。
+`watchdog` が再起動する。`waylandd` と `displayd` が残っていれば、接続維持、最終画面保持、clipboard / selection owner の再整列ができます。
 
 ## lockd
 

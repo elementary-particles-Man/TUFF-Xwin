@@ -6,7 +6,8 @@ pub use ipc::{
     CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget, HealthState,
     IpcEnvelope, LockCommand, LockState, MessageKind, OutputMode, ResumeStage, SessionCommand,
     SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand, WaylandCommand,
-    WaylandEvent, WaylandSurfaceRole, WaylandSurfaceState,
+    WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
+    WaylandSurfaceState,
 };
 pub use profile::{
     DesktopComponent, DesktopComponentRole, DesktopComponentState, DesktopHealthStatus,
@@ -74,8 +75,8 @@ mod tests {
     use super::{
         CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope,
         MessageKind, OutputMode, ServiceBanner, ServiceRole, SurfacePlacement,
-        SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent, WaylandSurfaceRole,
-        WaylandSurfaceState,
+        SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
+        WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
     };
 
     #[test]
@@ -234,6 +235,10 @@ mod tests {
                             buffer_attached: false,
                         },
                     ],
+                    selection: WaylandSelectionState {
+                        clipboard_owner: Some("panel-1".into()),
+                        primary_selection_owner: Some("terminal-1".into()),
+                    },
                     unix_timestamp: 1_778_000_200,
                 },
             }),
@@ -259,6 +264,30 @@ mod tests {
 
         assert!(json.contains("\"kind\":\"wayland-command\""));
         assert!(json.contains("\"op\":\"get-surface-registry\""));
+    }
+
+    #[test]
+    fn roundtrips_wayland_selection_handoff() {
+        let envelope = IpcEnvelope::new(
+            ServiceRole::Compd,
+            ServiceRole::Waylandd,
+            MessageKind::WaylandCommand(WaylandCommand::ApplySelectionHandoff {
+                handoff: WaylandSelectionHandoff {
+                    focus: FocusTarget::Surface { id: "terminal-1".into() },
+                    selection: WaylandSelectionState {
+                        clipboard_owner: Some("terminal-1".into()),
+                        primary_selection_owner: Some("terminal-1".into()),
+                    },
+                },
+            }),
+        );
+
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let decoded: IpcEnvelope = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded, envelope);
+        assert!(json.contains("\"op\":\"apply-selection-handoff\""));
+        assert!(json.contains("\"clipboard_owner\":\"terminal-1\""));
     }
 
     #[test]
@@ -304,6 +333,7 @@ mod tests {
             MessageKind::WatchdogCommand(super::WatchdogCommand::InspectLaunchState {
                 state: super::SessionLaunchState {
                     profile_id: "demo-x11".into(),
+                    session_instance_id: "demo-x11-1".into(),
                     display_name: "Demo".into(),
                     protocol: super::DesktopProtocol::LayerX11,
                     broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
@@ -342,6 +372,7 @@ mod tests {
             MessageKind::WatchdogCommand(super::WatchdogCommand::UpdateLaunchState {
                 delta: super::SessionLaunchDelta {
                     profile_id: "demo-x11".into(),
+                    session_instance_id: "demo-x11-1".into(),
                     display_name: "Demo".into(),
                     protocol: super::DesktopProtocol::LayerX11,
                     broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
@@ -380,6 +411,7 @@ mod tests {
             ServiceRole::Sessiond,
             MessageKind::WatchdogCommand(super::WatchdogCommand::ResyncLaunchState {
                 profile_id: "demo-x11".into(),
+                session_instance_id: "demo-x11-1".into(),
                 reason: "cache miss".into(),
             }),
         );
