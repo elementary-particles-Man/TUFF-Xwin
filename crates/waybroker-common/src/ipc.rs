@@ -35,10 +35,23 @@ pub enum MessageKind {
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum DisplayCommand {
     EnumerateOutputs,
-    SetMode { output: String, mode: OutputMode },
-    CommitScene { target: CommitTarget, focus: FocusTarget, surfaces: Vec<SurfaceSnapshot> },
-    GetSceneSnapshot { output: Option<String> },
-    SecureBlank { output: Option<String> },
+    SetMode {
+        output: String,
+        mode: OutputMode,
+    },
+    CommitScene {
+        target: CommitTarget,
+        focus: FocusTarget,
+        #[serde(default)]
+        selection: WaylandSelectionState,
+        surfaces: Vec<SurfaceSnapshot>,
+    },
+    GetSceneSnapshot {
+        output: Option<String>,
+    },
+    SecureBlank {
+        output: Option<String>,
+    },
     ResumeBegin,
 }
 
@@ -55,6 +68,8 @@ pub enum DisplayEvent {
     SceneCommitted {
         target: CommitTarget,
         focus: FocusTarget,
+        #[serde(default)]
+        selection: WaylandSelectionState,
         surface_count: usize,
         commit_id: u64,
     },
@@ -181,6 +196,8 @@ pub struct CommittedSceneState {
     pub source: ServiceRole,
     pub target: CommitTarget,
     pub focus: FocusTarget,
+    #[serde(default)]
+    pub selection: WaylandSelectionState,
     pub surfaces: Vec<SurfaceSnapshot>,
     pub commit_id: u64,
     pub unix_timestamp: u64,

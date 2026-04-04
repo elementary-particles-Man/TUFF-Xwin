@@ -33,6 +33,10 @@ pub fn service_socket_path(role: ServiceRole) -> PathBuf {
     runtime_dir().join(format!("{}.sock", role.as_str()))
 }
 
+pub fn session_artifact_path(session_instance_id: &str, artifact_name: &str) -> PathBuf {
+    runtime_dir().join(format!("session-{}-{}.json", session_instance_id, artifact_name))
+}
+
 pub fn bind_service_socket(role: ServiceRole) -> Result<(UnixListener, PathBuf)> {
     let _ = ensure_runtime_dir()?;
     let socket_path = service_socket_path(role);

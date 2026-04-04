@@ -1,8 +1,12 @@
 use std::{
     collections::BTreeMap, env, fs, io::BufReader, os::unix::net::UnixStream, path::PathBuf,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use vulkan_backend::{
+    VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
+};
 use waybroker_common::{
     CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope,
     MessageKind, ServiceBanner, ServiceRole, SurfacePlacement, SurfaceRegistrySnapshot,
@@ -11,10 +15,23 @@ use waybroker_common::{
     read_json_line, send_json_line,
 };
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let config = Config::from_args(env::args().skip(1))?;
     let banner = ServiceBanner::new(ServiceRole::Compd, "scene, focus, composition policy");
     println!("{}", banner.render());
+
+    let vulkan = if config.use_vulkan {
+        let backend = VulkanBackend::new(VulkanBackendConfig::default());
+        let caps = backend.initialize();
+        println!(
+            "service=compd op=vulkan_init event=success driver={} device={}",
+            caps.driver_name, caps.device_name
+        );
+        Some(backend)
+    } else {
+        None
+    };
 
     if config.restore_from_displayd && config.scene_path.is_some() {
         bail!("--scene cannot be combined with --restore-from-displayd");
@@ -23,7 +40,7 @@ fn main() -> Result<()> {
         bail!("--handoff-selection requires --reconcile-waylandd");
     }
 
-    let scene = prepare_scene(&config)?;
+    let scene = prepare_scene(&config, vulkan.as_ref()).await?;
 
     if config.handoff_selection {
         apply_selection_handoff(&config, scene.as_ref())?;
@@ -124,11 +141,14 @@ struct Config {
     reconcile_waylandd: bool,
     require_waylandd: bool,
     handoff_selection: bool,
+    use_vulkan: bool,
+    session_instance_id: String,
 }
 
 impl Config {
     fn from_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let mut config = Self::default();
+        config.session_instance_id = "default-single-session".to_string();
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -146,9 +166,14 @@ impl Config {
                 "--reconcile-waylandd" => config.reconcile_waylandd = true,
                 "--require-waylandd" => config.require_waylandd = true,
                 "--handoff-selection" => config.handoff_selection = true,
+                "--vulkan" => config.use_vulkan = true,
+                "--session-instance-id" => {
+                    config.session_instance_id =
+                        args.next().context("--session-instance-id requires an id")?;
+                }
                 "--help" | "-h" => {
                     println!(
-                        "usage: compd [--scene PATH] [--print-scene] [--commit-demo] [--require-displayd] [--require-waylandd] [--restore-from-displayd] [--reconcile-waylandd] [--handoff-selection] [--serve-ipc] [--once] [--fail-resume]"
+                        "usage: compd [--scene PATH] [--print-scene] [--commit-demo] [--require-displayd] [--require-waylandd] [--restore-from-displayd] [--reconcile-waylandd] [--handoff-selection] [--serve-ipc] [--once] [--fail-resume] [--vulkan] [--session-instance-id ID]"
                     );
                     std::process::exit(0);
                 }
@@ -160,7 +185,7 @@ impl Config {
     }
 }
 
-fn prepare_scene(config: &Config) -> Result<Option<CompdScene>> {
+async fn prepare_scene(config: &Config, vulkan: Option<&VulkanBackend>) -> Result<Option<CompdScene>> {
     if !config.restore_from_displayd
         && config.scene_path.is_none()
         && !config.reconcile_waylandd
@@ -208,7 +233,7 @@ fn prepare_scene(config: &Config) -> Result<Option<CompdScene>> {
     };
 
     if config.reconcile_waylandd {
-        scene = reconcile_scene(config, scene)?;
+        scene = reconcile_scene(config, scene, vulkan).await?;
     }
 
     if config.print_scene {
@@ -227,7 +252,11 @@ fn prepare_scene(config: &Config) -> Result<Option<CompdScene>> {
     Ok(scene)
 }
 
-fn reconcile_scene(config: &Config, scene: Option<CompdScene>) -> Result<Option<CompdScene>> {
+async fn reconcile_scene(
+    config: &Config,
+    scene: Option<CompdScene>,
+    vulkan: Option<&VulkanBackend>,
+) -> Result<Option<CompdScene>> {
     let Some(scene) = scene else {
         println!("service=compd op=scene_reconcile event=skipped reason=no-scene");
         return Ok(None);
@@ -241,6 +270,23 @@ fn reconcile_scene(config: &Config, scene: Option<CompdScene>) -> Result<Option<
                 snapshot.surfaces.len(),
                 snapshot.unix_timestamp
             );
+
+            if let Some(vulkan) = vulkan {
+                let handle = vulkan.submit_batch(VulkanBatchSubmission {
+                    workload: VulkanWorkloadClass::BulkPrefilter,
+                    payload_len: snapshot.surfaces.len() * 256, // シミュレート
+                    surface_words: None,
+                    timeout: Duration::from_millis(100),
+                    requires_zeroize: false,
+                    allows_gpu: true,
+                });
+                let result = vulkan.wait_for_completion(handle).await;
+                println!(
+                    "service=compd op=vulkan_prefilter event=completed workload={:?} path={:?}",
+                    result.workload, result.path
+                );
+            }
+
             let reconciled = reconcile_scene_with_registry(scene, &snapshot);
             println!(
                 "service=compd op=scene_reconcile event=success kept={} dropped={} app_id_updates={} selection_handoffs={} focus={:?} clipboard_owner={} primary_selection_owner={}",
@@ -425,6 +471,7 @@ fn commit_scene_to_displayd(scene: &CompdScene) -> Result<SceneCommitReceipt> {
         MessageKind::DisplayCommand(DisplayCommand::CommitScene {
             target: CommitTarget::Output { name: scene.target_output.clone() },
             focus: scene.focus.clone(),
+            selection: scene.selection.clone(),
             surfaces: scene.surfaces.clone(),
         }),
     );
@@ -594,7 +641,7 @@ fn scene_from_snapshot(snapshot: &CommittedSceneState) -> CompdScene {
             CommitTarget::Output { name } => name.clone(),
         },
         focus: snapshot.focus.clone(),
-        selection: WaylandSelectionState::default(),
+        selection: snapshot.selection.clone(),
         surfaces: snapshot.surfaces.clone(),
     }
 }

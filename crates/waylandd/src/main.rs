@@ -1,14 +1,21 @@
-use std::{env, fs, io::BufReader, os::unix::net::UnixStream, path::PathBuf};
+use std::{env, fs, io::BufReader, os::unix::net::UnixStream, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
+use vulkan_backend::{
+    VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
+};
 use waybroker_common::{
     DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope, MessageKind, OutputMode, ServiceBanner,
     ServiceRole, SurfaceRegistrySnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff,
     WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState, bind_service_socket,
     connect_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line,
+    session_artifact_path,
 };
 
-fn main() -> Result<()> {
+const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
+
+#[tokio::main]
+async fn main() -> Result<()> {
     let config = Config::from_args(env::args().skip(1))?;
     let banner = ServiceBanner::new(
         ServiceRole::Waylandd,
@@ -16,9 +23,21 @@ fn main() -> Result<()> {
     );
     println!("{}", banner.render());
 
+    let vulkan = if config.use_vulkan {
+        let backend = VulkanBackend::new(VulkanBackendConfig::default());
+        let caps = backend.initialize();
+        println!(
+            "service=waylandd op=vulkan_init event=success driver={} device={}",
+            caps.driver_name, caps.device_name
+        );
+        Some(backend)
+    } else {
+        None
+    };
+
     if config.serve_ipc {
         let mut registry = load_surface_registry(config.registry_path.as_ref())?;
-        write_surface_registry_artifact(&registry)?;
+        write_surface_registry_artifact(&registry, &config.session_instance_id)?;
         log_surface_registry(&registry);
 
         if config.print_registry {
@@ -33,7 +52,7 @@ fn main() -> Result<()> {
             Err(err) => println!("waylandd displayd_state=unreachable reason={err}"),
         }
 
-        serve_ipc(&config, &mut registry)?;
+        serve_ipc(&config, &mut registry, vulkan.as_ref()).await?;
         return Ok(());
     }
 
@@ -52,18 +71,21 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct Config {
     require_displayd: bool,
     serve_ipc: bool,
     serve_once: bool,
     print_registry: bool,
     registry_path: Option<PathBuf>,
+    use_vulkan: bool,
+    session_instance_id: String,
 }
 
 impl Config {
     fn from_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let mut config = Self::default();
+        config.session_instance_id = DEFAULT_SESSION_INSTANCE_ID.to_string();
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -71,13 +93,18 @@ impl Config {
                 "--serve-ipc" => config.serve_ipc = true,
                 "--once" => config.serve_once = true,
                 "--print-registry" => config.print_registry = true,
+                "--vulkan" => config.use_vulkan = true,
+                "--session-instance-id" => {
+                    config.session_instance_id =
+                        args.next().context("--session-instance-id requires an id")?;
+                }
                 "--registry" => {
                     let path = args.next().context("--registry requires a path")?;
                     config.registry_path = Some(PathBuf::from(path));
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: waylandd [--require-displayd] [--serve-ipc] [--once] [--print-registry] [--registry PATH]"
+                        "usage: waylandd [--require-displayd] [--serve-ipc] [--once] [--print-registry] [--registry PATH] [--vulkan] [--session-instance-id ID]"
                     );
                     std::process::exit(0);
                 }
@@ -89,7 +116,11 @@ impl Config {
     }
 }
 
-fn serve_ipc(config: &Config, registry: &mut SurfaceRegistrySnapshot) -> Result<()> {
+async fn serve_ipc(
+    config: &Config,
+    registry: &mut SurfaceRegistrySnapshot,
+    vulkan: Option<&VulkanBackend>,
+) -> Result<()> {
     let (listener, socket_path) = bind_service_socket(ServiceRole::Waylandd)?;
     let _socket_guard = SocketGuard::new(socket_path.clone());
     println!("service=waylandd op=listen event=socket_bound path={}", socket_path.display());
@@ -97,7 +128,7 @@ fn serve_ipc(config: &Config, registry: &mut SurfaceRegistrySnapshot) -> Result<
     let mut served = 0usize;
     for stream in listener.incoming() {
         let stream = stream?;
-        handle_client(stream, registry)?;
+        handle_client(stream, registry, vulkan, &config.session_instance_id).await?;
         served += 1;
 
         if config.serve_once {
@@ -109,28 +140,34 @@ fn serve_ipc(config: &Config, registry: &mut SurfaceRegistrySnapshot) -> Result<
     Ok(())
 }
 
-fn handle_client(mut stream: UnixStream, registry: &mut SurfaceRegistrySnapshot) -> Result<()> {
+async fn handle_client(
+    mut stream: UnixStream,
+    registry: &mut SurfaceRegistrySnapshot,
+    vulkan: Option<&VulkanBackend>,
+    session_instance_id: &str,
+) -> Result<()> {
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
     };
 
-    let (response, registry_changed) = build_response(request, registry);
+    let (response, registry_changed) = build_response(request, registry, vulkan).await;
     send_json_line(&mut stream, &response)?;
     if registry_changed {
-        write_surface_registry_artifact(registry)?;
+        write_surface_registry_artifact(registry, session_instance_id)?;
     }
     Ok(())
 }
 
-fn build_response(
+async fn build_response(
     request: IpcEnvelope,
     registry: &mut SurfaceRegistrySnapshot,
+    vulkan: Option<&VulkanBackend>,
 ) -> (IpcEnvelope, bool) {
     let source = request.source;
     let (response_kind, registry_changed) = match request.kind {
         MessageKind::WaylandCommand(command) if request.destination == ServiceRole::Waylandd => {
-            let (event, changed) = handle_wayland_command(command, registry);
+            let (event, changed) = handle_wayland_command(command, registry, vulkan).await;
             (MessageKind::WaylandEvent(event), changed)
         }
         MessageKind::WaylandCommand(_) => (
@@ -153,9 +190,10 @@ fn build_response(
     (IpcEnvelope::new(ServiceRole::Waylandd, source, response_kind), registry_changed)
 }
 
-fn handle_wayland_command(
+async fn handle_wayland_command(
     command: WaylandCommand,
     registry: &mut SurfaceRegistrySnapshot,
+    vulkan: Option<&VulkanBackend>,
 ) -> (WaylandEvent, bool) {
     match command {
         WaylandCommand::GetSurfaceRegistry => {
@@ -171,6 +209,22 @@ fn handle_wayland_command(
         WaylandCommand::ApplySelectionHandoff { handoff } => {
             if let Err(reason) = validate_selection_handoff(&handoff, registry) {
                 return (WaylandEvent::Rejected { reason }, false);
+            }
+
+            if let Some(vulkan) = vulkan {
+                let handle = vulkan.submit_batch(VulkanBatchSubmission {
+                    workload: VulkanWorkloadClass::AuditScan,
+                    payload_len: 1024,
+                    surface_words: None,
+                    timeout: Duration::from_millis(50),
+                    requires_zeroize: true,
+                    allows_gpu: true,
+                });
+                let result = vulkan.wait_for_completion(handle).await;
+                println!(
+                    "service=waylandd op=vulkan_audit event=completed workload={:?} path={:?}",
+                    result.workload, result.path
+                );
             }
 
             registry.selection = handoff.selection.clone();
@@ -342,9 +396,11 @@ fn log_surface_registry(registry: &SurfaceRegistrySnapshot) {
     );
 }
 
-fn write_surface_registry_artifact(registry: &SurfaceRegistrySnapshot) -> Result<PathBuf> {
-    let dir = ensure_runtime_dir()?;
-    let path = dir.join("waylandd-surface-registry.json");
+fn write_surface_registry_artifact(
+    registry: &SurfaceRegistrySnapshot,
+    session_instance_id: &str,
+) -> Result<PathBuf> {
+    let path = session_artifact_path(session_instance_id, "surface-registry");
     fs::write(&path, serde_json::to_string_pretty(registry)?)
         .with_context(|| format!("failed to write runtime surface registry {}", path.display()))?;
     Ok(path)
@@ -404,7 +460,7 @@ mod tests {
     #[test]
     fn applies_selection_handoff_to_active_surface() {
         let mut registry = mock_surface_registry();
-        let (event, changed) = handle_wayland_command(
+        let (event, changed) = tokio::runtime::Runtime::new().unwrap().block_on(handle_wayland_command(
             WaylandCommand::ApplySelectionHandoff {
                 handoff: WaylandSelectionHandoff {
                     focus: FocusTarget::Surface { id: "konsole-1".into() },
@@ -419,7 +475,8 @@ mod tests {
                 },
             },
             &mut registry,
-        );
+            None,
+        ));
 
         assert!(changed);
         match event {

@@ -87,6 +87,7 @@ fn commit_scene_to_displayd(scene: &X11RootlessScene) -> Result<usize> {
         MessageKind::DisplayCommand(DisplayCommand::CommitScene {
             target: CommitTarget::Output { name: scene.output.name.clone() },
             focus: scene.focus_target(),
+            selection: scene.selection_state(),
             surfaces: scene.to_surface_snapshots(),
         }),
     );

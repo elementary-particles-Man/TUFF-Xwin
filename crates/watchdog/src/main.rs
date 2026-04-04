@@ -12,7 +12,7 @@ use waybroker_common::{
     ServiceBanner, ServiceRole, SessionCommand, SessionLaunchComponentState, SessionLaunchDelta,
     SessionLaunchState, SessionWatchdogComponentReport, SessionWatchdogReport, WatchdogCommand,
     bind_service_socket, connect_service_socket, ensure_runtime_dir, now_unix_timestamp,
-    read_json_line, runtime_dir, send_json_line,
+    read_json_line, runtime_dir, send_json_line, session_artifact_path,
 };
 
 fn main() -> Result<()> {
@@ -53,6 +53,7 @@ fn main() -> Result<()> {
 struct Config {
     launch_state_path: Option<PathBuf>,
     profile_id: Option<String>,
+    session_instance_id: Option<String>,
     inspect_all: bool,
     write_reports: bool,
     notify_sessiond: bool,
@@ -74,6 +75,10 @@ impl Config {
                     let id = args.next().context("--profile-id requires an id")?;
                     config.profile_id = Some(id);
                 }
+                "--session-instance-id" => {
+                    let id = args.next().context("--session-instance-id requires an id")?;
+                    config.session_instance_id = Some(id);
+                }
                 "--inspect-all" => config.inspect_all = true,
                 "--write-reports" => config.write_reports = true,
                 "--notify-sessiond" => config.notify_sessiond = true,
@@ -81,7 +86,7 @@ impl Config {
                 "--once" => config.serve_once = true,
                 "--help" | "-h" => {
                     println!(
-                        "usage: watchdog [--launch-state PATH] [--profile-id ID] [--inspect-all] [--write-reports] [--notify-sessiond] [--serve-ipc] [--once]"
+                        "usage: watchdog [--launch-state PATH] [--profile-id ID] [--session-instance-id ID] [--inspect-all] [--write-reports] [--notify-sessiond] [--serve-ipc] [--once]"
                     );
                     std::process::exit(0);
                 }
@@ -180,11 +185,20 @@ fn handle_watchdog_command(
     match command {
         WatchdogCommand::Restart { role, reason } => {
             if role == ServiceRole::Compd || role == ServiceRole::Lockd {
+                // IPC経由の場合、どのセッションのコンポーネントかを特定する必要があるが、
+                // 現状の WatchdogCommand::Restart は role しか持たないため、
+                // キャッシュされている最新のセッション（または唯一のセッション）をターゲットにする。
+                // 厳密にはコマンドを拡張して session_instance_id を含めるべきだが、
+                // まずはパス解決をセッションID対応にする。
+                
+                let session_instance_id = server.latest_session_instance_id().unwrap_or_else(|| "legacy-single-session".to_string());
+
                 println!(
-                    "service=watchdog op=recovery_request event=accepted role={} reason=\"{}\" requested_by={}",
+                    "service=watchdog op=recovery_request event=accepted role={} reason=\"{}\" requested_by={} session_instance_id={}",
                     role.as_str(),
                     reason,
-                    source.as_str()
+                    source.as_str(),
+                    session_instance_id
                 );
 
                 let artifact = WatchdogRecoveryArtifact {
@@ -196,7 +210,7 @@ fn handle_watchdog_command(
                     status: "pending".into(),
                 };
 
-                let artifact_path = write_recovery_artifact(&artifact)?;
+                let artifact_path = write_recovery_artifact(&artifact, &session_instance_id)?;
                 println!(
                     "service=watchdog op=write_recovery_artifact path={}",
                     artifact_path.display()
@@ -233,8 +247,8 @@ fn handle_watchdog_command(
             }
             StateUpdateOutcome::Ignored { state, reason } => {
                 println!(
-                    "watchdog ignored_launch_state profile={} generation={} sequence={} reason={}",
-                    state.profile_id, state.generation, state.sequence, reason
+                    "watchdog ignored_launch_state profile={} session_instance={} generation={} sequence={} reason={}",
+                    state.profile_id, state.session_instance_id, state.generation, state.sequence, reason
                 );
 
                 let report = inspect_launch_state(&state);
@@ -479,15 +493,15 @@ impl WatchdogServer {
         self.cached_states.insert(cache_key, next_state.clone());
         StateUpdateOutcome::Accepted(next_state)
     }
+
+    fn latest_session_instance_id(&self) -> Option<String> {
+        self.cached_states.keys().next().map(|key| key.session_instance_id.clone())
+    }
 }
 
 fn load_launch_states(config: &Config) -> Result<Vec<SessionLaunchState>> {
     if let Some(path) = config.launch_state_path.as_ref() {
         return Ok(vec![load_launch_state(path)?]);
-    }
-
-    if let Some(profile_id) = config.profile_id.as_deref() {
-        return Ok(vec![load_launch_state(&launch_state_path(profile_id))?]);
     }
 
     let runtime = runtime_dir();
@@ -500,9 +514,18 @@ fn load_launch_states(config: &Config) -> Result<Vec<SessionLaunchState>> {
         let path = entry.path();
         let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
 
-        if file_name.starts_with("launch-state-") && file_name.ends_with(".json") {
+        // session-<instance_id>-launch-state.json 形式をサポート
+        if file_name.starts_with("session-") && file_name.ends_with("-launch-state.json") {
+            launch_states.push(load_launch_state(&path)?);
+        } else if file_name.starts_with("launch-state-") && file_name.ends_with(".json") {
             launch_states.push(load_launch_state(&path)?);
         }
+    }
+
+    if let Some(id) = config.session_instance_id.as_deref() {
+        launch_states.retain(|state| state.session_instance_id == id);
+    } else if let Some(id) = config.profile_id.as_deref() {
+        launch_states.retain(|state| state.profile_id == id);
     }
 
     if !config.inspect_all && launch_states.len() > 1 {
@@ -544,6 +567,7 @@ fn inspect_launch_state(state: &SessionLaunchState) -> SessionWatchdogReport {
 
     SessionWatchdogReport {
         profile_id: state.profile_id.clone(),
+        session_instance_id: state.session_instance_id.clone(),
         display_name: state.display_name.clone(),
         protocol: state.protocol,
         healthy_components,
@@ -622,9 +646,8 @@ fn process_exists(pid: u32) -> bool {
     PathBuf::from("/proc").join(pid.to_string()).exists()
 }
 
-fn write_recovery_artifact(artifact: &WatchdogRecoveryArtifact) -> Result<PathBuf> {
-    let dir = ensure_runtime_dir()?;
-    let path = dir.join(format!("watchdog-recovery-{}.json", artifact.role));
+fn write_recovery_artifact(artifact: &WatchdogRecoveryArtifact, session_instance_id: &str) -> Result<PathBuf> {
+    let path = session_artifact_path(session_instance_id, &format!("watchdog-recovery-{}", artifact.role));
     let json = serde_json::to_string_pretty(artifact)
         .context("failed to serialize watchdog recovery artifact")?;
     fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
@@ -632,8 +655,7 @@ fn write_recovery_artifact(artifact: &WatchdogRecoveryArtifact) -> Result<PathBu
 }
 
 fn write_report(report: &SessionWatchdogReport) -> Result<PathBuf> {
-    let dir = ensure_runtime_dir()?;
-    let path = dir.join(format!("watchdog-report-{}.json", report.profile_id));
+    let path = session_artifact_path(&report.session_instance_id, "watchdog-report");
     let json =
         serde_json::to_string_pretty(report).context("failed to serialize watchdog report")?;
     fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
@@ -702,10 +724,6 @@ fn print_sessiond_response(response: &IpcEnvelope) {
         }
         other => println!("service=watchdog op=sessiond_response event=unknown kind={:?}", other),
     }
-}
-
-fn launch_state_path(profile_id: &str) -> PathBuf {
-    runtime_dir().join(format!("launch-state-{profile_id}.json"))
 }
 
 struct SocketGuard {

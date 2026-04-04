@@ -3,23 +3,40 @@ use std::{
     io::BufReader,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use vulkan_backend::{
+    VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
+};
 use waybroker_common::{
     CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputMode,
     ServiceBanner, ServiceRole, bind_service_socket, ensure_runtime_dir, now_unix_timestamp,
-    read_json_line, send_json_line,
+    read_json_line, send_json_line, session_artifact_path,
 };
 
-const SCENE_SNAPSHOT_FILE: &str = "displayd-last-scene.json";
+const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let config = Config::from_args(env::args().skip(1))?;
     let banner = ServiceBanner::new(ServiceRole::Displayd, "drm/kms, input, seat broker");
     println!("{}", banner.render());
 
-    let mut state = DisplayState::load()?;
+    let vulkan = if config.use_vulkan {
+        let backend = VulkanBackend::new(VulkanBackendConfig::default());
+        let caps = backend.initialize();
+        println!(
+            "service=displayd op=vulkan_init event=success driver={} device={}",
+            caps.driver_name, caps.device_name
+        );
+        Some(backend)
+    } else {
+        None
+    };
+
+    let mut state = DisplayState::load(&config.session_instance_id)?;
 
     let (listener, socket_path) = bind_service_socket(ServiceRole::Displayd)?;
     let _socket_guard = SocketGuard::new(socket_path.clone());
@@ -28,7 +45,7 @@ fn main() -> Result<()> {
     let mut served = 0usize;
     for stream in listener.incoming() {
         let stream = stream?;
-        handle_client(stream, &config, &mut state)?;
+        handle_client(stream, &config, &mut state, vulkan.as_ref()).await?;
         served += 1;
 
         if config.serve_once {
@@ -40,22 +57,30 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct Config {
     serve_once: bool,
     fail_resume: bool,
+    use_vulkan: bool,
+    session_instance_id: String,
 }
 
 impl Config {
-    fn from_args(args: impl Iterator<Item = String>) -> Result<Self> {
+    fn from_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let mut config = Self::default();
+        config.session_instance_id = DEFAULT_SESSION_INSTANCE_ID.to_string();
 
-        for arg in args {
+        while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--once" => config.serve_once = true,
                 "--fail-resume" => config.fail_resume = true,
+                "--vulkan" => config.use_vulkan = true,
+                "--session-instance-id" => {
+                    config.session_instance_id =
+                        args.next().context("--session-instance-id requires an id")?;
+                }
                 "--help" | "-h" => {
-                    println!("usage: displayd [--once] [--fail-resume]");
+                    println!("usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID]");
                     std::process::exit(0);
                 }
                 _ => bail!("unknown argument: {arg}"),
@@ -66,26 +91,34 @@ impl Config {
     }
 }
 
-fn handle_client(mut stream: UnixStream, config: &Config, state: &mut DisplayState) -> Result<()> {
+async fn handle_client(
+    mut stream: UnixStream,
+    config: &Config,
+    state: &mut DisplayState,
+    vulkan: Option<&VulkanBackend>,
+) -> Result<()> {
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
     };
 
-    let response = build_response(request, config, state)?;
+    let response = build_response(request, config, state, vulkan).await?;
     send_json_line(&mut stream, &response)?;
     Ok(())
 }
 
-fn build_response(
+async fn build_response(
     request: IpcEnvelope,
     config: &Config,
     state: &mut DisplayState,
+    vulkan: Option<&VulkanBackend>,
 ) -> Result<IpcEnvelope> {
     let source = request.source;
     let response_kind = match request.kind {
         MessageKind::DisplayCommand(command) if request.destination == ServiceRole::Displayd => {
-            MessageKind::DisplayEvent(handle_display_command(command, source, config, state)?)
+            MessageKind::DisplayEvent(
+                handle_display_command(command, source, config, state, vulkan).await?,
+            )
         }
         MessageKind::DisplayCommand(_) => MessageKind::DisplayEvent(DisplayEvent::Rejected {
             reason: format!(
@@ -101,11 +134,12 @@ fn build_response(
     Ok(IpcEnvelope::new(ServiceRole::Displayd, source, response_kind))
 }
 
-fn handle_display_command(
+async fn handle_display_command(
     command: DisplayCommand,
     source: ServiceRole,
     config: &Config,
     state: &mut DisplayState,
+    vulkan: Option<&VulkanBackend>,
 ) -> Result<DisplayEvent> {
     match command {
         DisplayCommand::EnumerateOutputs => {
@@ -116,12 +150,29 @@ fn handle_display_command(
             println!("service=displayd op=set_mode event=success output={output} mode={:?}", mode);
             Ok(DisplayEvent::ModeApplied { output, mode })
         }
-        DisplayCommand::CommitScene { target, focus, surfaces } => {
+        DisplayCommand::CommitScene { target, focus, selection, surfaces } => {
+            if let Some(vulkan) = vulkan {
+                let handle = vulkan.submit_batch(VulkanBatchSubmission {
+                    workload: VulkanWorkloadClass::MaintenanceHashing,
+                    payload_len: surfaces.len() * 512, // シミュレート
+                    surface_words: None,
+                    timeout: Duration::from_millis(50),
+                    requires_zeroize: false,
+                    allows_gpu: true,
+                });
+                let result = vulkan.wait_for_completion(handle).await;
+                println!(
+                    "service=displayd op=vulkan_hashing event=completed workload={:?} path={:?}",
+                    result.workload, result.path
+                );
+            }
+
             let commit_id = state.next_commit_id;
             let snapshot = CommittedSceneState {
                 source,
                 target: target.clone(),
                 focus: focus.clone(),
+                selection: selection.clone(),
                 surfaces,
                 commit_id,
                 unix_timestamp: now_unix_timestamp(),
@@ -129,12 +180,13 @@ fn handle_display_command(
             let surface_count = snapshot.surfaces.len();
             state.record_commit(snapshot)?;
             println!(
-                "service=displayd op=commit_scene event=success commit_id={} surfaces={} path={}",
+                "service=displayd op=commit_scene event=success commit_id={} surfaces={} path={} session_instance_id={}",
                 commit_id,
                 surface_count,
-                state.snapshot_path.display()
+                state.snapshot_path.display(),
+                config.session_instance_id
             );
-            Ok(DisplayEvent::SceneCommitted { target, focus, surface_count, commit_id })
+            Ok(DisplayEvent::SceneCommitted { target, focus, selection, surface_count, commit_id })
         }
         DisplayCommand::GetSceneSnapshot { output } => {
             Ok(handle_scene_snapshot_request(output, state))
@@ -165,8 +217,8 @@ struct DisplayState {
 }
 
 impl DisplayState {
-    fn load() -> Result<Self> {
-        let snapshot_path = ensure_runtime_dir()?.join(SCENE_SNAPSHOT_FILE);
+    fn load(session_instance_id: &str) -> Result<Self> {
+        let snapshot_path = session_artifact_path(session_instance_id, "scene-snapshot");
         let last_scene = load_scene_snapshot(&snapshot_path)?;
         let next_commit_id =
             last_scene.as_ref().map(|scene| scene.commit_id.saturating_add(1)).unwrap_or(1);
@@ -174,17 +226,19 @@ impl DisplayState {
         match &last_scene {
             Some(scene) => {
                 println!(
-                    "service=displayd op=scene_cache event=loaded commit_id={} source={} surfaces={} path={}",
+                    "service=displayd op=scene_cache event=loaded commit_id={} source={} surfaces={} path={} session_instance_id={}",
                     scene.commit_id,
                     scene.source.as_str(),
                     scene.surfaces.len(),
-                    snapshot_path.display()
+                    snapshot_path.display(),
+                    session_instance_id
                 );
             }
             None => {
                 println!(
-                    "service=displayd op=scene_cache event=empty path={}",
-                    snapshot_path.display()
+                    "service=displayd op=scene_cache event=empty path={} session_instance_id={}",
+                    snapshot_path.display(),
+                    session_instance_id
                 );
             }
         }

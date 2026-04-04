@@ -15,7 +15,7 @@ use waybroker_common::{
     MessageKind, ServiceBanner, ServiceRole, SessionCommand, SessionLaunchComponentState,
     SessionLaunchDelta, SessionLaunchState, SessionProfileTransition, SessionWatchdogReport,
     WatchdogCommand, bind_service_socket, connect_service_socket, ensure_runtime_dir,
-    now_unix_timestamp, read_json_line, runtime_dir, send_json_line,
+    now_unix_timestamp, read_json_line, runtime_dir, send_json_line, session_artifact_path,
 };
 
 #[derive(Debug, serde::Serialize)]
@@ -94,27 +94,39 @@ fn validate_profile_bindings(profile: &DesktopProfile) -> BindingCollisionReport
     report
 }
 
-fn write_binding_collision_report(report: &BindingCollisionReport) -> Result<PathBuf> {
-    let dir = ensure_runtime_dir()?;
-    let path = dir.join("binding-collision-report.json");
+fn write_binding_collision_report(
+    report: &BindingCollisionReport,
+    session_instance_id: &str,
+) -> Result<PathBuf> {
+    let path = session_artifact_path(session_instance_id, "binding-collision-report");
     let json =
         serde_json::to_string_pretty(report).context("failed to serialize collision report")?;
     fs::write(&path, json)?;
     Ok(path)
 }
 
-fn write_binding_resolution_artifact(resolution: &BindingResolutionResult) -> Result<PathBuf> {
-    let dir = ensure_runtime_dir()?;
-    let path = dir.join(format!("binding-resolution-{}.json", resolution.service));
+fn write_binding_resolution_artifact(
+    resolution: &BindingResolutionResult,
+    session_instance_id: &str,
+) -> Result<PathBuf> {
+    let path = session_artifact_path(
+        session_instance_id,
+        &format!("binding-resolution-{}", resolution.service),
+    );
     let json = serde_json::to_string_pretty(resolution)
         .context("failed to serialize resolution artifact")?;
     fs::write(&path, json)?;
     Ok(path)
 }
 
-fn write_watchdog_execution_artifact(execution: &WatchdogExecutionArtifact) -> Result<PathBuf> {
-    let dir = ensure_runtime_dir()?;
-    let path = dir.join(format!("watchdog-action-execution-{}.json", execution.role));
+fn write_watchdog_execution_artifact(
+    execution: &WatchdogExecutionArtifact,
+    session_instance_id: &str,
+) -> Result<PathBuf> {
+    let path = session_artifact_path(
+        session_instance_id,
+        &format!("watchdog-action-execution-{}", execution.role),
+    );
     let json = serde_json::to_string_pretty(execution)
         .context("failed to serialize execution artifact")?;
     fs::write(&path, json)?;
@@ -131,10 +143,14 @@ fn main() -> Result<()> {
         "lid, idle, suspend, session policy, desktop profile manager",
     );
     println!("{}", banner.render());
+
+    let session_instance_id = config.session_instance_id.clone().unwrap_or_else(|| "legacy-single-session".to_string());
+
     println!(
-        "service=sessiond op=load_profiles dir={} count={}",
+        "service=sessiond op=load_profiles dir={} count={} session_instance_id={}",
         profiles_dir.display(),
-        profiles.len()
+        profiles.len(),
+        session_instance_id
     );
 
     if config.list_profiles || config.selected_profile_id.is_none() {
@@ -157,7 +173,7 @@ fn main() -> Result<()> {
         let plan = profile.launch_plan();
 
         let report = validate_profile_bindings(profile);
-        write_binding_collision_report(&report)?;
+        write_binding_collision_report(&report, &session_instance_id)?;
         if !report.duplicate_service_bindings.is_empty()
             || !report.missing_binding_targets.is_empty()
             || !report.role_mismatch_bindings.is_empty()
@@ -196,7 +212,7 @@ fn main() -> Result<()> {
         }
 
         if config.write_selection {
-            let state_path = write_active_profile(profile)?;
+            let state_path = write_active_profile(profile, &session_instance_id)?;
             println!("service=sessiond op=write_active_profile path={}", state_path.display());
         }
     }
@@ -208,41 +224,41 @@ fn main() -> Result<()> {
             .with_context(|| format!("unknown launch profile id: {profile_id}"))?;
 
         let report = validate_profile_bindings(profile);
-        write_binding_collision_report(&report)?;
+        write_binding_collision_report(&report, &session_instance_id)?;
 
         let launch_state = launch_state_for_profile(profile, &config)?;
-        let state_path = write_launch_state(&launch_state)?;
+        let state_path = write_launch_state(&launch_state, &session_instance_id)?;
 
         print_launch_state(&launch_state);
         println!("service=sessiond op=write_launch_state path={}", state_path.display());
     }
 
     if config.launch_active {
-        let profile = read_active_profile()?;
+        let profile = read_active_profile(&session_instance_id)?;
 
         let report = validate_profile_bindings(&profile);
-        write_binding_collision_report(&report)?;
+        write_binding_collision_report(&report, &session_instance_id)?;
 
         let launch_state = launch_state_for_profile(&profile, &config)?;
-        let state_path = write_launch_state(&launch_state)?;
+        let state_path = write_launch_state(&launch_state, &session_instance_id)?;
 
         print_launch_state(&launch_state);
         println!("service=sessiond op=write_launch_state path={}", state_path.display());
     }
 
     if config.apply_watchdog_active {
-        let active_profile = read_active_profile()?;
-        let report = read_watchdog_report(&config, &active_profile)?;
+        let active_profile = read_active_profile(&session_instance_id)?;
+        let report = read_watchdog_report(&config, &active_profile, &session_instance_id)?;
         let outcome = apply_watchdog_report(&active_profile, &profiles, &report)?;
-        let _ = persist_watchdog_apply_outcome(&outcome, &config, None)?;
+        let _ = persist_watchdog_apply_outcome(&outcome, &config, None, &session_instance_id)?;
     }
 
     if config.resume_demo {
-        run_resume_scenario(&config, ResumeScenario::Normal)?;
+        run_resume_scenario(&config, ResumeScenario::Normal, &session_instance_id)?;
     }
 
     if let Some(scenario) = config.resume_scenario {
-        run_resume_scenario(&config, scenario)?;
+        run_resume_scenario(&config, scenario, &session_instance_id)?;
     }
 
     if config.serve_ipc {
@@ -336,6 +352,7 @@ struct Config {
     notify_watchdog: bool,
     resume_demo: bool,
     resume_scenario: Option<ResumeScenario>,
+    session_instance_id: Option<String>,
 }
 
 impl Default for Config {
@@ -360,6 +377,7 @@ impl Default for Config {
             notify_watchdog: false,
             resume_demo: false,
             resume_scenario: None,
+            session_instance_id: None,
         }
     }
 }
@@ -405,6 +423,10 @@ impl Config {
                     let scenario = args.next().context("--resume-scenario requires a name")?;
                     config.resume_scenario = Some(ResumeScenario::from_str(&scenario)?);
                 }
+                "--session-instance-id" => {
+                    let id = args.next().context("--session-instance-id requires an id")?;
+                    config.session_instance_id = Some(id);
+                }
                 "--supervise-seconds" => {
                     let value = args.next().context("--supervise-seconds requires a number")?;
                     config.supervise_seconds = value
@@ -419,7 +441,7 @@ impl Config {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: sessiond [--repo-root PATH] [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N] [--apply-watchdog-active] [--watchdog-report PATH] [--serve-ipc] [--once] [--manage-active] [--notify-watchdog] [--resume-demo] [--resume-scenario NAME]"
+                        "usage: sessiond [--repo-root PATH] [--profiles-dir PATH] [--list-profiles] [--select-profile ID] [--print-launch-plan] [--write-selection] [--launch-profile ID] [--launch-active] [--spawn-components] [--supervise-seconds N] [--restart-limit N] [--apply-watchdog-active] [--watchdog-report PATH] [--serve-ipc] [--once] [--manage-active] [--notify-watchdog] [--resume-demo] [--resume-scenario NAME] [--session-instance-id ID]"
                     );
                     std::process::exit(0);
                 }
@@ -476,21 +498,20 @@ fn load_profiles(dir: &Path) -> Result<Vec<DesktopProfile>> {
     Ok(profiles)
 }
 
-fn write_active_profile(profile: &DesktopProfile) -> Result<PathBuf> {
-    let dir = ensure_runtime_dir()?;
-    let path = dir.join("active-profile.json");
+fn write_active_profile(profile: &DesktopProfile, session_instance_id: &str) -> Result<PathBuf> {
+    let path = session_artifact_path(session_instance_id, "active-profile");
     let json =
         serde_json::to_string_pretty(profile).context("failed to serialize active profile")?;
     fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
 }
 
-fn active_profile_path() -> PathBuf {
-    runtime_dir().join("active-profile.json")
+fn active_profile_path(session_instance_id: &str) -> PathBuf {
+    session_artifact_path(session_instance_id, "active-profile")
 }
 
-fn launch_state_path(profile_id: &str) -> PathBuf {
-    runtime_dir().join(format!("launch-state-{profile_id}.json"))
+fn launch_state_path(session_instance_id: &str) -> PathBuf {
+    session_artifact_path(session_instance_id, "launch-state")
 }
 
 fn new_session_instance_id(profile_id: &str) -> String {
@@ -498,12 +519,12 @@ fn new_session_instance_id(profile_id: &str) -> String {
     format!("{profile_id}-{}-{nonce}", std::process::id())
 }
 
-fn watchdog_report_path(profile_id: &str) -> PathBuf {
-    runtime_dir().join(format!("watchdog-report-{profile_id}.json"))
+fn watchdog_report_path(session_instance_id: &str) -> PathBuf {
+    session_artifact_path(session_instance_id, "watchdog-report")
 }
 
-fn read_active_profile() -> Result<DesktopProfile> {
-    let path = active_profile_path();
+fn read_active_profile(session_instance_id: &str) -> Result<DesktopProfile> {
+    let path = active_profile_path(session_instance_id);
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("failed to read active profile {}", path.display()))?;
     serde_json::from_str(&raw)
@@ -512,12 +533,13 @@ fn read_active_profile() -> Result<DesktopProfile> {
 
 fn read_watchdog_report(
     config: &Config,
-    active_profile: &DesktopProfile,
+    _active_profile: &DesktopProfile,
+    session_instance_id: &str,
 ) -> Result<SessionWatchdogReport> {
     let path = config
         .watchdog_report_path
         .clone()
-        .unwrap_or_else(|| watchdog_report_path(&active_profile.id));
+        .unwrap_or_else(|| watchdog_report_path(session_instance_id));
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("failed to read watchdog report {}", path.display()))?;
     serde_json::from_str(&raw)
@@ -565,8 +587,16 @@ fn resolve_lockd_resume_binding(
     (None, "missing".into(), "missing".into(), "no lockd binding found".into())
 }
 
-fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()> {
-    println!("service=sessiond op=resume_sequence event=begin scenario={}", scenario.as_str());
+fn run_resume_scenario(
+    config: &Config,
+    scenario: ResumeScenario,
+    session_instance_id: &str,
+) -> Result<()> {
+    println!(
+        "service=sessiond op=resume_sequence event=begin scenario={} session_instance_id={}",
+        scenario.as_str(),
+        session_instance_id
+    );
 
     let mut steps = Vec::new();
     let mut final_state = "normal".to_string();
@@ -574,7 +604,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
     let mut auth_outcome = "skipped".to_string();
     let mut lock_reason = "normal".to_string();
 
-    let profile = read_active_profile().ok();
+    let profile = read_active_profile(session_instance_id).ok();
 
     // 0. Pre-validate bindings for all involved services in resume
     let report = if let Some(ref p) = profile {
@@ -589,7 +619,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
             unix_timestamp: now_unix_timestamp(),
         }
     };
-    write_binding_collision_report(&report)?;
+    write_binding_collision_report(&report, session_instance_id)?;
 
     // Resolve Lockd binding
     let (lockd_bound_id, lockd_binding_source, lockd_res_result, lockd_res_reason) =
@@ -664,7 +694,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
         reason: compd_res_reason.into(),
         unix_timestamp: now_unix_timestamp(),
     };
-    write_binding_resolution_artifact(&compd_res_artifact)?;
+    write_binding_resolution_artifact(&compd_res_artifact, session_instance_id)?;
 
     let ui_component_present = if let (Some(p), Some(id)) = (&profile, &lockd_bound_id) {
         p.session_components
@@ -692,7 +722,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
         reason: lockd_res_reason.clone(),
         unix_timestamp: now_unix_timestamp(),
     };
-    write_binding_resolution_artifact(&lockd_res_artifact)?;
+    write_binding_resolution_artifact(&lockd_res_artifact, session_instance_id)?;
 
     if lockd_res_result != "selected" {
         println!(
@@ -1044,7 +1074,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                     },
                     recovery_command_args: Vec::new(),
                 };
-                write_watchdog_execution_artifact(&exec_artifact)?;
+                write_watchdog_execution_artifact(&exec_artifact, session_instance_id)?;
             }
 
             steps.push(ResumeStep {
@@ -1147,7 +1177,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
                     },
                     recovery_command_args: Vec::new(),
                 };
-                write_watchdog_execution_artifact(&exec_artifact)?;
+                write_watchdog_execution_artifact(&exec_artifact, session_instance_id)?;
             }
 
             steps.push(ResumeStep {
@@ -1168,7 +1198,7 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
         final_state: final_state.clone(),
     };
 
-    write_resume_trace(&trace)?;
+    write_resume_trace(&trace, session_instance_id)?;
 
     let lock_artifact = LockPathArtifact {
         scenario: scenario.as_str().into(),
@@ -1186,14 +1216,16 @@ fn run_resume_scenario(_config: &Config, scenario: ResumeScenario) -> Result<()>
         watchdog_request_outcome,
         execution_result: "pending".into(), // This will be updated by the supervisor later
     };
-    write_lock_path_artifact(&lock_artifact)?;
+    write_lock_path_artifact(&lock_artifact, session_instance_id)?;
 
     Ok(())
 }
 
-fn write_lock_path_artifact(artifact: &LockPathArtifact) -> Result<PathBuf> {
-    let dir = ensure_runtime_dir()?;
-    let path = dir.join(format!("lock-ui-path-{}.json", artifact.scenario));
+fn write_lock_path_artifact(artifact: &LockPathArtifact, session_instance_id: &str) -> Result<PathBuf> {
+    let path = session_artifact_path(
+        session_instance_id,
+        &format!("lock-ui-path-{}", artifact.scenario),
+    );
     let json =
         serde_json::to_string_pretty(artifact).context("failed to serialize lock path artifact")?;
     fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
@@ -1201,9 +1233,8 @@ fn write_lock_path_artifact(artifact: &LockPathArtifact) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn write_resume_trace(trace: &ResumeTrace) -> Result<PathBuf> {
-    let dir = ensure_runtime_dir()?;
-    let path = dir.join(format!("resume-trace-{}.json", trace.scenario));
+fn write_resume_trace(trace: &ResumeTrace, session_instance_id: &str) -> Result<PathBuf> {
+    let path = session_artifact_path(session_instance_id, &format!("resume-trace-{}", trace.scenario));
     let json = serde_json::to_string_pretty(trace).context("failed to serialize resume trace")?;
     fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
     println!("service=sessiond op=write_resume_trace event=success path={}", path.display());
@@ -1322,12 +1353,13 @@ fn handle_session_command(
 ) -> Result<SessionCommand> {
     match command {
         SessionCommand::ApplyWatchdogReport { report } => {
+            let session_instance_id = report.session_instance_id.clone();
             let active_profile = match supervisor.as_ref() {
                 Some(supervisor) => supervisor.profile(),
-                None => read_active_profile()?,
+                None => read_active_profile(&session_instance_id)?,
             };
             let outcome = apply_watchdog_report(&active_profile, profiles, &report)?;
-            persist_watchdog_apply_outcome(&outcome, config, supervisor)
+            persist_watchdog_apply_outcome(&outcome, config, supervisor, &session_instance_id)
         }
         other => Ok(SessionCommand::ProfileUnchanged {
             profile_id: "unknown".into(),
@@ -1370,6 +1402,10 @@ fn build_launch_state(profile: &DesktopProfile, config: &Config) -> Result<Sessi
 }
 
 fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<SessionLaunchState> {
+    let session_instance_id = config
+        .session_instance_id
+        .clone()
+        .unwrap_or_else(|| new_session_instance_id(&profile.id));
     let mut components = Vec::with_capacity(profile.session_components.len());
 
     for component in &profile.session_components {
@@ -1377,7 +1413,7 @@ fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<S
     }
 
     for component in &mut components {
-        component.spawn(&profile.id)?;
+        component.spawn(&profile.id, &session_instance_id)?;
     }
 
     let deadline = Instant::now() + Duration::from_secs(config.supervise_seconds);
@@ -1385,7 +1421,7 @@ fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<S
         let mut had_event = false;
 
         for component in &mut components {
-            if component.poll_and_restart(&profile.id, config.restart_limit)? {
+            if component.poll_and_restart(&profile.id, &session_instance_id, config.restart_limit)? {
                 had_event = true;
             }
         }
@@ -1397,7 +1433,7 @@ fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<S
 
     Ok(SessionLaunchState {
         profile_id: profile.id.clone(),
-        session_instance_id: new_session_instance_id(&profile.id),
+        session_instance_id,
         display_name: profile.display_name.clone(),
         protocol: profile.protocol,
         broker_services: profile.broker_services.clone(),
@@ -1532,29 +1568,24 @@ fn is_executable(path: &Path) -> bool {
     metadata.is_file() && (metadata.permissions().mode() & 0o111 != 0)
 }
 
-fn write_launch_state(state: &SessionLaunchState) -> Result<PathBuf> {
-    let dir = ensure_runtime_dir()?;
-    let path = dir.join(
-        launch_state_path(&state.profile_id)
-            .file_name()
-            .expect("launch state path should have a file name"),
-    );
+fn write_launch_state(state: &SessionLaunchState, session_instance_id: &str) -> Result<PathBuf> {
+    let path = session_artifact_path(session_instance_id, "launch-state");
     let json = serde_json::to_string_pretty(state).context("failed to serialize launch state")?;
     fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
 }
 
-fn write_profile_transition(transition: &SessionProfileTransition) -> Result<PathBuf> {
-    let dir = ensure_runtime_dir()?;
-    let path = dir.join(format!(
-        "profile-transition-{}-to-{}.json",
-        transition.source_profile_id, transition.target_profile_id
-    ));
-    let json = serde_json::to_string_pretty(transition)
-        .context("failed to serialize profile transition")?;
+fn write_profile_transition(
+    transition: &SessionProfileTransition,
+    session_instance_id: &str,
+) -> Result<PathBuf> {
+    let path = session_artifact_path(session_instance_id, "profile-transition");
+    let json =
+        serde_json::to_string_pretty(transition).context("failed to serialize profile transition")?;
     fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
 }
+
 
 fn print_launch_state(state: &SessionLaunchState) {
     println!(
@@ -1663,11 +1694,12 @@ fn persist_watchdog_apply_outcome(
     outcome: &WatchdogApplyOutcome,
     config: &Config,
     supervisor: Option<&mut SessionSupervisor>,
+    session_instance_id: &str,
 ) -> Result<SessionCommand> {
     match outcome {
         WatchdogApplyOutcome::Transition { target_profile, transition } => {
-            let active_path = write_active_profile(target_profile)?;
-            let transition_path = write_profile_transition(transition)?;
+            let active_path = write_active_profile(target_profile, session_instance_id)?;
+            let transition_path = write_profile_transition(transition, session_instance_id)?;
 
             print_profile_transition(transition);
             println!(
@@ -1683,7 +1715,7 @@ fn persist_watchdog_apply_outcome(
                 supervisor.switch_to(target_profile.clone(), config)?;
             } else if should_auto_launch_transition(config) {
                 let launch_state = launch_state_for_profile(target_profile, config)?;
-                let state_path = write_launch_state(&launch_state)?;
+                let state_path = write_launch_state(&launch_state, session_instance_id)?;
                 print_launch_state(&launch_state);
                 println!(
                     "service=sessiond op=persist_outcome event=auto_launch_profile id={}",
@@ -1919,8 +1951,9 @@ struct SessionSupervisor {
 
 impl SessionSupervisor {
     fn bootstrap(config: &Config, profiles: &[DesktopProfile]) -> Result<Self> {
-        let profile = read_active_profile()?;
-        let session_instance_id = new_session_instance_id(&profile.id);
+        let session_instance_id =
+            config.session_instance_id.clone().unwrap_or_else(|| "legacy-single-session".to_string());
+        let profile = read_active_profile(&session_instance_id)?;
         let mut supervisor = Self::new(profile, profiles.to_vec(), session_instance_id, 1, config)?;
         supervisor.activate(config)?;
         Ok(supervisor)
@@ -1956,12 +1989,13 @@ impl SessionSupervisor {
     fn activate(&mut self, config: &Config) -> Result<()> {
         if should_auto_launch_transition(config) {
             for component in &mut self.components {
-                component.spawn(&self.profile.id)?;
+                component.spawn(&self.profile.id, &self.session_instance_id)?;
             }
         }
 
         self.write_snapshot("managed_active_profile", config)
     }
+
 
     fn switch_to(&mut self, profile: DesktopProfile, config: &Config) -> Result<()> {
         self.stop_all()?;
@@ -2014,7 +2048,7 @@ impl SessionSupervisor {
             );
 
             let execution = self.execute_recovery(role, &recovery, config)?;
-            write_watchdog_execution_artifact(&execution)?;
+            write_watchdog_execution_artifact(&execution, &self.session_instance_id)?;
 
             println!(
                 "service=sessiond op=recovery_execution event=finished role={} result={} component={:?} new_pid={:?}",
@@ -2079,7 +2113,7 @@ impl SessionSupervisor {
                 .filter(|b| b.service == role)
                 .map(|b| b.component_id.clone())
                 .collect();
-            write_binding_resolution_artifact(&resolution)?;
+            write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
 
             artifact.result = "config-error".into();
             artifact.reason = "binding collision detected".into();
@@ -2112,7 +2146,7 @@ impl SessionSupervisor {
         if !is_enabled {
             resolution.result = "policy-disabled".into();
             resolution.reason = "recovery execution disabled by policy".into();
-            write_binding_resolution_artifact(&resolution)?;
+            write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
 
             artifact.result = "policy-disabled".into();
             artifact.reason = "recovery execution is disabled by policy".into();
@@ -2135,7 +2169,7 @@ impl SessionSupervisor {
             if !self.components.iter().any(|c| c.component.id == id) {
                 resolution.result = "missing-target".into();
                 resolution.reason = format!("bound component {} not found in profile", id);
-                write_binding_resolution_artifact(&resolution)?;
+                write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
 
                 artifact.result = "config-error".into();
                 artifact.bound_component_id = Some(id);
@@ -2156,7 +2190,7 @@ impl SessionSupervisor {
                     resolution.result = "role-mismatch".into();
                     resolution.reason =
                         format!("expected {:?}, got {:?}", expected, comp.component.role);
-                    write_binding_resolution_artifact(&resolution)?;
+                    write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
 
                     artifact.result = "config-error".into();
                     artifact.bound_component_id = Some(id);
@@ -2166,7 +2200,7 @@ impl SessionSupervisor {
             }
 
             resolution.result = "selected".into();
-            write_binding_resolution_artifact(&resolution)?;
+            write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
 
             artifact.bound_component_id = Some(id.clone());
             println!(
@@ -2194,7 +2228,7 @@ impl SessionSupervisor {
                 if candidates.len() > 1 {
                     resolution.result = "collision".into();
                     resolution.reason = "multiple candidates found for legacy role search".into();
-                    write_binding_resolution_artifact(&resolution)?;
+                    write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
 
                     artifact.result = "config-error".into();
                     artifact.reason = "legacy role ambiguity".into();
@@ -2210,21 +2244,21 @@ impl SessionSupervisor {
                 if candidates.len() == 1 {
                     resolution.result = "selected".into();
                     resolution.selected_component_id = Some(candidates[0].clone());
-                    write_binding_resolution_artifact(&resolution)?;
+                    write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
                     self.components
                         .iter_mut()
                         .find(|c| c.component.role.as_str() == target_role_str)
                 } else {
                     resolution.result = "missing".into();
                     resolution.reason = "no component found for legacy role".into();
-                    write_binding_resolution_artifact(&resolution)?;
+                    write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
                     None
                 }
             } else {
                 resolution.result = "missing".into();
                 resolution.reason =
                     "no explicit binding found and no legacy fallback allowed".into();
-                write_binding_resolution_artifact(&resolution)?;
+                write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
                 None
             }
         };
@@ -2248,7 +2282,11 @@ impl SessionSupervisor {
             "service=sessiond op=recovery_execution event=spawning_component id={} extra_args={:?}",
             component.component.id, artifact.recovery_command_args
         );
-        component.spawn_with_args(&self.profile.id, &artifact.recovery_command_args)?;
+        component.spawn_with_args(
+            &self.profile.id,
+            &self.session_instance_id,
+            &artifact.recovery_command_args,
+        )?;
 
         if component.state.state == DesktopComponentState::Spawned {
             artifact.result = "succeeded".into();
@@ -2266,7 +2304,11 @@ impl SessionSupervisor {
         let mut had_event = self.process_recovery_requests(config)?;
 
         for component in &mut self.components {
-            if component.poll_and_restart(&self.profile.id, config.restart_limit)? {
+            if component.poll_and_restart(
+                &self.profile.id,
+                &self.session_instance_id,
+                config.restart_limit,
+            )? {
                 had_event = true;
             }
         }
@@ -2309,7 +2351,7 @@ impl SessionSupervisor {
 
     fn write_snapshot(&mut self, label: &str, config: &Config) -> Result<()> {
         let launch_state = self.snapshot();
-        let state_path = write_launch_state(&launch_state)?;
+        let state_path = write_launch_state(&launch_state, &self.session_instance_id)?;
         print_launch_state(&launch_state);
         println!(
             "service=sessiond op=snapshot event={} profile={} session_instance={} timestamp={}",
@@ -2345,8 +2387,9 @@ impl SessionSupervisor {
 
         match outcome {
             WatchdogApplyOutcome::Transition { target_profile, transition } => {
-                let active_path = write_active_profile(&target_profile)?;
-                let transition_path = write_profile_transition(&transition)?;
+                let active_path = write_active_profile(&target_profile, &self.session_instance_id)?;
+                let transition_path =
+                    write_profile_transition(&transition, &self.session_instance_id)?;
                 print_profile_transition(&transition);
                 println!("sessiond wrote_active_profile={}", active_path.display());
                 println!("sessiond wrote_profile_transition={}", transition_path.display());
@@ -2374,11 +2417,16 @@ impl RuntimeComponent {
         })
     }
 
-    fn spawn(&mut self, profile_id: &str) -> Result<()> {
-        self.spawn_with_args(profile_id, &[])
+    fn spawn(&mut self, profile_id: &str, session_instance_id: &str) -> Result<()> {
+        self.spawn_with_args(profile_id, session_instance_id, &[])
     }
 
-    fn spawn_with_args(&mut self, profile_id: &str, extra_args: &[String]) -> Result<()> {
+    fn spawn_with_args(
+        &mut self,
+        profile_id: &str,
+        session_instance_id: &str,
+        extra_args: &[String],
+    ) -> Result<()> {
         let Some(command_path) = self.state.resolved_command.as_ref() else {
             self.state.state = DesktopComponentState::Missing;
             self.state.pid = None;
@@ -2388,8 +2436,11 @@ impl RuntimeComponent {
         let child = Command::new(command_path)
             .args(self.component.command.iter().skip(1))
             .args(extra_args)
+            .arg("--session-instance-id")
+            .arg(session_instance_id)
             .env("WAYBROKER_PROFILE_ID", profile_id)
             .env("WAYBROKER_COMPONENT_ID", &self.component.id)
+            .env("WAYBROKER_SESSION_INSTANCE_ID", session_instance_id)
             .spawn();
 
         match child {
@@ -2409,7 +2460,12 @@ impl RuntimeComponent {
         Ok(())
     }
 
-    fn poll_and_restart(&mut self, profile_id: &str, restart_limit: u32) -> Result<bool> {
+    fn poll_and_restart(
+        &mut self,
+        profile_id: &str,
+        session_instance_id: &str,
+        restart_limit: u32,
+    ) -> Result<bool> {
         let Some(child) = self.child.as_mut() else {
             return Ok(false);
         };
@@ -2424,7 +2480,7 @@ impl RuntimeComponent {
         self.child = None;
 
         if self.component.critical && self.state.restart_count <= restart_limit {
-            self.spawn(profile_id)?;
+            self.spawn(profile_id, session_instance_id)?;
         } else {
             self.state.state = DesktopComponentState::Failed;
         }

@@ -18,7 +18,7 @@ pub use profile::{
 };
 pub use transport::{
     bind_service_socket, connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir,
-    send_json_line, service_socket_path,
+    send_json_line, service_socket_path, session_artifact_path,
 };
 
 pub fn now_unix_timestamp() -> u64 {

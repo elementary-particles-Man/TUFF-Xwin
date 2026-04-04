@@ -275,6 +275,8 @@ pub struct SessionWatchdogComponentReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionWatchdogReport {
     pub profile_id: String,
+    #[serde(default = "default_session_instance_id")]
+    pub session_instance_id: String,
     pub display_name: String,
     pub protocol: DesktopProtocol,
     pub healthy_components: usize,

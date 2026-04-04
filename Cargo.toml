@@ -9,6 +9,7 @@ members = [
     "crates/watchdog",
     "crates/waybroker-common",
     "crates/waylandd",
+    "crates/vulkan-backend"
 ]
 resolver = "3"
 
@@ -23,4 +24,6 @@ version = "0.1.0"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
 waybroker-common = { path = "crates/waybroker-common" }
+vulkan-backend = { path = "crates/vulkan-backend" }

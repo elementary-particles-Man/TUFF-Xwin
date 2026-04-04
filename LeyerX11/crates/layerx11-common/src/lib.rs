@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
-use waybroker_common::{FocusTarget, SurfacePlacement, SurfaceSnapshot};
+use waybroker_common::{FocusTarget, SurfacePlacement, SurfaceSnapshot, WaylandSelectionState};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct X11RootlessScene {
     pub output: X11OutputTarget,
     pub focus_window: Option<String>,
+    #[serde(default)]
+    pub selection: X11SelectionState,
     pub windows: Vec<X11Window>,
 }
 
@@ -39,9 +41,30 @@ impl X11RootlessScene {
         }
     }
 
+    pub fn selection_state(&self) -> WaylandSelectionState {
+        WaylandSelectionState {
+            clipboard_owner: self.selection.clipboard_owner.clone(),
+            clipboard_payload_id: self.selection.clipboard_payload_id.clone(),
+            clipboard_source_serial: self.selection.clipboard_source_serial,
+            primary_selection_owner: self.selection.primary_selection_owner.clone(),
+            primary_selection_payload_id: self.selection.primary_selection_payload_id.clone(),
+            primary_selection_source_serial: self.selection.primary_selection_source_serial,
+        }
+    }
+
     pub fn mapped_window_count(&self) -> usize {
         self.mapped_windows().count()
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct X11SelectionState {
+    pub clipboard_owner: Option<String>,
+    pub clipboard_payload_id: Option<String>,
+    pub clipboard_source_serial: Option<u64>,
+    pub primary_selection_owner: Option<String>,
+    pub primary_selection_payload_id: Option<String>,
+    pub primary_selection_source_serial: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +104,14 @@ pub fn sample_rootless_scene() -> X11RootlessScene {
     X11RootlessScene {
         output: X11OutputTarget { name: "eDP-1".into(), width: 1920, height: 1080 },
         focus_window: Some("xterm-1".into()),
+        selection: X11SelectionState {
+            clipboard_owner: Some("xterm-1".into()),
+            clipboard_payload_id: Some("x11-clipboard-v1".into()),
+            clipboard_source_serial: Some(101),
+            primary_selection_owner: Some("xterm-1".into()),
+            primary_selection_payload_id: Some("x11-primary-v1".into()),
+            primary_selection_source_serial: Some(102),
+        },
         windows: vec![
             X11Window {
                 id: "xterm-1".into(),
