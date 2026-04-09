@@ -2,7 +2,6 @@ use std::{
     env, fs,
     io::{BufReader, ErrorKind},
     os::unix::fs::PermissionsExt,
-    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command},
     thread,
@@ -12,10 +11,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use waybroker_common::{
     DesktopComponent, DesktopComponentState, DesktopProfile, DesktopRecoveryAction, IpcEnvelope,
-    MessageKind, ServiceBanner, ServiceRole, SessionCommand, SessionLaunchComponentState,
-    SessionLaunchDelta, SessionLaunchState, SessionProfileTransition, SessionWatchdogReport,
-    WatchdogCommand, bind_service_socket, connect_service_socket, ensure_runtime_dir,
-    now_unix_timestamp, read_json_line, runtime_dir, send_json_line, session_artifact_path,
+    MessageKind, ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, SessionCommand,
+    SessionLaunchComponentState, SessionLaunchDelta, SessionLaunchState, SessionProfileTransition,
+    SessionWatchdogReport, WatchdogCommand, bind_service_socket, connect_service_socket,
+    ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
     validate_session_instance_id,
 };
 
@@ -1270,12 +1269,12 @@ fn send_ipc_and_wait(destination: ServiceRole, kind: MessageKind) -> Result<IpcE
 }
 
 fn serve_ipc(config: &Config, profiles: &[DesktopProfile]) -> Result<()> {
-    let (listener, socket_path) = bind_service_socket(ServiceRole::Sessiond)?;
-    let _socket_guard = SocketGuard::new(socket_path.clone());
+    let listener = bind_service_socket(ServiceRole::Sessiond)?;
+    let _socket_guard = SocketGuard::new(listener.endpoint().clone());
     listener
         .set_nonblocking(true)
-        .with_context(|| format!("failed to set nonblocking mode on {}", socket_path.display()))?;
-    println!("sessiond listening socket={}", socket_path.display());
+        .with_context(|| format!("failed to set nonblocking mode on {}", listener.endpoint()))?;
+    println!("sessiond listening socket={}", listener.endpoint());
 
     let mut supervisor = if config.manage_active {
         Some(SessionSupervisor::bootstrap(config, profiles)?)
@@ -1303,7 +1302,7 @@ fn serve_ipc(config: &Config, profiles: &[DesktopProfile]) -> Result<()> {
             }
             Err(err) => {
                 return Err(err)
-                    .with_context(|| format!("failed to accept on {}", socket_path.display()));
+                    .with_context(|| format!("failed to accept on {}", listener.endpoint()));
             }
         }
     }
@@ -1313,7 +1312,7 @@ fn serve_ipc(config: &Config, profiles: &[DesktopProfile]) -> Result<()> {
 }
 
 fn handle_client(
-    mut stream: UnixStream,
+    mut stream: ServiceStream,
     profiles: &[DesktopProfile],
     config: &Config,
     supervisor: Option<&mut SessionSupervisor>,
@@ -1915,18 +1914,18 @@ enum WatchdogApplyOutcome {
 }
 
 struct SocketGuard {
-    path: PathBuf,
+    endpoint: ServiceEndpoint,
 }
 
 impl SocketGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    fn new(endpoint: ServiceEndpoint) -> Self {
+        Self { endpoint }
     }
 }
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = self.endpoint.cleanup_stale();
     }
 }
 

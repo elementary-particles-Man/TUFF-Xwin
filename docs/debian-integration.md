@@ -1,11 +1,19 @@
 # Debian Integration
 
+この文書は Debian 固有の baseline です。major Linux 全体の受け口は [linux-distro-socket.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/linux-distro-socket.md) を参照してください。
+
 `TUFF-Xwin` を Debian へ常設注入する時の最小構成です。ここでは rootless な `systemd --user` 常駐を前提にし、次の 2 層に分けます。
 
 - system-wide:
   `default.target = multi-user.target` にして display manager へ依存しない
 - user-space:
   `displayd` / `waylandd` / `lockd` / `watchdog` / `sessiond` を `systemd --user` target で束ねる
+
+## 実行環境方針
+
+- 通常の install / start / recover 導線は `Bash` と `Rust` だけを前提にする
+- `python3` は Debian 統合導線の必須要件にしない
+- 将来の helper は可能な限り `Rust crate` か `Bash` に寄せる
 
 ## 何を入れるか
 

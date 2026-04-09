@@ -2,7 +2,7 @@
   "id": "host-wayland",
   "display_name": "Host Wayland Session on Waybroker",
   "protocol": "wayland-native",
-  "summary": "Debian 常設向けの Wayland native profile。broker 群は TUFF-Xwin が担い、上位 shell はホスト OS 側のコマンドで差し替える。",
+  "summary": "major Linux distro 向けの Wayland native profile。broker 群は TUFF-Xwin が担い、上位 shell は host distro socket が埋める。",
   "degraded_profile_id": "demo-wayland-compd-recovery",
   "broker_services": [
     "displayd",

@@ -1,7 +1,6 @@
 use std::{
     env, fs,
     io::BufReader,
-    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -12,8 +11,8 @@ use vulkan_backend::{
 };
 use waybroker_common::{
     CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputMode,
-    ServiceBanner, ServiceRole, bind_service_socket, ensure_runtime_dir, now_unix_timestamp,
-    read_json_line, send_json_line, session_artifact_path,
+    ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, bind_service_socket,
+    ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
@@ -38,9 +37,9 @@ async fn main() -> Result<()> {
 
     let mut state = DisplayState::load(&config.session_instance_id)?;
 
-    let (listener, socket_path) = bind_service_socket(ServiceRole::Displayd)?;
-    let _socket_guard = SocketGuard::new(socket_path.clone());
-    println!("service=displayd op=listen event=socket_bound path={}", socket_path.display());
+    let listener = bind_service_socket(ServiceRole::Displayd)?;
+    let _socket_guard = SocketGuard::new(listener.endpoint().clone());
+    println!("service=displayd op=listen event=socket_bound path={}", listener.endpoint());
 
     let mut served = 0usize;
     for stream in listener.incoming() {
@@ -94,7 +93,7 @@ impl Config {
 }
 
 async fn handle_client(
-    mut stream: UnixStream,
+    mut stream: ServiceStream,
     config: &Config,
     state: &mut DisplayState,
     vulkan: Option<&VulkanBackend>,
@@ -324,17 +323,17 @@ fn stub_output_mode() -> OutputMode {
 }
 
 struct SocketGuard {
-    path: PathBuf,
+    endpoint: ServiceEndpoint,
 }
 
 impl SocketGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    fn new(endpoint: ServiceEndpoint) -> Self {
+        Self { endpoint }
     }
 }
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = self.endpoint.cleanup_stale();
     }
 }

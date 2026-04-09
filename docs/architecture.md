@@ -14,7 +14,7 @@ Wayland Apps   Xwayland   Plasma Shell   KScreenLocker
                       |
             logind / libinput / DRM/KMS
                       |
-             [ Debian Linux Kernel ]
+             [ Linux Kernel ]
 ```
 
 この構造では `KWin` が大きすぎます。`KWin` が詰まると、表示、入力、ウィンドウ管理、ロック画面、場合によってはセッション管理まで巻き込みます。
@@ -44,7 +44,7 @@ Wayland Apps   Xwayland   Plasma Shell   KScreenLocker
             |
             +-------------------------- [ sessiond ]
                     |
-             [ Debian Linux Kernel ]
+             [ Linux Kernel ]
 ```
 
 ## 重要な原則

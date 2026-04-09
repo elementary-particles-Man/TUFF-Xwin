@@ -15,6 +15,7 @@
 - `demo-x11-crashy.json`
 - `demo-x11-degraded.json`
 - `demo-wayland-compd-recovery.json`
+- `host-wayland.json`
 - `xfce-x11.json`
 - `openbox-x11.json`
 
@@ -27,6 +28,9 @@
 - `demo-wayland-compd-recovery`
   - `sessiond/watchdog` 経由で `compd` broker を restart し、`displayd + waylandd` snapshot から scene rebuild と selection handoff を行う `Wayland native` demo profile
   - broker-owned `lockd` を使い、session component 側は `shell` / `panel` / `settings-daemon` / `applet` を含む最小 native skeleton として使う
+- `host-wayland`
+  - `Debian/Ubuntu` と `Fedora/RHEL` 系の major Linux を受けるための常設 profile
+  - host shell / panel / settings daemon の差分は `tuff-xwin-distro-socket.sh` が埋める
 - `xfce-x11`, `openbox-x11`
   - 実際の package 導入を前提にする rootless `X11` profile
 

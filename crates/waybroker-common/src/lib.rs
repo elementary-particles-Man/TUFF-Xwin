@@ -17,9 +17,9 @@ pub use profile::{
     SessionWatchdogComponentReport, SessionWatchdogReport,
 };
 pub use transport::{
-    bind_service_socket, connect_service_socket, ensure_runtime_dir, read_json_line, runtime_dir,
-    sanitize_session_instance_id, send_json_line, service_socket_path, session_artifact_path,
-    validate_session_instance_id,
+    ServiceEndpoint, ServiceListener, ServiceStream, bind_service_socket, connect_service_socket,
+    ensure_runtime_dir, read_json_line, runtime_dir, sanitize_session_instance_id, send_json_line,
+    service_socket_path, session_artifact_path, validate_session_instance_id,
 };
 
 pub fn now_unix_timestamp() -> u64 {
