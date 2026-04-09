@@ -1,9 +1,9 @@
-use std::{env, fs, io::BufReader, os::unix::net::UnixStream, path::PathBuf};
+use std::{env, io::BufReader};
 
 use anyhow::{Result, bail};
 use waybroker_common::{
-    IpcEnvelope, LockCommand, LockState, MessageKind, ServiceBanner, ServiceRole,
-    bind_service_socket, read_json_line, send_json_line,
+    IpcEnvelope, LockCommand, LockState, MessageKind, ServiceBanner, ServiceEndpoint, ServiceRole,
+    ServiceStream, bind_service_socket, read_json_line, send_json_line,
 };
 
 fn main() -> Result<()> {
@@ -49,9 +49,9 @@ impl Config {
 }
 
 fn serve_ipc(config: &Config) -> Result<()> {
-    let (listener, socket_path) = bind_service_socket(ServiceRole::Lockd)?;
-    let _socket_guard = SocketGuard::new(socket_path.clone());
-    println!("service=lockd op=listen event=socket_bound path={}", socket_path.display());
+    let listener = bind_service_socket(ServiceRole::Lockd)?;
+    let _socket_guard = SocketGuard::new(listener.endpoint().clone());
+    println!("service=lockd op=listen event=socket_bound path={}", listener.endpoint());
 
     let mut current_state = LockState::Unlocked;
     println!("service=lockd op=status event=ready current_state={:?}", current_state);
@@ -72,7 +72,7 @@ fn serve_ipc(config: &Config) -> Result<()> {
 }
 
 fn handle_client(
-    mut stream: UnixStream,
+    mut stream: ServiceStream,
     current_state: &mut LockState,
     config: &Config,
 ) -> Result<()> {
@@ -137,18 +137,18 @@ fn build_response(
 }
 
 struct SocketGuard {
-    path: PathBuf,
+    endpoint: ServiceEndpoint,
 }
 
 impl SocketGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    fn new(endpoint: ServiceEndpoint) -> Self {
+        Self { endpoint }
     }
 }
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = self.endpoint.cleanup_stale();
     }
 }
 
@@ -158,8 +158,7 @@ mod tests {
 
     #[test]
     fn state_transition_works() {
-        let mut state = LockState::Unlocked;
-        state = LockState::Locked;
+        let state = LockState::Locked;
         assert_eq!(state, LockState::Locked);
     }
 }

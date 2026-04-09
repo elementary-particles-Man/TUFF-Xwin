@@ -46,8 +46,12 @@ cargo test --workspace
 ./scripts/run-multi-session-recovery-isolation-smoke.sh
 ```
 
-### Debian への統合
-`TUFF-Xwin` を Debian の user-space へ常設配置し、`systemd --user` で broker 群を束ねる最小導線を用意しています。
+### major Linux distro socket
+`TUFF-Xwin` を major Linux の user-space へ常設配置し、`systemd --user` で broker 群を束ねる最小導線を用意しています。
+
+- first-class support は `Debian / Ubuntu` 系と `Fedora / RHEL` 系に絞ります
+- 常用導線は `Bash` と `Rust` のみを前提にします
+- `python3` や追加スクリプト実行環境を必須要件にはしません
 
 ```bash
 # user-space へ broker binary / launcher / systemd --user unit を配置
@@ -57,7 +61,7 @@ cargo test --workspace
 ~/.local/bin/tuff-xwin-start host-wayland
 ```
 
-詳細は [docs/debian-integration.md](docs/debian-integration.md) を参照してください。
+詳細は [docs/linux-distro-socket.md](docs/linux-distro-socket.md) を参照してください。
 
 ### CUI へ落ちた後の一発復帰
 `tty1` や CUI に戻ったあと、次の 1 コマンドで active profile を再選択し、`displayd`, `waylandd`, `lockd`, `watchdog`, `sessiond` をまとめて復旧できます。
@@ -118,8 +122,12 @@ cargo test --workspace
 ./scripts/run-multi-session-recovery-isolation-smoke.sh
 ```
 
-### Debian Integration
-This repository now includes a minimal Debian user-space integration path that stages TUFF-Xwin brokers under the user's home directory and manages them with `systemd --user`.
+### Major Linux Distro Socket
+This repository now includes a major-Linux host socket that stages TUFF-Xwin brokers under the user's home directory and manages them with `systemd --user`.
+
+- First-class support is scoped to `Debian / Ubuntu` and `Fedora / RHEL` families
+- The normal install/recovery flow is intended to rely on `Bash` and `Rust` only
+- `python3` is not part of the required runtime contract
 
 ```bash
 # Install broker binaries, launchers, and systemd --user units
@@ -129,7 +137,7 @@ This repository now includes a minimal Debian user-space integration path that s
 ~/.local/bin/tuff-xwin-start host-wayland
 ```
 
-For the full flow, see [docs/debian-integration.md](docs/debian-integration.md).
+For the full flow, see [docs/linux-distro-socket.md](docs/linux-distro-socket.md).
 
 ### One-Command Recovery After Dropping to CUI
 If the graphical stack falls back to `tty1` or plain CUI, recover the active profile and restart the TUFF-Xwin broker set with:
@@ -148,7 +156,8 @@ To force a specific profile:
 
 ## Documentation
 - [docs/architecture.md](docs/architecture.md) - High-level architecture
-- [docs/debian-integration.md](docs/debian-integration.md) - Debian user-space install and recovery flow
+- [docs/linux-distro-socket.md](docs/linux-distro-socket.md) - Major Linux distro host socket
+- [docs/debian-integration.md](docs/debian-integration.md) - Debian-specific baseline notes
 - [docs/session-instance-id-contract.md](docs/session-instance-id-contract.md) - Safety & Path Contracts
 - [docs/privacy-artifacts.md](docs/privacy-artifacts.md) - Privacy & Artifacts Policy
 - [docs/runtime-security.md](docs/runtime-security.md) - Runtime Security Guidelines

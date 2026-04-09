@@ -2,18 +2,17 @@ use std::{
     collections::HashMap,
     env, fs,
     io::BufReader,
-    os::unix::net::UnixStream,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 use waybroker_common::{
     DesktopComponentState, DesktopHealthStatus, DesktopRecoveryAction, IpcEnvelope, MessageKind,
-    ServiceBanner, ServiceRole, SessionCommand, SessionLaunchComponentState, SessionLaunchDelta,
-    SessionLaunchState, SessionWatchdogComponentReport, SessionWatchdogReport, WatchdogCommand,
-    bind_service_socket, connect_service_socket, ensure_runtime_dir, now_unix_timestamp,
-    read_json_line, runtime_dir, send_json_line, session_artifact_path,
-    validate_session_instance_id,
+    ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, SessionCommand,
+    SessionLaunchComponentState, SessionLaunchDelta, SessionLaunchState,
+    SessionWatchdogComponentReport, SessionWatchdogReport, WatchdogCommand, bind_service_socket,
+    connect_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line, runtime_dir,
+    send_json_line, session_artifact_path, validate_session_instance_id,
 };
 
 fn main() -> Result<()> {
@@ -110,9 +109,9 @@ impl Config {
 }
 
 fn serve_ipc(config: &Config) -> Result<()> {
-    let (listener, socket_path) = bind_service_socket(ServiceRole::Watchdog)?;
-    let _socket_guard = SocketGuard::new(socket_path.clone());
-    println!("watchdog listening socket={}", socket_path.display());
+    let listener = bind_service_socket(ServiceRole::Watchdog)?;
+    let _socket_guard = SocketGuard::new(listener.endpoint().clone());
+    println!("watchdog listening socket={}", listener.endpoint());
     let mut server = WatchdogServer::default();
 
     let mut served = 0usize;
@@ -131,7 +130,7 @@ fn serve_ipc(config: &Config) -> Result<()> {
 }
 
 fn handle_client(
-    mut stream: UnixStream,
+    mut stream: ServiceStream,
     config: &Config,
     server: &mut WatchdogServer,
 ) -> Result<()> {
@@ -736,18 +735,18 @@ fn print_sessiond_response(response: &IpcEnvelope) {
 }
 
 struct SocketGuard {
-    path: PathBuf,
+    endpoint: ServiceEndpoint,
 }
 
 impl SocketGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    fn new(endpoint: ServiceEndpoint) -> Self {
+        Self { endpoint }
     }
 }
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = self.endpoint.cleanup_stale();
     }
 }
 

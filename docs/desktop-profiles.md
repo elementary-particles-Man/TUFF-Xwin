@@ -25,6 +25,8 @@
 
 つまり、`Waybroker` は GUI そのものではなく、GUI を載せ替えるための最小 display/session manager です。
 
+major Linux 向けには `host-wayland` を first-class profile として持ち、`Debian/Ubuntu` と `Fedora/RHEL` 系の差分は distro socket 側へ逃がします。
+
 ## X11 First Strategy
 
 最初は `X11` profile を先に作ります。理由は次です。

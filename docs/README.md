@@ -1,6 +1,6 @@
 # Waybroker
 
-`Waybroker` は、既存の `Debian Linux kernel` をそのまま使いながら、`KDE Plasma` や `GNOME` の表示系を故障分離するための構想メモです。内部コードネームとして `TUFF-Xwin` を併記します。目的は新しいカーネルを作ることではなく、`display/input/session` の責務を分割し、`compositor` が落ちても OS 全体や作業セッションを巻き込まない構成を作ることです。
+`Waybroker` は、既存の `Linux kernel` をそのまま使いながら、`KDE Plasma` や `GNOME` の表示系を故障分離するための構想メモです。内部コードネームとして `TUFF-Xwin` を併記します。目的は新しいカーネルを作ることではなく、`display/input/session` の責務を分割し、`compositor` が落ちても OS 全体や作業セッションを巻き込まない構成を作ることです。
 
 ## なぜ必要か
 
@@ -10,7 +10,7 @@
 
 ## 設計目標
 
-- `Debian kernel` はそのまま使う
+- `Linux kernel` はそのまま使う
 - `KDE Plasma` や `GNOME` の上位 UX は極力維持する
 - `compositor` が落ちても kernel や session 全体は落とさない
 - `lockscreen`、`power management`、`policy` を display server 本体から分離する
@@ -36,7 +36,7 @@ Apps / Plasma / Xwayland
           |
           +------------ [ sessiond ]
           |
-  [ Debian Linux Kernel ]
+  [ Linux Kernel ]
 ```
 
 - `displayd`: `DRM/KMS`、`input`、`seat` の最小特権 broker
@@ -60,6 +60,7 @@ Apps / Plasma / Xwayland
 - [crash-loop-policy.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/crash-loop-policy.md): watchdog の再起動と degraded mode の基準
 - [desktop-profiles.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/desktop-profiles.md): GUI を broker 本体から分離し、profile として選択する方針
 - [debian-integration.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/debian-integration.md): Debian へ user-space 常設統合する手順
+- [linux-distro-socket.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/linux-distro-socket.md): Debian/Ubuntu と Fedora/RHEL 系を first-class support に絞った host socket
 
 ## ひとことで言うと
 

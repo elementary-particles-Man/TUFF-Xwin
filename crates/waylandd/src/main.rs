@@ -1,4 +1,4 @@
-use std::{env, fs, io::BufReader, os::unix::net::UnixStream, path::PathBuf, time::Duration};
+use std::{env, fs, io::BufReader, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use vulkan_backend::{
@@ -6,10 +6,10 @@ use vulkan_backend::{
 };
 use waybroker_common::{
     DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope, MessageKind, OutputMode, ServiceBanner,
-    ServiceRole, SurfaceRegistrySnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff,
-    WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState, bind_service_socket,
-    connect_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line,
-    session_artifact_path,
+    ServiceEndpoint, ServiceRole, ServiceStream, SurfaceRegistrySnapshot, WaylandCommand,
+    WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
+    WaylandSurfaceState, bind_service_socket, connect_service_socket, ensure_runtime_dir,
+    now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
@@ -121,9 +121,9 @@ async fn serve_ipc(
     registry: &mut SurfaceRegistrySnapshot,
     vulkan: Option<&VulkanBackend>,
 ) -> Result<()> {
-    let (listener, socket_path) = bind_service_socket(ServiceRole::Waylandd)?;
-    let _socket_guard = SocketGuard::new(socket_path.clone());
-    println!("service=waylandd op=listen event=socket_bound path={}", socket_path.display());
+    let listener = bind_service_socket(ServiceRole::Waylandd)?;
+    let _socket_guard = SocketGuard::new(listener.endpoint().clone());
+    println!("service=waylandd op=listen event=socket_bound path={}", listener.endpoint());
 
     let mut served = 0usize;
     for stream in listener.incoming() {
@@ -141,7 +141,7 @@ async fn serve_ipc(
 }
 
 async fn handle_client(
-    mut stream: UnixStream,
+    mut stream: ServiceStream,
     registry: &mut SurfaceRegistrySnapshot,
     vulkan: Option<&VulkanBackend>,
     session_instance_id: &str,
@@ -424,18 +424,18 @@ fn format_outputs(outputs: &[OutputMode]) -> String {
 }
 
 struct SocketGuard {
-    path: PathBuf,
+    endpoint: ServiceEndpoint,
 }
 
 impl SocketGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    fn new(endpoint: ServiceEndpoint) -> Self {
+        Self { endpoint }
     }
 }
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = self.endpoint.cleanup_stale();
     }
 }
 

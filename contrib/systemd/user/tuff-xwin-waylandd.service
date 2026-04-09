@@ -7,7 +7,7 @@ Requires=tuff-xwin-displayd.service
 [Service]
 Type=simple
 EnvironmentFile=%h/.config/tuff-xwin/session.env
-ExecStart=%h/.local/share/tuff-xwin/bin/waylandd --serve-ipc --require-displayd $TUFF_XWIN_WAYLANDD_ARGS --session-instance-id ${TUFF_XWIN_SESSION_INSTANCE_ID}
+ExecStart=${TUFF_XWIN_PREFIX}/bin/waylandd --serve-ipc --require-displayd $TUFF_XWIN_WAYLANDD_ARGS --session-instance-id ${TUFF_XWIN_SESSION_INSTANCE_ID}
 Restart=on-failure
 RestartSec=1
 
