@@ -1,0 +1,15 @@
+[Unit]
+Description=TUFF-Xwin session supervisor
+PartOf=tuff-xwin.target
+After=tuff-xwin-displayd.service tuff-xwin-waylandd.service tuff-xwin-lockd.service tuff-xwin-watchdog.service
+Requires=tuff-xwin-displayd.service tuff-xwin-waylandd.service tuff-xwin-lockd.service tuff-xwin-watchdog.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/tuff-xwin/session.env
+ExecStart=%h/.local/share/tuff-xwin/bin/sessiond --repo-root ${TUFF_XWIN_REPO_ROOT} --profiles-dir ${TUFF_XWIN_PROFILES_DIR} --serve-ipc --manage-active --spawn-components --notify-watchdog --session-instance-id ${TUFF_XWIN_SESSION_INSTANCE_ID} $TUFF_XWIN_SESSIOND_ARGS
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=tuff-xwin.target

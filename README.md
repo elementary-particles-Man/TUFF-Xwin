@@ -46,6 +46,34 @@ cargo test --workspace
 ./scripts/run-multi-session-recovery-isolation-smoke.sh
 ```
 
+### Debian への統合
+`TUFF-Xwin` を Debian の user-space へ常設配置し、`systemd --user` で broker 群を束ねる最小導線を用意しています。
+
+```bash
+# user-space へ broker binary / launcher / systemd --user unit を配置
+./scripts/install-user.sh
+
+# 通常起動
+~/.local/bin/tuff-xwin-start host-wayland
+```
+
+詳細は [docs/debian-integration.md](docs/debian-integration.md) を参照してください。
+
+### CUI へ落ちた後の一発復帰
+`tty1` や CUI に戻ったあと、次の 1 コマンドで active profile を再選択し、`displayd`, `waylandd`, `lockd`, `watchdog`, `sessiond` をまとめて復旧できます。
+
+```bash
+~/.local/bin/tuff-xwin-recover
+```
+
+特定 profile を明示したい場合:
+
+```bash
+~/.local/bin/tuff-xwin-recover host-wayland
+```
+
+`~/.profile` からは `tuff-xwin-autostart` を呼び、`tty1` ログイン直後に復旧優先で再起動する構成です。
+
 ---
 
 <a name="english"></a>
@@ -90,8 +118,37 @@ cargo test --workspace
 ./scripts/run-multi-session-recovery-isolation-smoke.sh
 ```
 
+### Debian Integration
+This repository now includes a minimal Debian user-space integration path that stages TUFF-Xwin brokers under the user's home directory and manages them with `systemd --user`.
+
+```bash
+# Install broker binaries, launchers, and systemd --user units
+./scripts/install-user.sh
+
+# Start the default host-backed Wayland profile
+~/.local/bin/tuff-xwin-start host-wayland
+```
+
+For the full flow, see [docs/debian-integration.md](docs/debian-integration.md).
+
+### One-Command Recovery After Dropping to CUI
+If the graphical stack falls back to `tty1` or plain CUI, recover the active profile and restart the TUFF-Xwin broker set with:
+
+```bash
+~/.local/bin/tuff-xwin-recover
+```
+
+To force a specific profile:
+
+```bash
+~/.local/bin/tuff-xwin-recover host-wayland
+```
+
+`tuff-xwin-autostart` is wired for `tty1` login shells so recovery is preferred over a cold start.
+
 ## Documentation
 - [docs/architecture.md](docs/architecture.md) - High-level architecture
+- [docs/debian-integration.md](docs/debian-integration.md) - Debian user-space install and recovery flow
 - [docs/session-instance-id-contract.md](docs/session-instance-id-contract.md) - Safety & Path Contracts
 - [docs/privacy-artifacts.md](docs/privacy-artifacts.md) - Privacy & Artifacts Policy
 - [docs/runtime-security.md](docs/runtime-security.md) - Runtime Security Guidelines

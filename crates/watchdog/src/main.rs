@@ -653,6 +653,7 @@ fn write_recovery_artifact(
     artifact: &WatchdogRecoveryArtifact,
     session_instance_id: &str,
 ) -> Result<PathBuf> {
+    let _ = ensure_runtime_dir()?;
     let path =
         session_artifact_path(session_instance_id, &format!("watchdog-recovery-{}", artifact.role));
     let json = serde_json::to_string_pretty(artifact)
@@ -662,6 +663,7 @@ fn write_recovery_artifact(
 }
 
 fn write_report(report: &SessionWatchdogReport) -> Result<PathBuf> {
+    let _ = ensure_runtime_dir()?;
     let path = session_artifact_path(&report.session_instance_id, "watchdog-report");
     let json =
         serde_json::to_string_pretty(report).context("failed to serialize watchdog report")?;

@@ -99,6 +99,7 @@ fn write_binding_collision_report(
     report: &BindingCollisionReport,
     session_instance_id: &str,
 ) -> Result<PathBuf> {
+    let _ = ensure_runtime_dir()?;
     let path = session_artifact_path(session_instance_id, "binding-collision-report");
     let json =
         serde_json::to_string_pretty(report).context("failed to serialize collision report")?;
@@ -110,6 +111,7 @@ fn write_binding_resolution_artifact(
     resolution: &BindingResolutionResult,
     session_instance_id: &str,
 ) -> Result<PathBuf> {
+    let _ = ensure_runtime_dir()?;
     let path = session_artifact_path(
         session_instance_id,
         &format!("binding-resolution-{}", resolution.service),
@@ -124,6 +126,7 @@ fn write_watchdog_execution_artifact(
     execution: &WatchdogExecutionArtifact,
     session_instance_id: &str,
 ) -> Result<PathBuf> {
+    let _ = ensure_runtime_dir()?;
     let path = session_artifact_path(
         session_instance_id,
         &format!("watchdog-action-execution-{}", execution.role),
@@ -507,6 +510,7 @@ fn load_profiles(dir: &Path) -> Result<Vec<DesktopProfile>> {
 }
 
 fn write_active_profile(profile: &DesktopProfile, session_instance_id: &str) -> Result<PathBuf> {
+    let _ = ensure_runtime_dir()?;
     let path = session_artifact_path(session_instance_id, "active-profile");
     let json =
         serde_json::to_string_pretty(profile).context("failed to serialize active profile")?;
@@ -1235,6 +1239,7 @@ fn write_lock_path_artifact(
     artifact: &LockPathArtifact,
     session_instance_id: &str,
 ) -> Result<PathBuf> {
+    let _ = ensure_runtime_dir()?;
     let path =
         session_artifact_path(session_instance_id, &format!("lock-ui-path-{}", artifact.scenario));
     let json =
@@ -1245,6 +1250,7 @@ fn write_lock_path_artifact(
 }
 
 fn write_resume_trace(trace: &ResumeTrace, session_instance_id: &str) -> Result<PathBuf> {
+    let _ = ensure_runtime_dir()?;
     let path =
         session_artifact_path(session_instance_id, &format!("resume-trace-{}", trace.scenario));
     let json = serde_json::to_string_pretty(trace).context("failed to serialize resume trace")?;
@@ -1583,6 +1589,7 @@ fn is_executable(path: &Path) -> bool {
 }
 
 fn write_launch_state(state: &SessionLaunchState, session_instance_id: &str) -> Result<PathBuf> {
+    let _ = ensure_runtime_dir()?;
     let path = session_artifact_path(session_instance_id, "launch-state");
     let json = serde_json::to_string_pretty(state).context("failed to serialize launch state")?;
     fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
@@ -1593,6 +1600,7 @@ fn write_profile_transition(
     transition: &SessionProfileTransition,
     session_instance_id: &str,
 ) -> Result<PathBuf> {
+    let _ = ensure_runtime_dir()?;
     let path = session_artifact_path(session_instance_id, "profile-transition");
     let json = serde_json::to_string_pretty(transition)
         .context("failed to serialize profile transition")?;

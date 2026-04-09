@@ -1,0 +1,76 @@
+{
+  "id": "host-wayland",
+  "display_name": "Host Wayland Session on Waybroker",
+  "protocol": "wayland-native",
+  "summary": "Debian 常設向けの Wayland native profile。broker 群は TUFF-Xwin が担い、上位 shell はホスト OS 側のコマンドで差し替える。",
+  "degraded_profile_id": "demo-wayland-compd-recovery",
+  "broker_services": [
+    "displayd",
+    "sessiond",
+    "watchdog",
+    "waylandd",
+    "lockd"
+  ],
+  "session_components": [
+    {
+      "id": "broker-compd",
+      "role": "window-manager",
+      "command": ["compd", "--serve-ipc"],
+      "critical": true,
+      "launcher": "repo-binary"
+    },
+    {
+      "id": "host-shell",
+      "role": "shell",
+      "command": [
+        "/bin/sh",
+        "-lc",
+        "exec ${TUFF_XWIN_HOST_SHELL:-gnome-shell --nested --wayland}"
+      ],
+      "critical": true
+    },
+    {
+      "id": "host-panel",
+      "role": "panel",
+      "command": [
+        "/bin/sh",
+        "-lc",
+        "if [ -n \"${TUFF_XWIN_HOST_PANEL:-}\" ]; then exec ${TUFF_XWIN_HOST_PANEL}; else exec sleep infinity; fi"
+      ],
+      "critical": false
+    },
+    {
+      "id": "host-settingsd",
+      "role": "settings-daemon",
+      "command": [
+        "/bin/sh",
+        "-lc",
+        "if [ -n \"${TUFF_XWIN_HOST_SETTINGSD:-}\" ]; then exec ${TUFF_XWIN_HOST_SETTINGSD}; else exec sleep infinity; fi"
+      ],
+      "critical": false
+    }
+  ],
+  "service_component_bindings": [
+    {
+      "service": "compd",
+      "component_id": "broker-compd"
+    }
+  ],
+  "service_recovery_execution_policies": [
+    {
+      "service": "compd",
+      "mode": "supervisor-restart",
+      "restart_command_args": [
+        "--restore-from-displayd",
+        "--reconcile-waylandd",
+        "--handoff-selection",
+        "--require-displayd",
+        "--require-waylandd"
+      ]
+    },
+    {
+      "service": "lockd",
+      "mode": "supervisor-restart"
+    }
+  ]
+}

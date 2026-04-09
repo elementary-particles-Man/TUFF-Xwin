@@ -220,6 +220,7 @@ struct DisplayState {
 
 impl DisplayState {
     fn load(session_instance_id: &str) -> Result<Self> {
+        let _ = ensure_runtime_dir()?;
         let snapshot_path = session_artifact_path(session_instance_id, "scene-snapshot");
         let last_scene = load_scene_snapshot(&snapshot_path)?;
         let next_commit_id =

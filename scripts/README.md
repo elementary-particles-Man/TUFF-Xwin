@@ -11,3 +11,8 @@
 - `run-scene-recovery-demo.sh`: `displayd` の last-scene snapshot と `waylandd` の surface/selection registry を使って、`compd` が broker rebuild と selection handoff までできることを確認する
 - `run-compd-broker-recovery.sh`: `watchdog -> sessiond` recovery execution で `compd` を restart し、startup 時に `displayd + waylandd` snapshot から scene rebuild、selection handoff、再commit までできることと、`Wayland native` profile が broker-owned `lockd` と `shell/panel/settings-daemon/applet` skeleton に分かれていることを確認する
 - `mock-desktop-component.sh`: profile launcher / watchdog の検証用 mock GUI component
+- `install-user.sh`: Debian user-space へ `TUFF-Xwin` を常設配置し、`systemd --user` unit と launcher を入れる
+- `tuff-xwin-start.sh`: active profile を選択して `tuff-xwin.target` を起動する
+- `tuff-xwin-stop.sh`: `tuff-xwin.target` を停止する
+- `tuff-xwin-recover.sh`: TTY へ落ちた後に active profile を再選択し、broker 群を 1 コマンドで再起動して復旧する
+- `tuff-xwin-autostart.sh`: `tty1` ログイン直後だけ TUFF-Xwin を自動起動する

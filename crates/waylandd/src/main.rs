@@ -400,6 +400,7 @@ fn write_surface_registry_artifact(
     registry: &SurfaceRegistrySnapshot,
     session_instance_id: &str,
 ) -> Result<PathBuf> {
+    let _ = ensure_runtime_dir()?;
     let path = session_artifact_path(session_instance_id, "surface-registry");
     fs::write(&path, serde_json::to_string_pretty(registry)?)
         .with_context(|| format!("failed to write runtime surface registry {}", path.display()))?;
