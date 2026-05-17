@@ -4,8 +4,9 @@ PartOf=tuff-xwin.target
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/tuff-xwin/session.env
-ExecStart=${TUFF_XWIN_PREFIX}/bin/watchdog --serve-ipc $TUFF_XWIN_WATCHDOG_ARGS
+Environment=PATH=%h/.local/share/tuff-xwin/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/tuff-xwin/session.env
+ExecStart=/usr/bin/env watchdog --serve-ipc $TUFF_XWIN_WATCHDOG_ARGS
 Restart=on-failure
 RestartSec=1
 

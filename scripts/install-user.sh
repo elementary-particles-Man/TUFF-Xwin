@@ -44,13 +44,13 @@ if ! command -v systemctl >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ ! -x "$socket_script" ]]; then
+if [[ ! -f "$socket_script" ]]; then
   echo "missing $socket_script" >&2
   exit 1
 fi
 
 socket_env="$(mktemp)"
-"$socket_script" --emit-env > "$socket_env"
+bash "$socket_script" --emit-env > "$socket_env"
 set -a
 # shellcheck disable=SC1090
 . "$socket_env"
@@ -71,6 +71,8 @@ install -m 0755 "$repo_root/scripts/tuff-xwin-start.sh" "$user_bin_dir/tuff-xwin
 install -m 0755 "$repo_root/scripts/tuff-xwin-stop.sh" "$user_bin_dir/tuff-xwin-stop"
 install -m 0755 "$repo_root/scripts/tuff-xwin-recover.sh" "$user_bin_dir/tuff-xwin-recover"
 install -m 0755 "$repo_root/scripts/tuff-xwin-autostart.sh" "$user_bin_dir/tuff-xwin-autostart"
+install -m 0755 "$repo_root/scripts/tuff-xwin-login-session.sh" "$user_bin_dir/tuff-xwin-login-session"
+install -m 0755 "$repo_root/scripts/tuff-xwin-select-profile.sh" "$user_bin_dir/tuff-xwin-select-profile"
 install -m 0755 "$socket_script" "$user_bin_dir/tuff-xwin-distro-socket"
 
 cp "$repo_root"/contrib/systemd/user/tuff-xwin.target "$unit_dir"/
@@ -103,3 +105,4 @@ echo "Linux socket: family=$TUFF_XWIN_DISTRO_FAMILY distro=$TUFF_XWIN_DISTRO_ID 
 echo "Session env: $config_dir/session.env"
 echo "Start command: $HOME/.local/bin/tuff-xwin-start"
 echo "Recover command: $HOME/.local/bin/tuff-xwin-recover"
+echo "Login session command: $HOME/.local/bin/tuff-xwin-login-session"

@@ -95,30 +95,10 @@ detect_host_shell() {
 }
 
 detect_host_panel() {
-  if command -v plasmashell >/dev/null 2>&1; then
-    printf 'plasmashell\n'
-    return 0
-  fi
-  if command -v xfce4-panel >/dev/null 2>&1; then
-    printf 'xfce4-panel\n'
-    return 0
-  fi
   printf '\n'
 }
 
 detect_host_settingsd() {
-  if command -v gnome-settings-daemon >/dev/null 2>&1; then
-    printf 'gnome-settings-daemon\n'
-    return 0
-  fi
-  if command -v kded6 >/dev/null 2>&1; then
-    printf 'kded6\n'
-    return 0
-  fi
-  if command -v xfsettingsd >/dev/null 2>&1; then
-    printf 'xfsettingsd\n'
-    return 0
-  fi
   printf '\n'
 }
 
