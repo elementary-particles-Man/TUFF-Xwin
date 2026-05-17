@@ -91,18 +91,6 @@ sanitize_id() {
 }
 
 detect_host_shell() {
-  if command -v gnome-shell >/dev/null 2>&1; then
-    printf 'gnome-shell --nested --wayland\n'
-    return 0
-  fi
-  if command -v startplasma-wayland >/dev/null 2>&1; then
-    printf 'startplasma-wayland\n'
-    return 0
-  fi
-  if command -v weston >/dev/null 2>&1; then
-    printf 'weston\n'
-    return 0
-  fi
   printf '\n'
 }
 

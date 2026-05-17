@@ -2,7 +2,7 @@
   "id": "host-wayland",
   "display_name": "Host Wayland Session on Waybroker",
   "protocol": "wayland-native",
-  "summary": "major Linux distro 向けの Wayland native profile。broker 群は TUFF-Xwin が担い、上位 shell は host distro socket が埋める。",
+  "summary": "major Linux distro 向けの Wayland native profile。broker 群は TUFF-Xwin が担い、GUI は明示的に選んだ場合だけ接続する。",
   "degraded_profile_id": "demo-wayland-compd-recovery",
   "broker_services": [
     "displayd",
@@ -25,9 +25,9 @@
       "command": [
         "/bin/sh",
         "-lc",
-        "exec ${TUFF_XWIN_HOST_SHELL:-gnome-shell --nested --wayland}"
+        "if [ -n \"${TUFF_XWIN_HOST_SHELL:-}\" ]; then exec ${TUFF_XWIN_HOST_SHELL}; else exec sleep infinity; fi"
       ],
-      "critical": true
+      "critical": false
     },
     {
       "id": "host-panel",

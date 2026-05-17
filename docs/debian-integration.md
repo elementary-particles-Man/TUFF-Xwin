@@ -71,7 +71,7 @@ fi
 - panel/settings 側:
   `TUFF_XWIN_HOST_PANEL`, `TUFF_XWIN_HOST_SETTINGSD`
 
-既定値は `gnome-shell --nested --wayland` です。ホスト側 command は `session.env` で差し替えます。
+既定値は空です。ホスト側 command は `session.env` で明示的に差し替えた場合だけ起動します。
 
 ## 現時点の限界
 

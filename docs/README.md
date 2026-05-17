@@ -61,6 +61,7 @@ Apps / Plasma / Xwayland
 - [desktop-profiles.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/desktop-profiles.md): GUI を broker 本体から分離し、profile として選択する方針
 - [debian-integration.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/debian-integration.md): Debian へ user-space 常設統合する手順
 - [linux-distro-socket.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/linux-distro-socket.md): Debian/Ubuntu と Fedora/RHEL 系を first-class support に絞った host socket
+- [current-session-operation.md](/media/flux/THPDOC/Develop/TUFF-Xwin/docs/current-session-operation.md): 現セッション限定で TUFF-Xwin を起動し、KDE/KWin から切り替える運用手順
 
 ## ひとことで言うと
 
