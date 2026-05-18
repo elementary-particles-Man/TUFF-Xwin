@@ -18,8 +18,9 @@ pub use profile::{
 };
 pub use transport::{
     ServiceEndpoint, ServiceListener, ServiceStream, bind_service_socket, connect_service_socket,
-    ensure_runtime_dir, read_json_line, runtime_dir, sanitize_session_instance_id, send_json_line,
-    service_socket_path, session_artifact_path, validate_session_instance_id,
+    ensure_runtime_dir, is_recoverable_accept_error, read_json_line, runtime_dir,
+    sanitize_session_instance_id, send_json_line, service_socket_path, session_artifact_path,
+    validate_session_instance_id,
 };
 
 pub fn now_unix_timestamp() -> u64 {

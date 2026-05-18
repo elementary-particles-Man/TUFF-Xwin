@@ -1,4 +1,13 @@
-use std::{env, fs, io::BufReader, path::PathBuf, time::Duration};
+use std::{
+    env, fs,
+    io::{BufReader, Read},
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
+
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
 
 use anyhow::{Context, Result, bail};
 use vulkan_backend::{
@@ -78,6 +87,7 @@ struct Config {
     serve_once: bool,
     print_registry: bool,
     registry_path: Option<PathBuf>,
+    bind_wayland_display: Option<String>,
     use_vulkan: bool,
     session_instance_id: String,
 }
@@ -102,9 +112,13 @@ impl Config {
                     let path = args.next().context("--registry requires a path")?;
                     config.registry_path = Some(PathBuf::from(path));
                 }
+                "--bind-wayland-display" => {
+                    config.bind_wayland_display =
+                        Some(args.next().context("--bind-wayland-display requires a socket name")?);
+                }
                 "--help" | "-h" => {
                     println!(
-                        "usage: waylandd [--require-displayd] [--serve-ipc] [--once] [--print-registry] [--registry PATH] [--vulkan] [--session-instance-id ID]"
+                        "usage: waylandd [--require-displayd] [--serve-ipc] [--once] [--print-registry] [--registry PATH] [--bind-wayland-display NAME] [--vulkan] [--session-instance-id ID]"
                     );
                     std::process::exit(0);
                 }
@@ -121,13 +135,34 @@ async fn serve_ipc(
     registry: &mut SurfaceRegistrySnapshot,
     vulkan: Option<&VulkanBackend>,
 ) -> Result<()> {
+    let _wayland_display = match config.bind_wayland_display.as_deref() {
+        Some(name) => Some(bind_wayland_display_socket(name)?),
+        None => None,
+    };
+
     let listener = bind_service_socket(ServiceRole::Waylandd)?;
     let _socket_guard = SocketGuard::new(listener.endpoint().clone());
     println!("service=waylandd op=listen event=socket_bound path={}", listener.endpoint());
 
     let mut served = 0usize;
     for stream in listener.incoming() {
-        let stream = stream?;
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(err) => {
+                println!(
+                    "service=waylandd op=accept event=failed reason=\"{}\"",
+                    err
+                );
+                if err.kind() == std::io::ErrorKind::Interrupted
+                    || err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::ConnectionAborted
+                    || err.kind() == std::io::ErrorKind::ConnectionReset
+                {
+                    continue;
+                }
+                return Err(err).context("waylandd IPC accept failed");
+            }
+        };
         handle_client(stream, registry, vulkan, &config.session_instance_id).await?;
         served += 1;
 
@@ -423,6 +458,136 @@ fn format_outputs(outputs: &[OutputMode]) -> String {
     rendered.join(",")
 }
 
+#[cfg(unix)]
+fn bind_wayland_display_socket(name: &str) -> Result<WaylandDisplaySocket> {
+    let mut candidates = vec![name.to_string()];
+    if let Some((prefix, display_num)) = split_wayland_display_name(name) {
+        candidates.push(format!("{prefix}{}", display_num + 1));
+        candidates.push(format!("{prefix}{}", display_num + 2));
+    }
+
+    let mut last_err = None;
+    for candidate in candidates {
+        let path = resolve_wayland_display_path(&candidate)?;
+        let lock_path = wayland_lock_path(&path);
+        match bind_single_wayland_display_socket(&path, &lock_path) {
+            Ok(socket) => return Ok(socket),
+            Err(err) => {
+                println!(
+                    "service=waylandd op=wayland_display event=bind_failed name={} path={} reason={}",
+                    candidate,
+                    path.display(),
+                    err
+                );
+                last_err = Some(err);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("failed to bind Wayland display socket")))
+}
+
+#[cfg(unix)]
+fn bind_single_wayland_display_socket(path: &Path, lock_path: &Path) -> Result<WaylandDisplaySocket> {
+    if path.exists() {
+        bail!("Wayland display socket already exists: {}", path.display());
+    }
+    if lock_path.exists() {
+        if socket_lock_is_stale(path, lock_path) {
+            println!(
+                "service=waylandd op=wayland_display event=stale_lock_removed path={} lock={}",
+                path.display(),
+                lock_path.display()
+            );
+            fs::remove_file(lock_path).with_context(|| {
+                format!("failed to remove stale Wayland display lock {}", lock_path.display())
+            })?;
+        } else {
+            bail!("Wayland display lock already exists: {}", lock_path.display());
+        }
+    }
+
+    let _listener = UnixListener::bind(path)
+        .with_context(|| format!("failed to bind Wayland display socket {}", path.display()))?;
+    fs::write(lock_path, format!("{}\n", std::process::id()))
+        .with_context(|| format!("failed to write Wayland display lock {}", lock_path.display()))?;
+
+    let log_path = path.to_path_buf();
+    thread::Builder::new()
+        .name("wayland-display-listener".to_string())
+        .spawn(move || {
+            for stream in _listener.incoming() {
+                match stream {
+                    Ok(mut stream) => {
+                        let mut buf = [0_u8; 16];
+                        let _ = stream.read(&mut buf);
+                        println!(
+                            "service=waylandd op=wayland_display event=client_connected path={}",
+                            log_path.display()
+                        );
+                    }
+                    Err(err) => {
+                        println!(
+                            "service=waylandd op=wayland_display event=accept_failed path={} reason={}",
+                            log_path.display(),
+                            err
+                        );
+                        break;
+                    }
+                }
+            }
+        })
+        .context("failed to spawn Wayland display listener")?;
+
+    println!("service=waylandd op=wayland_display event=socket_bound path={}", path.display());
+    Ok(WaylandDisplaySocket { path: path.to_path_buf(), lock_path: lock_path.to_path_buf() })
+}
+
+#[cfg(not(unix))]
+fn bind_wayland_display_socket(_name: &str) -> Result<WaylandDisplaySocket> {
+    bail!("--bind-wayland-display is supported only on Unix platforms")
+}
+
+#[cfg(unix)]
+fn resolve_wayland_display_path(name: &str) -> Result<PathBuf> {
+    if name.is_empty() {
+        bail!("Wayland display socket name must not be empty");
+    }
+
+    let path = Path::new(name);
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        bail!("Wayland display socket name must be a basename or absolute path: {name}");
+    }
+
+    let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::temp_dir().join("wayland-runtime"));
+    Ok(runtime_dir.join(name))
+}
+
+#[cfg(unix)]
+fn wayland_lock_path(path: &Path) -> PathBuf {
+    let mut lock = path.as_os_str().to_owned();
+    lock.push(".lock");
+    PathBuf::from(lock)
+}
+
+#[cfg(unix)]
+fn split_wayland_display_name(name: &str) -> Option<(&str, u32)> {
+    let suffix = name.strip_prefix("wayland-")?;
+    let display_num = suffix.parse::<u32>().ok()?;
+    Some(("wayland-", display_num))
+}
+
+#[cfg(unix)]
+fn socket_lock_is_stale(path: &Path, lock_path: &Path) -> bool {
+    !path.exists() && lock_path.exists()
+}
+
 struct SocketGuard {
     endpoint: ServiceEndpoint,
 }
@@ -439,9 +604,22 @@ impl Drop for SocketGuard {
     }
 }
 
+struct WaylandDisplaySocket {
+    path: PathBuf,
+    lock_path: PathBuf,
+}
+
+impl Drop for WaylandDisplaySocket {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(&self.lock_path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle_wayland_command, mock_surface_registry};
+    use super::{handle_wayland_command, mock_surface_registry, socket_lock_is_stale};
+    use std::fs;
     use waybroker_common::{
         FocusTarget, WaylandCommand, WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState,
         WaylandSurfaceRole,
@@ -499,5 +677,25 @@ mod tests {
             Some("konsole-primary-v1")
         );
         assert_eq!(registry.selection.primary_selection_source_serial, Some(13));
+    }
+
+    #[test]
+    fn stale_lock_without_socket_is_treated_as_stale() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("tuff-xwin-waylandd-test-{unique}"));
+        let path = base.join("wayland-1");
+        let lock_path = base.join("wayland-1.lock");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(&lock_path, b"123\n").unwrap();
+
+        assert!(socket_lock_is_stale(&path, &lock_path));
+
+        let _ = fs::remove_file(&lock_path);
+        let _ = fs::remove_dir_all(&base);
     }
 }

@@ -76,6 +76,18 @@ impl<'a> Iterator for ServiceIncoming<'a> {
     }
 }
 
+pub fn is_recoverable_accept_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::NotConnected
+    )
+}
+
 pub struct ServiceStream {
     inner: ServiceStreamInner,
 }
@@ -386,5 +398,23 @@ mod tests {
         // Verify no directory traversal
         assert!(!path.to_string_lossy().contains("/evil"));
         assert!(path.to_string_lossy().contains(".._evil_path"));
+    }
+
+    #[test]
+    fn classifies_recoverable_accept_errors() {
+        use super::is_recoverable_accept_error;
+
+        assert!(is_recoverable_accept_error(&std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "interrupted"
+        )));
+        assert!(is_recoverable_accept_error(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            "connection aborted"
+        )));
+        assert!(!is_recoverable_accept_error(&std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "fatal"
+        )));
     }
 }
