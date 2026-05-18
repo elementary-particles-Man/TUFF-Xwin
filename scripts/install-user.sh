@@ -73,6 +73,7 @@ install -m 0755 "$repo_root/scripts/tuff-xwin-recover.sh" "$user_bin_dir/tuff-xw
 install -m 0755 "$repo_root/scripts/tuff-xwin-autostart.sh" "$user_bin_dir/tuff-xwin-autostart"
 install -m 0755 "$repo_root/scripts/tuff-xwin-login-session.sh" "$user_bin_dir/tuff-xwin-login-session"
 install -m 0755 "$repo_root/scripts/tuff-xwin-select-profile.sh" "$user_bin_dir/tuff-xwin-select-profile"
+install -m 0755 "$repo_root/scripts/tuff-xwin-current-session.sh" "$user_bin_dir/tuff-xwin-current-session"
 install -m 0755 "$socket_script" "$user_bin_dir/tuff-xwin-distro-socket"
 
 cp "$repo_root"/contrib/systemd/user/tuff-xwin.target "$unit_dir"/
@@ -106,3 +107,4 @@ echo "Session env: $config_dir/session.env"
 echo "Start command: $HOME/.local/bin/tuff-xwin-start"
 echo "Recover command: $HOME/.local/bin/tuff-xwin-recover"
 echo "Login session command: $HOME/.local/bin/tuff-xwin-login-session"
+echo "Current-session takeover command: $HOME/.local/bin/tuff-xwin-current-session"

@@ -15,6 +15,7 @@
 - `tuff-xwin-start.sh`: active profile を選択して `tuff-xwin.target` を起動する
 - `tuff-xwin-stop.sh`: `tuff-xwin.target` を停止する
 - `tuff-xwin-recover.sh`: TTY へ落ちた後に active profile を再選択し、broker 群を 1 コマンドで再起動して復旧する
+- `tuff-xwin-current-session.sh`: 既存の KDE Plasma / KWin Wayland セッション内で一時 `systemd --user` unit を作り、TUFF-Xwin 起動確認後に Plasma/KWin を停止して現セッションの表示権限を TUFF-Xwin 側へ寄せる
 - `tuff-xwin-autostart.sh`: `tty1` ログイン直後だけ TUFF-Xwin を自動起動する
 
 ## Runtime Policy

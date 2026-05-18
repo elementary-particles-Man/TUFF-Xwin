@@ -2,9 +2,9 @@
 
 ## 目的
 
-この文書は、既存の `KDE Plasma / KWin Wayland` セッション内で `TUFF-Xwin` broker 群を現セッション限定で起動し、その後 `KDE / KWin` を落として `TUFF-Xwin` のみを残すための運用手順を記録する。
+この文書は、既存の `KDE Plasma / KWin Wayland` セッション内で `TUFF-Xwin` broker 群を現セッション限定で起動し、起動確認後に `KDE / KWin` を停止して `TUFF-Xwin` 側へ表示制御を寄せる運用手順を記録する。
 
-ここでの「現セッション限定」は、永続インストールされた `/usr/lib/systemd/user/tuff-xwin-*.service` や `~/.config/systemd/user` を変更せず、`/run/user/$UID/systemd/user` に一時unitを置くことを意味する。再ログインや再起動後には、この一時unitは残らない。
+ここでの「現セッション限定」は、永続インストール済みの user unit を置き換えず、`/run/user/$UID/systemd/user` に一時 unit を生成することを意味する。再ログインや再起動後には、この一時 unit は残らない。
 
 ## 前提
 
@@ -14,251 +14,124 @@
 /mnt/thpdoc/Develop/TUFF-Xwin
 ```
 
-現行の package 配置:
-
-```text
-/usr/bin/displayd
-/usr/bin/waylandd
-/usr/bin/compd
-/usr/bin/lockd
-/usr/bin/sessiond
-/usr/bin/watchdog
-```
-
-runtime directory:
+通常は先に user-space 導入を済ませる。
 
 ```bash
-/run/user/$(id -u)/waybroker
+./scripts/install-user.sh
 ```
 
-profile:
+ただし `scripts/tuff-xwin-current-session.sh` は、repo の release build 出力と `/usr/bin` も `PATH` に含めるため、既に binary がある環境では現セッション起動にも使える。
+
+既定値:
 
 ```text
-host-wayland
-```
-
-session instance:
-
-```text
-current-session
+profile: host-wayland
+session instance: current-session
+runtime directory: $XDG_RUNTIME_DIR/waybroker
 ```
 
 ## 注意
 
-この手順で `KDE / KWin` を停止すると、KDE上で動いている端末、ブラウザ、Codex UI、通常のWayland/Xwaylandアプリは表示経路を失う可能性が高い。
+`takeover` で `KDE / KWin` を停止すると、KDE 上で動いている端末、ブラウザ、Codex UI、通常の Wayland / Xwayland アプリは表示経路を失う可能性が高い。
 
-そのため、切り替え後に状態確認を続ける場合は、別TTY、SSH、または再起動後のCodexに、 `/home/flux/tuff-xwin_after_start_codex_instructions.md` を読ませる。
+切り替え後も状態確認を続ける場合は、別 TTY、SSH、または再起動後の Codex から確認する。
 
-## TUFF-Xwinを現セッション限定で起動する
+## 起動
 
-一時unitディレクトリとruntime directoryを作る。
-
-```bash
-mkdir -p "/run/user/$(id -u)/systemd/user" "/run/user/$(id -u)/waybroker"
-```
-
-以下のunitを `/run/user/$(id -u)/systemd/user` に配置する。
-
-### `tuff-xwin-current-session.target`
-
-```ini
-[Unit]
-Description=TUFF-Xwin current-session runtime target
-Wants=tuff-xwin-current-session-displayd.service tuff-xwin-current-session-waylandd.service tuff-xwin-current-session-lockd.service tuff-xwin-current-session-watchdog.service tuff-xwin-current-session-sessiond.service
-```
-
-### `tuff-xwin-current-session-displayd.service`
-
-```ini
-[Unit]
-Description=TUFF-Xwin current-session display broker
-PartOf=tuff-xwin-current-session.target
-
-[Service]
-Type=simple
-Environment=WAYBROKER_RUNTIME_DIR=/run/user/1000/waybroker
-ExecStart=/usr/bin/displayd --session-instance-id current-session
-Restart=on-failure
-RestartSec=1
-```
-
-### `tuff-xwin-current-session-waylandd.service`
-
-```ini
-[Unit]
-Description=TUFF-Xwin current-session Wayland broker
-PartOf=tuff-xwin-current-session.target
-After=tuff-xwin-current-session-displayd.service
-Requires=tuff-xwin-current-session-displayd.service
-
-[Service]
-Type=simple
-Environment=WAYBROKER_RUNTIME_DIR=/run/user/1000/waybroker
-ExecStart=/usr/bin/waylandd --serve-ipc --require-displayd --session-instance-id current-session
-Restart=on-failure
-RestartSec=1
-```
-
-### `tuff-xwin-current-session-lockd.service`
-
-```ini
-[Unit]
-Description=TUFF-Xwin current-session lock broker
-PartOf=tuff-xwin-current-session.target
-
-[Service]
-Type=simple
-Environment=WAYBROKER_RUNTIME_DIR=/run/user/1000/waybroker
-ExecStart=/usr/bin/lockd --serve-ipc
-Restart=on-failure
-RestartSec=1
-```
-
-### `tuff-xwin-current-session-watchdog.service`
-
-```ini
-[Unit]
-Description=TUFF-Xwin current-session watchdog
-PartOf=tuff-xwin-current-session.target
-
-[Service]
-Type=simple
-Environment=WAYBROKER_RUNTIME_DIR=/run/user/1000/waybroker
-ExecStart=/usr/bin/watchdog --serve-ipc
-Restart=on-failure
-RestartSec=1
-```
-
-### `tuff-xwin-current-session-sessiond.service`
-
-```ini
-[Unit]
-Description=TUFF-Xwin current-session session supervisor
-PartOf=tuff-xwin-current-session.target
-After=tuff-xwin-current-session-displayd.service tuff-xwin-current-session-waylandd.service tuff-xwin-current-session-lockd.service tuff-xwin-current-session-watchdog.service
-Requires=tuff-xwin-current-session-displayd.service tuff-xwin-current-session-waylandd.service tuff-xwin-current-session-lockd.service tuff-xwin-current-session-watchdog.service
-
-[Service]
-Type=simple
-Environment=WAYBROKER_RUNTIME_DIR=/run/user/1000/waybroker
-Environment=TUFF_XWIN_PROFILE=host-wayland
-Environment=TUFF_XWIN_SESSION_INSTANCE_ID=current-session
-Environment=TUFF_XWIN_REPO_ROOT=/mnt/thpdoc/Develop/TUFF-Xwin
-Environment=TUFF_XWIN_PROFILES_DIR=/mnt/thpdoc/Develop/TUFF-Xwin/profiles
-Environment=PATH=/usr/bin:/bin:/home/flux/.local/bin
-ExecStartPre=/usr/bin/sessiond --repo-root /mnt/thpdoc/Develop/TUFF-Xwin --profiles-dir /mnt/thpdoc/Develop/TUFF-Xwin/profiles --select-profile host-wayland --write-selection --session-instance-id current-session
-ExecStart=/usr/bin/sessiond --repo-root /mnt/thpdoc/Develop/TUFF-Xwin --profiles-dir /mnt/thpdoc/Develop/TUFF-Xwin/profiles --serve-ipc --manage-active --spawn-components --notify-watchdog --session-instance-id current-session
-Restart=on-failure
-RestartSec=1
-```
-
-unitを読み込み、古いsocketを消して起動する。
+現セッション限定の一時 unit を生成し、`TUFF-Xwin` broker 群を起動する。
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user stop tuff-xwin-current-session.target >/dev/null 2>&1 || true
-rm -f "/run/user/$(id -u)/waybroker"/*.sock
-systemctl --user start tuff-xwin-current-session.target
+cd /mnt/thpdoc/Develop/TUFF-Xwin
+bash ./scripts/tuff-xwin-current-session.sh start
 ```
 
-起動確認:
+profile や session instance を明示する場合:
 
 ```bash
-systemctl --user is-active \
-  tuff-xwin-current-session.target \
-  tuff-xwin-current-session-displayd.service \
-  tuff-xwin-current-session-waylandd.service \
-  tuff-xwin-current-session-lockd.service \
-  tuff-xwin-current-session-watchdog.service \
-  tuff-xwin-current-session-sessiond.service
+bash ./scripts/tuff-xwin-current-session.sh \
+  --profile host-wayland \
+  --session-instance-id current-session \
+  start
 ```
 
-期待値はすべて `active`。
-
-## runtime確認
+`install-user.sh` 後は次の launcher でも同じ操作ができる。
 
 ```bash
-find "/run/user/$(id -u)/waybroker" -maxdepth 2 -type f -o -type s -o -type d 2>/dev/null | sort | xargs -r ls -la
+~/.local/bin/tuff-xwin-current-session start
 ```
 
-代表的な期待値:
-
-```text
-compd.sock
-displayd.sock
-lockd.sock
-sessiond.sock
-watchdog.sock
-waylandd.sock
-session-current-session-active-profile.json
-session-current-session-launch-state.json
-session-current-session-surface-registry.json
-```
-
-## KDE / KWinを停止してTUFF-Xwinだけを残す
-
-`TUFF-Xwin` の現セッション限定targetがすべて `active` であることを確認してから実行する。
+## 起動確認
 
 ```bash
-systemctl --user stop \
-  plasma-plasmashell.service \
-  plasma-kwin_wayland.service \
-  app-org.kde.xwaylandvideobridge@autostart.service \
-  plasma-workspace-wayland.target \
-  plasma-workspace.target \
-  plasma-core.target || true
+bash ./scripts/tuff-xwin-current-session.sh status
 ```
 
-残存プロセスを落とす。
+期待する状態:
+
+- `tuff-xwin-current-session.target` が `active`
+- `displayd`, `waylandd`, `lockd`, `watchdog`, `sessiond`, `compd` が残っている
+- この段階では `kwin_wayland` や `plasmashell` が残っていてもよい
+
+`status` は `systemctl --user list-units` と対象プロセス一覧をまとめて表示する。
+
+## KDE / KWin から切り替える
+
+`TUFF-Xwin` の現セッション限定 target と各 service がすべて `active` であることを確認してから実行する。
 
 ```bash
-pkill -TERM -x plasmashell || true
-pkill -TERM -x kwin_wayland || true
-pkill -TERM -x kwin_wayland_wrapper || true
-pkill -TERM -x Xwayland || true
-pkill -TERM -x xwaylandvideobridge || true
+bash ./scripts/tuff-xwin-current-session.sh takeover
 ```
 
-数秒待って残っていれば強制終了する。
+このコマンドは次を順に行う。
+
+- `TUFF-Xwin` current-session unit 群がすべて `active` か確認する
+- `plasma-plasmashell.service`, `plasma-kwin_wayland.service`, `plasma-workspace*.target` などを停止する
+- 残った `plasmashell`, `kwin_wayland`, `kwin_wayland_wrapper`, `kwin_x11`, `Xwayland`, `xwaylandvideobridge` を `TERM` 後に必要なら `KILL` する
+- 最後に `status` を表示する
+
+KWin / Plasma が user manager から再起動される環境では、現 user-manager lifetime 限定で関連 unit を runtime mask してから停止する。
 
 ```bash
-sleep 2
-pkill -KILL -x plasmashell || true
-pkill -KILL -x kwin_wayland || true
-pkill -KILL -x kwin_wayland_wrapper || true
-pkill -KILL -x Xwayland || true
-pkill -KILL -x xwaylandvideobridge || true
+bash ./scripts/tuff-xwin-current-session.sh --runtime-mask-plasma takeover
+```
+
+runtime mask は永続設定ではない。再ログインまたは user manager 再起動後には消える。
+
+同じログイン中に runtime mask だけ外す場合:
+
+```bash
+bash ./scripts/tuff-xwin-current-session.sh unmask-plasma
 ```
 
 ## 切り替え後の確認
 
 ```bash
-systemctl --user status tuff-xwin-current-session.target \
-  tuff-xwin-current-session-displayd.service \
-  tuff-xwin-current-session-waylandd.service \
-  tuff-xwin-current-session-lockd.service \
-  tuff-xwin-current-session-watchdog.service \
-  tuff-xwin-current-session-sessiond.service --no-pager
+bash ./scripts/tuff-xwin-current-session.sh status
 ```
 
-```bash
-ps -eo pid,ppid,stat,etimes,cmd | rg '(/|\b)(displayd|waylandd|compd|lockd|sessiond|watchdog|kwin_wayland|plasmashell|Xwayland)(\b|/)'
-```
-
-`TUFF-Xwin` 側だけが残り、`kwin_wayland`, `plasmashell`, `Xwayland` が消えていることを確認する。
+`TUFF-Xwin` 側だけが残り、`kwin_wayland`, `kwin_wayland_wrapper`, `plasmashell`, `Xwayland` が消えていることを確認する。
 
 ## 停止
 
 現セッション限定の `TUFF-Xwin` を止める。
 
 ```bash
-systemctl --user stop tuff-xwin-current-session.target
+bash ./scripts/tuff-xwin-current-session.sh stop
 ```
 
-一時unitを消す。
+一時 unit も削除する。
 
 ```bash
-rm -f /run/user/$(id -u)/systemd/user/tuff-xwin-current-session*
-systemctl --user daemon-reload
+bash ./scripts/tuff-xwin-current-session.sh cleanup
 ```
 
+## 恒久導線との違い
+
+通常の常設運用は次を使う。
+
+```bash
+~/.local/bin/tuff-xwin-start host-wayland
+~/.local/bin/tuff-xwin-stop
+```
+
+`tuff-xwin-current-session` は、既に Plasma/KWin が動いている現ログインセッションで安全確認を挟みながら移行するための限定導線であり、display manager から直接入る通常セッション entrypoint ではない。

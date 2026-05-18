@@ -63,6 +63,16 @@ cargo test --workspace
 
 詳細は [docs/linux-distro-socket.md](docs/linux-distro-socket.md) を参照してください。
 
+既存の `KDE Plasma / KWin Wayland` セッション内で現セッション限定の TUFF-Xwin を起動し、確認後に KWin から切り替える場合は次を使います。
+
+```bash
+~/.local/bin/tuff-xwin-current-session start
+~/.local/bin/tuff-xwin-current-session status
+~/.local/bin/tuff-xwin-current-session takeover
+```
+
+詳細は [docs/current-session-operation.md](docs/current-session-operation.md) を参照してください。
+
 ### CUI へ落ちた後の一発復帰
 `tty1` や CUI に戻ったあと、次の 1 コマンドで active profile を再選択し、`displayd`, `waylandd`, `lockd`, `watchdog`, `sessiond` をまとめて復旧できます。
 
@@ -138,6 +148,16 @@ This repository now includes a major-Linux host socket that stages TUFF-Xwin bro
 ```
 
 For the full flow, see [docs/linux-distro-socket.md](docs/linux-distro-socket.md).
+
+To start TUFF-Xwin inside an already-running `KDE Plasma / KWin Wayland` session and then hand over the current session after validation:
+
+```bash
+~/.local/bin/tuff-xwin-current-session start
+~/.local/bin/tuff-xwin-current-session status
+~/.local/bin/tuff-xwin-current-session takeover
+```
+
+See [docs/current-session-operation.md](docs/current-session-operation.md).
 
 ### One-Command Recovery After Dropping to CUI
 If the graphical stack falls back to `tty1` or plain CUI, recover the active profile and restart the TUFF-Xwin broker set with:
