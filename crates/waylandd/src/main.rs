@@ -149,10 +149,7 @@ async fn serve_ipc(
         let stream = match stream {
             Ok(stream) => stream,
             Err(err) => {
-                println!(
-                    "service=waylandd op=accept event=failed reason=\"{}\"",
-                    err
-                );
+                println!("service=waylandd op=accept event=failed reason=\"{}\"", err);
                 if err.kind() == std::io::ErrorKind::Interrupted
                     || err.kind() == std::io::ErrorKind::WouldBlock
                     || err.kind() == std::io::ErrorKind::ConnectionAborted
@@ -163,7 +160,7 @@ async fn serve_ipc(
                 return Err(err).context("waylandd IPC accept failed");
             }
         };
-        handle_client(stream, registry, vulkan, &config.session_instance_id).await?;
+        handle_client(stream, registry, vulkan, config, &config.session_instance_id).await?;
         served += 1;
 
         if config.serve_once {
@@ -179,6 +176,7 @@ async fn handle_client(
     mut stream: ServiceStream,
     registry: &mut SurfaceRegistrySnapshot,
     vulkan: Option<&VulkanBackend>,
+    config: &Config,
     session_instance_id: &str,
 ) -> Result<()> {
     let request: IpcEnvelope = {
@@ -186,7 +184,7 @@ async fn handle_client(
         read_json_line(&mut reader)?
     };
 
-    let (response, registry_changed) = build_response(request, registry, vulkan).await;
+    let (response, registry_changed) = build_response(request, registry, vulkan, config).await;
     send_json_line(&mut stream, &response)?;
     if registry_changed {
         write_surface_registry_artifact(registry, session_instance_id)?;
@@ -198,11 +196,12 @@ async fn build_response(
     request: IpcEnvelope,
     registry: &mut SurfaceRegistrySnapshot,
     vulkan: Option<&VulkanBackend>,
+    config: &Config,
 ) -> (IpcEnvelope, bool) {
     let source = request.source;
     let (response_kind, registry_changed) = match request.kind {
         MessageKind::WaylandCommand(command) if request.destination == ServiceRole::Waylandd => {
-            let (event, changed) = handle_wayland_command(command, registry, vulkan).await;
+            let (event, changed) = handle_wayland_command(command, registry, vulkan, config).await;
             (MessageKind::WaylandEvent(event), changed)
         }
         MessageKind::WaylandCommand(_) => (
@@ -229,6 +228,7 @@ async fn handle_wayland_command(
     command: WaylandCommand,
     registry: &mut SurfaceRegistrySnapshot,
     vulkan: Option<&VulkanBackend>,
+    config: &Config,
 ) -> (WaylandEvent, bool) {
     match command {
         WaylandCommand::GetSurfaceRegistry => {
@@ -278,6 +278,61 @@ async fn handle_wayland_command(
                 true,
             )
         }
+        WaylandCommand::CaptureOutput { output } => {
+            handle_wayland_capture_request(&output, config, vulkan).await
+        }
+    }
+}
+
+async fn handle_wayland_capture_request(
+    output: &str,
+    _config: &Config,
+    _vulkan: Option<&VulkanBackend>,
+) -> (WaylandEvent, bool) {
+    println!("service=waylandd op=wayland_capture event=bridge_to_displayd output={output}");
+
+    match request_capture_from_displayd(output) {
+        Ok(event) => {
+            if let DisplayEvent::OutputCaptured { output, width, height, format, artifact_path } =
+                event
+            {
+                println!(
+                    "service=waylandd op=wayland_capture event=success output={output} path={artifact_path}"
+                );
+                (
+                    WaylandEvent::OutputCaptured { output, width, height, format, artifact_path },
+                    false,
+                )
+            } else {
+                (WaylandEvent::Rejected { reason: "unexpected displayd response".into() }, false)
+            }
+        }
+        Err(err) => {
+            println!("service=waylandd op=wayland_capture event=failed reason=\"{err}\"");
+            (WaylandEvent::Rejected { reason: err.to_string() }, false)
+        }
+    }
+}
+
+fn request_capture_from_displayd(output: &str) -> Result<DisplayEvent> {
+    let mut stream = connect_service_socket(ServiceRole::Displayd)?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Waylandd,
+        ServiceRole::Displayd,
+        MessageKind::DisplayCommand(DisplayCommand::CaptureOutput { output: output.to_string() }),
+    );
+    send_json_line(&mut stream, &request)?;
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let response: IpcEnvelope = read_json_line(&mut reader)?;
+
+    if response.source != ServiceRole::Displayd {
+        bail!("unexpected response source: {}", response.source.as_str());
+    }
+
+    match response.kind {
+        MessageKind::DisplayEvent(event) => Ok(event),
+        other => bail!("unexpected displayd response kind: {other:?}"),
     }
 }
 
@@ -488,7 +543,10 @@ fn bind_wayland_display_socket(name: &str) -> Result<WaylandDisplaySocket> {
 }
 
 #[cfg(unix)]
-fn bind_single_wayland_display_socket(path: &Path, lock_path: &Path) -> Result<WaylandDisplaySocket> {
+fn bind_single_wayland_display_socket(
+    path: &Path,
+    lock_path: &Path,
+) -> Result<WaylandDisplaySocket> {
     if path.exists() {
         bail!("Wayland display socket already exists: {}", path.display());
     }
@@ -656,6 +714,7 @@ mod tests {
                 },
                 &mut registry,
                 None,
+                &super::Config::default(),
             ));
 
         assert!(changed);
@@ -683,10 +742,7 @@ mod tests {
     fn stale_lock_without_socket_is_treated_as_stale() {
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let base = std::env::temp_dir().join(format!("tuff-xwin-waylandd-test-{unique}"));
         let path = base.join("wayland-1");
         let lock_path = base.join("wayland-1.lock");
@@ -697,5 +753,23 @@ mod tests {
 
         let _ = fs::remove_file(&lock_path);
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_handle_wayland_capture_request_rejection() {
+        // Since we can't easily mock displayd socket here without more boilerplate,
+        // we at least test that it fails gracefully when displayd is not running.
+        let config = super::Config::default();
+        let (event, _) = super::handle_wayland_capture_request("eDP-1", &config, None).await;
+
+        if let WaylandEvent::Rejected { reason } = event {
+            assert!(
+                reason.contains("No such file or directory")
+                    || reason.contains("connection refused")
+                    || reason.contains("failed to connect")
+            );
+        } else {
+            panic!("Expected rejection when displayd is missing, got {:?}", event);
+        }
     }
 }

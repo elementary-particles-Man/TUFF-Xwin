@@ -6,11 +6,11 @@ use vulkan_backend::{
 };
 use waybroker_common::{
     CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope,
-    MessageKind, ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream,
-    SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
+    MessageKind, ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, SurfacePlacement,
+    SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
     WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
-    bind_service_socket, connect_service_socket, read_json_line, send_json_line,
-    is_recoverable_accept_error,
+    bind_service_socket, connect_service_socket, is_recoverable_accept_error, read_json_line,
+    send_json_line,
 };
 
 #[tokio::main]
@@ -327,17 +327,11 @@ fn serve_ipc(config: &Config) -> Result<()> {
         let stream = match stream {
             Ok(stream) => stream,
             Err(err) if is_recoverable_accept_error(&err) => {
-                println!(
-                    "service=compd op=accept event=recoverable_error reason=\"{}\"",
-                    err
-                );
+                println!("service=compd op=accept event=recoverable_error reason=\"{}\"", err);
                 continue;
             }
             Err(err) => {
-                println!(
-                    "service=compd op=accept event=fatal_error reason=\"{}\"",
-                    err
-                );
+                println!("service=compd op=accept event=fatal_error reason=\"{}\"", err);
                 return Err(err).context("compd IPC accept failed");
             }
         };

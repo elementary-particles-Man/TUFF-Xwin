@@ -31,6 +31,11 @@
 - Typical pattern:
   - `GIT_SSH_COMMAND='ssh -i /media/flux/THPDOC/Develop/ssh/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/media/flux/THPDOC/Develop/ssh/known_hosts -o StrictHostKeyChecking=yes' git push`
 
+- GitHub への fetch / push / clone は、環境変数 `gitssh` に SSH 鍵の絶対パス、`gitpat` に PAT を設定した前提で扱う。
+- `gitssh` は `ssh -i "$gitssh" -o IdentitiesOnly=yes` のように明示的に使う。
+- `gitpat` がある場合は HTTPS 認証の代替として利用できるが、優先は `gitssh`。
+- これらの変数が未設定の場合は、作業前にユーザーへ確認する。別鍵や別 PAT へ勝手に置き換えない。
+
 ## Current implementation seeds
 - `docs/` contains architecture, boundary, resume, IPC, and crash-loop policy documents.
 - `crates/waybroker-common/src/ipc.rs` defines the current message envelope and initial command enums.

@@ -1,13 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{CStr, CString};
-use std::future::Future;
-use std::hint::black_box;
 use std::mem::size_of;
-use std::path::Path;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use ash::util::Align;
@@ -15,7 +9,9 @@ use ash::{vk, Device, Entry, Instance};
 use parking_lot::Mutex;
 use tokio::time::sleep;
 
-const DEFAULT_MIN_BATCH_BYTES: usize = 128 * 1024;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
 const DEFAULT_PACKET_MIN_BATCH_BYTES: usize = 32 * 1024;
 const DEFAULT_TIMEOUT_MS: u64 = 250;
 const MIN_PENDING_POLL_MS: u64 = 1;
@@ -60,6 +56,7 @@ pub enum VulkanWorkloadClass {
     AuditScan,
     PacketPreclassification,
     BulkPrefilter,
+    ScreenshotRefine,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,7 +195,6 @@ struct VulkanStoredSubmission {
     fence: vk::Fence,
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
-    size: vk::DeviceSize,
     deadline: Instant,
     completed_at: Option<Instant>,
 }
@@ -380,7 +376,6 @@ impl VulkanBackend {
                     fence: vk::Fence::null(),
                     buffer: vk::Buffer::null(),
                     memory: vk::DeviceMemory::null(),
-                    size: 0,
                     deadline: Instant::now() + submission.timeout,
                     completed_at: None,
                 },
@@ -403,7 +398,6 @@ impl VulkanBackend {
                         fence: vk::Fence::null(),
                         buffer: vk::Buffer::null(),
                         memory: vk::DeviceMemory::null(),
-                        size: 0,
                         deadline: Instant::now() + submission.timeout,
                         completed_at: None,
                     },
@@ -546,7 +540,6 @@ impl VulkanBackend {
                 fence,
                 buffer,
                 memory,
-                size: payload_size,
                 deadline: Instant::now() + submission.timeout,
                 completed_at: None,
             })
@@ -642,6 +635,54 @@ impl VulkanBackend {
             }
         }
     }
+
+    /// Refines screenshot pixels using AVX2 or fallback.
+    /// Swaps R and B channels (BGRA <-> RGBA).
+    pub fn refine_screenshot_pixels(&self, pixels: &mut [u32]) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    self.refine_pixels_avx2(pixels);
+                }
+                return;
+            }
+        }
+
+        // Fallback
+        for p in pixels.iter_mut() {
+            let b = (*p >> 16) & 0xFF;
+            let r = *p & 0xFF;
+            *p = (*p & 0xFF00FF00) | (r << 16) | b;
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn refine_pixels_avx2(&self, pixels: &mut [u32]) {
+        let mut chunks = pixels.chunks_exact_mut(8);
+
+        // Shuffle mask for BGRA -> RGBA (swapping byte 0 and 2 in each u32)
+        // [0, 1, 2, 3] -> [2, 1, 0, 3]
+        let mask = _mm256_setr_epi8(
+            2, 1, 0, 3, 6, 5, 4, 7, 10, 9, 8, 11, 14, 13, 12, 15, 2, 1, 0, 3, 6, 5, 4, 7, 10, 9, 8,
+            11, 14, 13, 12, 15,
+        );
+
+        for chunk in &mut chunks {
+            let ptr = chunk.as_mut_ptr() as *mut __m256i;
+            let data = _mm256_loadu_si256(ptr);
+            let shuffled = _mm256_shuffle_epi8(data, mask);
+            _mm256_storeu_si256(ptr, shuffled);
+        }
+
+        let remainder = chunks.into_remainder();
+        for p in remainder.iter_mut() {
+            let b = (*p >> 16) & 0xFF;
+            let r = *p & 0xFF;
+            *p = (*p & 0xFF00FF00) | (r << 16) | b;
+        }
+    }
 }
 
 impl Drop for VulkanBackendInner {
@@ -674,3 +715,27 @@ impl Drop for VulkanBackendInner {
 }
 unsafe impl Send for VulkanBackend {}
 unsafe impl Sync for VulkanBackend {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_refine_screenshot_pixels() {
+        let config = VulkanBackendConfig { enable_vulkan: false, ..Default::default() };
+        let backend = VulkanBackend::new(config);
+
+        // BGRA little endian: [B, G, R, A] -> 0xAARRGGBB
+        // Let B=0x11, G=0x22, R=0x33, A=0xFF -> 0xFF332211
+        // Expected RGBA: [R, G, B, A] -> 0xFF112233
+        let input = 0xFF332211u32;
+        let expected = 0xFF112233u32;
+
+        let mut pixels = vec![input; 100];
+        backend.refine_screenshot_pixels(&mut pixels);
+
+        for (i, p) in pixels.iter().enumerate() {
+            assert_eq!(*p, expected, "Mismatch at index {}", i);
+        }
+    }
+}

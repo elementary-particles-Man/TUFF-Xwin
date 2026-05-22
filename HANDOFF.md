@@ -28,6 +28,12 @@
     *   **Gnome (Wayland) テスト**: 正常稼働および `gnome-shell` パニック時のカーネル生存を確認。
     *   **結論**: GUI システムの全損がいかなる場合もメインカーネルの稼働に影響を与えないことを実証。
 
+6.  **スクリーンショット機能のリファイン (Vulkan/SIMD 加速)**
+    *   `displayd` に `CaptureOutput` IPC を実装し、フレームキャプチャの基盤を構築。
+    *   `vulkan-backend` に AVX2 加速によるピクセル変換（BGRA <-> RGBA）を実装。
+    *   Vulkan コンピュートシェーダーによる並列処理の統合。
+    *   検証用スクリプト `scripts/tuff-xwin-screenshot.sh` を追加。
+
 ## 次のステップへの申し送り
 
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。

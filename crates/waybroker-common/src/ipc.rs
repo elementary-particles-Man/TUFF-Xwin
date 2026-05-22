@@ -49,6 +49,9 @@ pub enum DisplayCommand {
     GetSceneSnapshot {
         output: Option<String>,
     },
+    CaptureOutput {
+        output: String,
+    },
     SecureBlank {
         output: Option<String>,
     },
@@ -76,6 +79,13 @@ pub enum DisplayEvent {
     SceneSnapshot {
         snapshot: Option<CommittedSceneState>,
     },
+    OutputCaptured {
+        output: String,
+        width: u32,
+        height: u32,
+        format: String,
+        artifact_path: String,
+    },
     BlankApplied {
         output: Option<String>,
     },
@@ -90,14 +100,29 @@ pub enum DisplayEvent {
 pub enum WaylandCommand {
     GetSurfaceRegistry,
     ApplySelectionHandoff { handoff: WaylandSelectionHandoff },
+    CaptureOutput { output: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum WaylandEvent {
-    SurfaceRegistry { snapshot: SurfaceRegistrySnapshot },
-    SelectionHandoffApplied { generation: u64, handoff: WaylandSelectionHandoff },
-    Rejected { reason: String },
+    SurfaceRegistry {
+        snapshot: SurfaceRegistrySnapshot,
+    },
+    SelectionHandoffApplied {
+        generation: u64,
+        handoff: WaylandSelectionHandoff,
+    },
+    OutputCaptured {
+        output: String,
+        width: u32,
+        height: u32,
+        format: String,
+        artifact_path: String,
+    },
+    Rejected {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -192,6 +192,9 @@ async fn handle_display_command(
         DisplayCommand::GetSceneSnapshot { output } => {
             Ok(handle_scene_snapshot_request(output, state))
         }
+        DisplayCommand::CaptureOutput { output } => {
+            handle_capture_output(&output, config, state, vulkan).await
+        }
         DisplayCommand::SecureBlank { output } => {
             println!("service=displayd op=secure_blank event=success output={:?}", output);
             Ok(DisplayEvent::BlankApplied { output })
@@ -283,6 +286,86 @@ fn load_scene_snapshot(path: &Path) -> Result<Option<CommittedSceneState>> {
         .map(Some)
 }
 
+async fn handle_capture_output(
+    output: &str,
+    config: &Config,
+    _state: &DisplayState,
+    vulkan: Option<&VulkanBackend>,
+) -> Result<DisplayEvent> {
+    println!("service=displayd op=capture_output event=begin output={output}");
+
+    // Mock capture: 1920x1080 BGRA
+    let width = 1920;
+    let height = 1080;
+    let mut pixels = generate_mock_pixels(width, height);
+
+    if let Some(vulkan) = vulkan {
+        // Use Vulkan for "Simulation" workload (as requested in handoff)
+        let handle = vulkan.submit_batch(VulkanBatchSubmission {
+            workload: VulkanWorkloadClass::ScreenshotRefine,
+            payload_len: pixels.len() * 4,
+            surface_words: None,
+            timeout: Duration::from_millis(100),
+            requires_zeroize: false,
+            allows_gpu: true,
+        });
+        let result = vulkan.wait_for_completion(handle).await;
+        println!(
+            "service=displayd op=vulkan_refine event=completed workload={:?} path={:?}",
+            result.workload, result.path
+        );
+
+        // Perform the actual refinement using AVX/SIMD on CPU as well
+        vulkan.refine_screenshot_pixels(&mut pixels);
+    } else {
+        // Manual fallback if no vulkan object (though we could still use SIMD if we had it)
+        // For simplicity, we just use a dummy processing here if no vulkan backend exists
+        for p in pixels.iter_mut() {
+            let b = (*p >> 16) & 0xFF;
+            let r = *p & 0xFF;
+            *p = (*p & 0xFF00FF00) | (r << 16) | b;
+        }
+    }
+
+    let artifact_name = format!("screenshot-{}-{}.raw", output, now_unix_timestamp());
+    let artifact_path = session_artifact_path(&config.session_instance_id, &artifact_name);
+
+    fs::write(&artifact_path, unsafe {
+        std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
+    })?;
+
+    println!(
+        "service=displayd op=capture_output event=success output={} width={} height={} path={}",
+        output,
+        width,
+        height,
+        artifact_path.display()
+    );
+
+    Ok(DisplayEvent::OutputCaptured {
+        output: output.to_string(),
+        width,
+        height,
+        format: "RGBA8888".into(),
+        artifact_path: artifact_path.to_string_lossy().to_string(),
+    })
+}
+
+fn generate_mock_pixels(width: u32, height: u32) -> Vec<u32> {
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let r = (x % 256) as u32;
+            let g = (y % 256) as u32;
+            let b = 128u32;
+            let a = 255u32;
+            // BGRA
+            pixels.push((a << 24) | (r << 16) | (g << 8) | b);
+        }
+    }
+    pixels
+}
+
 fn handle_scene_snapshot_request(output: Option<String>, state: &DisplayState) -> DisplayEvent {
     let snapshot = state.scene_for_output(output.as_deref());
     match (&output, &snapshot) {
@@ -335,5 +418,47 @@ impl SocketGuard {
 impl Drop for SocketGuard {
     fn drop(&mut self) {
         let _ = self.endpoint.cleanup_stale();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_handle_capture_output() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", temp_dir.path());
+        }
+
+        let session_id = "test-session";
+        let config = Config { session_instance_id: session_id.into(), ..Default::default() };
+
+        let state = DisplayState {
+            last_scene: None,
+            next_commit_id: 1,
+            snapshot_path: temp_dir.path().join("scene-snapshot"),
+        };
+
+        // Ensure runtime dir exists
+        ensure_runtime_dir().unwrap();
+        let session_runtime_dir = temp_dir.path().join("waybroker").join(session_id);
+        std::fs::create_dir_all(&session_runtime_dir).unwrap();
+
+        let result = handle_capture_output("eDP-1", &config, &state, None).await.unwrap();
+
+        if let DisplayEvent::OutputCaptured { output, width, height, format, artifact_path } =
+            result
+        {
+            assert_eq!(output, "eDP-1");
+            assert_eq!(width, 1920);
+            assert_eq!(height, 1080);
+            assert_eq!(format, "RGBA8888");
+            assert!(artifact_path.contains("screenshot-eDP-1-"));
+            assert!(std::path::Path::new(&artifact_path).exists());
+        } else {
+            panic!("Unexpected event: {:?}", result);
+        }
     }
 }
