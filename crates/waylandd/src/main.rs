@@ -281,6 +281,71 @@ async fn handle_wayland_command(
         WaylandCommand::CaptureOutput { output } => {
             handle_wayland_capture_request(&output, config, vulkan).await
         }
+        WaylandCommand::StartRecord { output, fps } => {
+            handle_wayland_record_request(&output, Some(fps), config, vulkan).await
+        }
+        WaylandCommand::StopRecord { output } => {
+            handle_wayland_record_request(&output, None, config, vulkan).await
+        }
+    }
+}
+
+async fn handle_wayland_record_request(
+    output: &str,
+    fps: Option<u32>,
+    _config: &Config,
+    _vulkan: Option<&VulkanBackend>,
+) -> (WaylandEvent, bool) {
+    let op = if fps.is_some() { "start_record" } else { "stop_record" };
+    println!("service=waylandd op={op} event=bridge_to_displayd output={output}");
+
+    match request_record_from_displayd(output, fps) {
+        Ok(event) => match event {
+            DisplayEvent::RecordStarted { output, session_id } => {
+                println!(
+                    "service=waylandd op=start_record event=success output={output} session_id={session_id}"
+                );
+                (WaylandEvent::RecordStarted { output, session_id }, false)
+            }
+            DisplayEvent::RecordStopped { output, session_id, artifact_path } => {
+                println!(
+                    "service=waylandd op=stop_record event=success output={output} path={artifact_path}"
+                );
+                (WaylandEvent::RecordStopped { output, session_id, artifact_path }, false)
+            }
+            DisplayEvent::Rejected { reason } => {
+                println!("service=waylandd op={op} event=rejected reason=\"{reason}\"");
+                (WaylandEvent::Rejected { reason }, false)
+            }
+            other => {
+                println!("service=waylandd op={op} event=failed reason=\"unexpected response: {other:?}\"");
+                (WaylandEvent::Rejected { reason: "unexpected displayd response".into() }, false)
+            }
+        },
+        Err(err) => {
+            println!("service=waylandd op={op} event=failed reason=\"{err}\"");
+            (WaylandEvent::Rejected { reason: err.to_string() }, false)
+        }
+    }
+}
+
+fn request_record_from_displayd(output: &str, fps: Option<u32>) -> Result<DisplayEvent> {
+    let mut stream = connect_service_socket(ServiceRole::Displayd)?;
+    let command = if let Some(fps) = fps {
+        DisplayCommand::StartRecord { output: output.to_string(), fps }
+    } else {
+        DisplayCommand::StopRecord { output: output.to_string() }
+    };
+
+    let request = IpcEnvelope::new(ServiceRole::Waylandd, ServiceRole::Displayd, MessageKind::DisplayCommand(command));
+    send_json_line(&mut stream, &request)?;
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let response: IpcEnvelope = read_json_line(&mut reader)?;
+
+    match response.kind {
+        MessageKind::DisplayEvent(event) => Ok(event),
+        other => bail!("unexpected displayd response kind: {other:?}"),
     }
 }
 

@@ -1378,6 +1378,28 @@ fn handle_session_command(
             let outcome = apply_watchdog_report(&active_profile, profiles, &report)?;
             persist_watchdog_apply_outcome(&outcome, config, supervisor, &session_instance_id)
         }
+        SessionCommand::InhibitIdle { reason } => {
+            if let Some(supervisor) = supervisor {
+                supervisor.idle_inhibitors.push(reason.clone());
+                println!("service=sessiond op=inhibit_idle event=success reason=\"{reason}\" total_inhibitors={}", supervisor.idle_inhibitors.len());
+            } else {
+                println!("service=sessiond op=inhibit_idle event=skipped reason=\"no supervisor active\"");
+            }
+            Ok(SessionCommand::InhibitIdle { reason })
+        }
+        SessionCommand::ReleaseIdle { reason } => {
+            if let Some(supervisor) = supervisor {
+                if let Some(pos) = supervisor.idle_inhibitors.iter().position(|r| r == &reason) {
+                    supervisor.idle_inhibitors.remove(pos);
+                    println!("service=sessiond op=release_idle event=success reason=\"{reason}\" total_inhibitors={}", supervisor.idle_inhibitors.len());
+                } else {
+                    println!("service=sessiond op=release_idle event=failed reason=\"not found: {reason}\"");
+                }
+            } else {
+                println!("service=sessiond op=release_idle event=skipped reason=\"no supervisor active\"");
+            }
+            Ok(SessionCommand::ReleaseIdle { reason })
+        }
         other => Ok(SessionCommand::ProfileUnchanged {
             profile_id: "unknown".into(),
             reason: format!("sessiond IPC does not apply {other:?}"),
@@ -1967,6 +1989,7 @@ struct SessionSupervisor {
     stream_generation: u64,
     stream_sequence: u64,
     last_streamed_state: Option<SessionLaunchState>,
+    idle_inhibitors: Vec<String>,
 }
 
 impl SessionSupervisor {
@@ -2001,6 +2024,7 @@ impl SessionSupervisor {
             stream_generation,
             stream_sequence: 0,
             last_streamed_state: None,
+            idle_inhibitors: Vec::new(),
         })
     }
 

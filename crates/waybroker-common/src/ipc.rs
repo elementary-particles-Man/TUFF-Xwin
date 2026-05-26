@@ -39,6 +39,12 @@ pub enum DisplayCommand {
         output: String,
         mode: OutputMode,
     },
+    SetGamma {
+        output: String,
+        red: Vec<u16>,
+        green: Vec<u16>,
+        blue: Vec<u16>,
+    },
     CommitScene {
         target: CommitTarget,
         focus: FocusTarget,
@@ -52,10 +58,37 @@ pub enum DisplayCommand {
     CaptureOutput {
         output: String,
     },
+    StartRecord {
+        output: String,
+        fps: u32,
+    },
+    StopRecord {
+        output: String,
+    },
     SecureBlank {
         output: Option<String>,
     },
+    SetPointerConstraints {
+        output: String,
+        constraints: PointerConstraints,
+    },
     ResumeBegin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum PointerConstraints {
+    None,
+    Locked { x: i32, y: i32 },
+    Confined { region: Vec<Rect> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,8 +119,30 @@ pub enum DisplayEvent {
         format: String,
         artifact_path: String,
     },
+    RecordStarted {
+        output: String,
+        session_id: String,
+    },
+    RecordStopped {
+        output: String,
+        session_id: String,
+        artifact_path: String,
+    },
+    FrameCaptured {
+        output: String,
+        session_id: String,
+        frame_number: u64,
+        artifact_path: String,
+    },
     BlankApplied {
         output: Option<String>,
+    },
+    GammaApplied {
+        output: String,
+    },
+    PointerConstraintsApplied {
+        output: String,
+        constraints: PointerConstraints,
     },
     Rejected {
         reason: String,
@@ -101,6 +156,8 @@ pub enum WaylandCommand {
     GetSurfaceRegistry,
     ApplySelectionHandoff { handoff: WaylandSelectionHandoff },
     CaptureOutput { output: String },
+    StartRecord { output: String, fps: u32 },
+    StopRecord { output: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +175,15 @@ pub enum WaylandEvent {
         width: u32,
         height: u32,
         format: String,
+        artifact_path: String,
+    },
+    RecordStarted {
+        output: String,
+        session_id: String,
+    },
+    RecordStopped {
+        output: String,
+        session_id: String,
         artifact_path: String,
     },
     Rejected {
@@ -141,6 +207,8 @@ pub enum SessionCommand {
     ApplyWatchdogReport { report: SessionWatchdogReport },
     ProfileTransition { transition: SessionProfileTransition },
     ProfileUnchanged { profile_id: String, reason: String },
+    InhibitIdle { reason: String },
+    ReleaseIdle { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

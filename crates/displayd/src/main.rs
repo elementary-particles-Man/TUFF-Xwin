@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env, fs,
     io::BufReader,
     path::{Path, PathBuf},
@@ -195,9 +196,23 @@ async fn handle_display_command(
         DisplayCommand::CaptureOutput { output } => {
             handle_capture_output(&output, config, state, vulkan).await
         }
+        DisplayCommand::StartRecord { output, fps } => {
+            handle_start_record(&output, fps, config, state).await
+        }
+        DisplayCommand::StopRecord { output } => {
+            handle_stop_record(&output, config, state).await
+        }
         DisplayCommand::SecureBlank { output } => {
             println!("service=displayd op=secure_blank event=success output={:?}", output);
             Ok(DisplayEvent::BlankApplied { output })
+        }
+        DisplayCommand::SetGamma { output, .. } => {
+            println!("service=displayd op=set_gamma event=success output={output}");
+            Ok(DisplayEvent::GammaApplied { output })
+        }
+        DisplayCommand::SetPointerConstraints { output, constraints } => {
+            println!("service=displayd op=set_pointer_constraints event=success output={output} constraints={:?}", constraints);
+            Ok(DisplayEvent::PointerConstraintsApplied { output, constraints })
         }
         DisplayCommand::ResumeBegin => {
             if config.fail_resume {
@@ -218,6 +233,14 @@ struct DisplayState {
     last_scene: Option<CommittedSceneState>,
     next_commit_id: u64,
     snapshot_path: PathBuf,
+    active_recordings: HashMap<String, RecordingState>,
+}
+
+#[derive(Debug, Clone)]
+struct RecordingState {
+    session_id: String,
+    fps: u32,
+    start_timestamp: u64,
 }
 
 impl DisplayState {
@@ -248,7 +271,7 @@ impl DisplayState {
             }
         }
 
-        Ok(Self { last_scene, next_commit_id, snapshot_path })
+        Ok(Self { last_scene, next_commit_id, snapshot_path, active_recordings: HashMap::new() })
     }
 
     fn record_commit(&mut self, scene: CommittedSceneState) -> Result<()> {
@@ -347,6 +370,68 @@ async fn handle_capture_output(
         width,
         height,
         format: "RGBA8888".into(),
+        artifact_path: artifact_path.to_string_lossy().to_string(),
+    })
+}
+
+async fn handle_start_record(
+    output: &str,
+    fps: u32,
+    _config: &Config,
+    state: &mut DisplayState,
+) -> Result<DisplayEvent> {
+    if state.active_recordings.contains_key(output) {
+        return Ok(DisplayEvent::Rejected {
+            reason: format!("recording already active for output {output}"),
+        });
+    }
+
+    let session_id = format!("rec-{}", now_unix_timestamp());
+    state.active_recordings.insert(
+        output.to_string(),
+        RecordingState {
+            session_id: session_id.clone(),
+            fps,
+            start_timestamp: now_unix_timestamp(),
+        },
+    );
+
+    println!(
+        "service=displayd op=start_record event=success output={output} session_id={session_id} fps={fps}"
+    );
+
+    Ok(DisplayEvent::RecordStarted { output: output.to_string(), session_id })
+}
+
+async fn handle_stop_record(
+    output: &str,
+    config: &Config,
+    state: &mut DisplayState,
+) -> Result<DisplayEvent> {
+    let recording = match state.active_recordings.remove(output) {
+        Some(r) => r,
+        None => {
+            return Ok(DisplayEvent::Rejected {
+                reason: format!("no active recording for output {output}"),
+            });
+        }
+    };
+
+    let artifact_name = format!("recording-{}-{}.mkv", output, recording.session_id);
+    let artifact_path = session_artifact_path(&config.session_instance_id, &artifact_name);
+
+    // Mock: create an empty file to represent the finished recording
+    fs::write(&artifact_path, b"mock-video-data")?;
+
+    println!(
+        "service=displayd op=stop_record event=success output={output} session_id={} path={}",
+        recording.session_id,
+        artifact_path.display()
+    );
+
+    Ok(DisplayEvent::RecordStopped {
+        output: output.to_string(),
+        session_id: recording.session_id,
         artifact_path: artifact_path.to_string_lossy().to_string(),
     })
 }

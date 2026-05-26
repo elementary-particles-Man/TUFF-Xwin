@@ -696,6 +696,14 @@ fn reconcile_scene_with_registry(
     let focus = reconcile_focus(&scene.focus, &kept_surfaces, &active_registry);
     let (selection, selection_handoffs) =
         reconcile_selection(&registry.selection, &focus, &active_registry);
+
+    // Apply basic layout rules based on roles
+    for surface in &mut kept_surfaces {
+        if let Some(reg) = active_registry.get(surface.id.as_str()) {
+            apply_role_based_layout(surface, reg.role);
+        }
+    }
+
     SceneReconcileResult {
         scene: CompdScene {
             target_output: scene.target_output,
@@ -706,6 +714,32 @@ fn reconcile_scene_with_registry(
         dropped_surface_ids,
         updated_app_ids,
         selection_handoffs,
+    }
+}
+
+fn apply_role_based_layout(surface: &mut SurfaceSnapshot, role: WaylandSurfaceRole) {
+    match role {
+        WaylandSurfaceRole::Background => {
+            surface.placement.x = 0;
+            surface.placement.y = 0;
+            surface.placement.width = 1920; // Stub: should use output geometry
+            surface.placement.height = 1080;
+            surface.placement.z = 0;
+        }
+        WaylandSurfaceRole::Layer => {
+            // Stub: assume it's a top panel
+            surface.placement.x = 0;
+            surface.placement.y = 0;
+            surface.placement.width = 1920;
+            surface.placement.height = 36;
+            surface.placement.z = 100;
+        }
+        WaylandSurfaceRole::Toplevel => {
+            if surface.placement.z < 10 {
+                surface.placement.z = 10;
+            }
+        }
+        _ => {}
     }
 }
 
