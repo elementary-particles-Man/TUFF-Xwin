@@ -209,6 +209,11 @@ async fn handle_display_command(
             Ok(DisplayEvent::GammaApplied { output })
         }
         DisplayCommand::SetPointerConstraints { output, constraints } => {
+            if matches!(constraints, waybroker_common::PointerConstraints::None) {
+                state.pointer_constraints.remove(&output);
+            } else {
+                state.pointer_constraints.insert(output.clone(), constraints.clone());
+            }
             println!(
                 "service=displayd op=set_pointer_constraints event=success output={output} constraints={:?}",
                 constraints
@@ -235,6 +240,7 @@ struct DisplayState {
     next_commit_id: u64,
     snapshot_path: PathBuf,
     active_recordings: HashMap<String, RecordingState>,
+    pointer_constraints: HashMap<String, waybroker_common::PointerConstraints>,
 }
 
 #[derive(Debug, Clone)]
@@ -272,7 +278,13 @@ impl DisplayState {
             }
         }
 
-        Ok(Self { last_scene, next_commit_id, snapshot_path, active_recordings: HashMap::new() })
+        Ok(Self {
+            last_scene,
+            next_commit_id,
+            snapshot_path,
+            active_recordings: HashMap::new(),
+            pointer_constraints: HashMap::new(),
+        })
     }
 
     fn record_commit(&mut self, scene: CommittedSceneState) -> Result<()> {
@@ -523,11 +535,12 @@ mod tests {
         let session_id = "test-session";
         let config = Config { session_instance_id: session_id.into(), ..Default::default() };
 
-        let state = DisplayState {
+        let mut state = DisplayState {
             last_scene: None,
             next_commit_id: 1,
             snapshot_path: temp_dir.path().join("scene-snapshot"),
             active_recordings: HashMap::new(),
+            pointer_constraints: HashMap::new(),
         };
 
         // Ensure runtime dir exists

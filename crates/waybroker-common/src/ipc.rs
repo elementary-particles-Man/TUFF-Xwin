@@ -213,18 +213,56 @@ pub enum DisplayEvent {
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum WaylandCommand {
     GetSurfaceRegistry,
-    ApplySelectionHandoff { handoff: WaylandSelectionHandoff },
-    CaptureOutput { output: String },
-    StartRecord { output: String, fps: u32 },
-    StopRecord { output: String },
-    StartDrag { source_id: String, surface_id: String, mime_types: Vec<String> },
-    DragEnter { surface_id: String, x: f64, y: f64, mime_types: Vec<String> },
-    DragMotion { surface_id: String, x: f64, y: f64, time: u32 },
+    ApplySelectionHandoff {
+        handoff: WaylandSelectionHandoff,
+    },
+    CaptureOutput {
+        output: String,
+    },
+    StartRecord {
+        output: String,
+        fps: u32,
+    },
+    StopRecord {
+        output: String,
+    },
+    StartDrag {
+        source_id: String,
+        surface_id: String,
+        mime_types: Vec<String>,
+    },
+    DragEnter {
+        surface_id: String,
+        x: f64,
+        y: f64,
+        mime_types: Vec<String>,
+    },
+    DragMotion {
+        surface_id: String,
+        x: f64,
+        y: f64,
+        time: u32,
+    },
     DragDrop,
     DragLeave,
     DragCancel,
-    WriteData { source_id: String, mime_type: String, data: Vec<u8> },
-    ReadData { source_id: String, mime_type: String },
+    WriteData {
+        source_id: String,
+        mime_type: String,
+        data: Vec<u8>,
+    },
+    ReadData {
+        source_id: String,
+        mime_type: String,
+    },
+    InjectRelativePointerMotion {
+        surface_id: String,
+        dx: f64,
+        dy: f64,
+        dx_unaccel: f64,
+        dy_unaccel: f64,
+        timestamp: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

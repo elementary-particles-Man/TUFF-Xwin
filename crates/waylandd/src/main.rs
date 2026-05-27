@@ -532,6 +532,24 @@ async fn handle_wayland_command(
                 data_payloads.fake_buffers.get(&(source_id.clone(), mime_type.clone())).cloned();
             (WaylandEvent::DataRead { source_id, mime_type, data }, false)
         }
+        WaylandCommand::InjectRelativePointerMotion {
+            surface_id,
+            dx,
+            dy,
+            dx_unaccel,
+            dy_unaccel,
+            timestamp,
+        } => (
+            WaylandEvent::RelativePointerMotion {
+                surface_id,
+                dx,
+                dy,
+                dx_unaccel,
+                dy_unaccel,
+                timestamp,
+            },
+            false,
+        ),
     }
 }
 
@@ -1275,6 +1293,49 @@ mod tests {
             assert_eq!(data.unwrap(), b"hello drop");
         } else {
             panic!("Expected DataRead");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_relative_pointer_motion() {
+        use waybroker_common::{WaylandCommand, WaylandEvent};
+        let mut registry = mock_surface_registry();
+        let mut data_payloads = super::DataPayloadRegistry::default();
+        let config = super::Config::default();
+
+        let (event, _) = super::handle_wayland_command(
+            WaylandCommand::InjectRelativePointerMotion {
+                surface_id: "game-1".into(),
+                dx: 1.5,
+                dy: -2.0,
+                dx_unaccel: 1.0,
+                dy_unaccel: -2.0,
+                timestamp: 1000,
+            },
+            &mut registry,
+            &mut data_payloads,
+            None,
+            &config,
+        )
+        .await;
+
+        if let WaylandEvent::RelativePointerMotion {
+            surface_id,
+            dx,
+            dy,
+            dx_unaccel,
+            dy_unaccel,
+            timestamp,
+        } = event
+        {
+            assert_eq!(surface_id, "game-1");
+            assert_eq!(dx, 1.5);
+            assert_eq!(dy, -2.0);
+            assert_eq!(dx_unaccel, 1.0);
+            assert_eq!(dy_unaccel, -2.0);
+            assert_eq!(timestamp, 1000);
+        } else {
+            panic!("Expected RelativePointerMotion");
         }
     }
 }
