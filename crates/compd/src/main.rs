@@ -700,7 +700,7 @@ fn reconcile_scene_with_registry(
     // Apply basic layout rules based on roles
     for surface in &mut kept_surfaces {
         if let Some(reg) = active_registry.get(surface.id.as_str()) {
-            apply_role_based_layout(surface, reg.role);
+            apply_role_based_layout(surface, &reg.role);
         }
     }
 
@@ -721,7 +721,7 @@ const STUB_SCREEN_WIDTH: u32 = 1920;
 const STUB_SCREEN_HEIGHT: u32 = 1080;
 const STUB_PANEL_HEIGHT: u32 = 36;
 
-fn apply_role_based_layout(surface: &mut SurfaceSnapshot, role: WaylandSurfaceRole) {
+fn apply_role_based_layout(surface: &mut SurfaceSnapshot, role: &WaylandSurfaceRole) {
     match role {
         WaylandSurfaceRole::Background => {
             // TODO: Use real output geometry from displayd inventory
@@ -731,7 +731,7 @@ fn apply_role_based_layout(surface: &mut SurfaceSnapshot, role: WaylandSurfaceRo
             surface.placement.height = STUB_SCREEN_HEIGHT;
             surface.placement.z = 0;
         }
-        WaylandSurfaceRole::Layer => {
+        WaylandSurfaceRole::Layer(_) => {
             // TODO: Support full wlr-layer-shell-v1 properties (anchor, margin, exclusive zone)
             // Currently stubs a top panel
             surface.placement.x = 0;
@@ -758,7 +758,7 @@ fn reconcile_focus(
         FocusTarget::Surface { id }
             if active_registry
                 .get(id.as_str())
-                .is_some_and(|surface| is_focusable_role(surface.role)) =>
+                .is_some_and(|surface| is_focusable_role(&surface.role)) =>
         {
             FocusTarget::Surface { id: id.clone() }
         }
@@ -775,7 +775,7 @@ fn fallback_focus_target(
         .filter(|surface| surface.placement.visible)
         .filter_map(|surface| {
             active_registry.get(surface.id.as_str()).and_then(|registry_surface| {
-                is_focusable_role(registry_surface.role)
+                is_focusable_role(&registry_surface.role)
                     .then_some((surface.placement.z, &surface.id))
             })
         })
@@ -815,9 +815,11 @@ fn reconcile_selection(
             clipboard_owner,
             clipboard_payload_id,
             clipboard_source_serial,
+            clipboard_offer: previous_selection.clipboard_offer.clone(),
             primary_selection_owner,
             primary_selection_payload_id,
             primary_selection_source_serial,
+            primary_offer: previous_selection.primary_offer.clone(),
         },
         usize::from(clipboard_changed) + usize::from(primary_changed),
     )
@@ -842,7 +844,7 @@ fn reconcile_selection_slot(
                 FocusTarget::Surface { id }
                     if active_registry
                         .get(id.as_str())
-                        .is_some_and(|surface| is_focusable_role(surface.role)) =>
+                        .is_some_and(|surface| is_focusable_role(&surface.role)) =>
                 {
                     Some(id.clone())
                 }
@@ -862,7 +864,7 @@ fn format_owner(owner: Option<&str>) -> &str {
     owner.unwrap_or("none")
 }
 
-fn is_focusable_role(role: WaylandSurfaceRole) -> bool {
+fn is_focusable_role(role: &WaylandSurfaceRole) -> bool {
     matches!(
         role,
         WaylandSurfaceRole::Toplevel | WaylandSurfaceRole::Popup | WaylandSurfaceRole::Lock
@@ -972,9 +974,11 @@ mod tests {
                     clipboard_owner: Some("panel-1".into()),
                     clipboard_payload_id: Some("panel-clipboard-v1".into()),
                     clipboard_source_serial: Some(41),
+                    clipboard_offer: None,
                     primary_selection_owner: Some("terminal-1".into()),
                     primary_selection_payload_id: Some("terminal-primary-v7".into()),
                     primary_selection_source_serial: Some(77),
+                    primary_offer: None,
                 },
                 surfaces: vec![
                     SurfaceSnapshot {
@@ -1012,13 +1016,16 @@ mod tests {
                     mapped: true,
                     buffer_attached: true,
                 }],
+                foreign_toplevels: vec![],
                 selection: WaylandSelectionState {
                     clipboard_owner: Some("panel-1".into()),
                     clipboard_payload_id: Some("panel-clipboard-v1".into()),
                     clipboard_source_serial: Some(41),
+                    clipboard_offer: None,
                     primary_selection_owner: Some("terminal-1".into()),
                     primary_selection_payload_id: Some("terminal-primary-v7".into()),
                     primary_selection_source_serial: Some(77),
+                    primary_offer: None,
                 },
                 unix_timestamp: 1,
             },
@@ -1055,9 +1062,11 @@ mod tests {
                     clipboard_owner: Some("terminal-1".into()),
                     clipboard_payload_id: Some("terminal-clipboard-v1".into()),
                     clipboard_source_serial: Some(51),
+                    clipboard_offer: None,
                     primary_selection_owner: Some("terminal-1".into()),
                     primary_selection_payload_id: Some("terminal-primary-v7".into()),
                     primary_selection_source_serial: Some(77),
+                    primary_offer: None,
                 },
                 surfaces: vec![SurfaceSnapshot {
                     id: "background-1".into(),
@@ -1081,13 +1090,16 @@ mod tests {
                     mapped: true,
                     buffer_attached: true,
                 }],
+                foreign_toplevels: vec![],
                 selection: WaylandSelectionState {
                     clipboard_owner: Some("terminal-1".into()),
                     clipboard_payload_id: Some("terminal-clipboard-v1".into()),
                     clipboard_source_serial: Some(51),
+                    clipboard_offer: None,
                     primary_selection_owner: Some("terminal-1".into()),
                     primary_selection_payload_id: Some("terminal-primary-v7".into()),
                     primary_selection_source_serial: Some(77),
+                    primary_offer: None,
                 },
                 unix_timestamp: 1,
             },

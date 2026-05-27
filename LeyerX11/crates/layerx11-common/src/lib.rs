@@ -46,9 +46,11 @@ impl X11RootlessScene {
             clipboard_owner: self.selection.clipboard_owner.clone(),
             clipboard_payload_id: self.selection.clipboard_payload_id.clone(),
             clipboard_source_serial: self.selection.clipboard_source_serial,
+            clipboard_offer: None,
             primary_selection_owner: self.selection.primary_selection_owner.clone(),
             primary_selection_payload_id: self.selection.primary_selection_payload_id.clone(),
             primary_selection_source_serial: self.selection.primary_selection_source_serial,
+            primary_offer: None,
         }
     }
 

@@ -30,6 +30,7 @@ struct ImeRuntimeState {
     focused_surface_id: Option<String>,
     preedit_active: bool,
     commit_count: u64,
+    cursor_rect: Option<waybroker_common::Rect>,
 }
 
 impl Default for ImeRuntimeState {
@@ -39,6 +40,7 @@ impl Default for ImeRuntimeState {
             focused_surface_id: None,
             preedit_active: false,
             commit_count: 0,
+            cursor_rect: None,
         }
     }
 }
@@ -50,6 +52,7 @@ impl ImeRuntimeState {
             focused_surface_id: self.focused_surface_id.clone(),
             preedit_active: self.preedit_active,
             commit_count: self.commit_count,
+            cursor_rect: self.cursor_rect,
         }
     }
 }
@@ -280,8 +283,30 @@ fn handle_ime_command(command: ImeCommand, state: &mut ImeRuntimeState) -> ImeEv
         }
         ImeCommand::ClearTextFocus => {
             state.focused_surface_id = None;
+            state.preedit_active = false; // also clear preedit on defocus
             println!("service=waylandd op=ime_focus event=cleared");
             ImeEvent::TextFocusChanged { surface_id: None }
+        }
+        ImeCommand::CommitString { text } => {
+            state.commit_count = state.commit_count.saturating_add(1);
+            state.preedit_active = false;
+            println!("service=waylandd op=ime_commit_string event=committed");
+            ImeEvent::StringCommitted { text }
+        }
+        ImeCommand::PreeditString { text, cursor_begin, cursor_end } => {
+            state.preedit_active = !text.is_empty();
+            println!("service=waylandd op=ime_preedit_string event=updated");
+            ImeEvent::PreeditUpdated { text, cursor_begin, cursor_end }
+        }
+        ImeCommand::DeleteSurroundingText { before_length, after_length } => {
+            println!("service=waylandd op=ime_delete_surrounding_text event=deleted");
+            ImeEvent::SurroundingTextDeleted { before_length, after_length }
+        }
+        ImeCommand::SetCursorRect { x, y, width, height } => {
+            let rect = waybroker_common::Rect { x, y, width, height };
+            state.cursor_rect = Some(rect);
+            println!("service=waylandd op=ime_cursor_rect event=updated");
+            ImeEvent::CursorRectChanged { rect }
         }
     }
 }
@@ -348,6 +373,14 @@ async fn handle_wayland_command(
         }
         WaylandCommand::StopRecord { output } => {
             handle_wayland_record_request(&output, None, config, vulkan).await
+        }
+        WaylandCommand::StartDrag { .. }
+        | WaylandCommand::DragEnter { .. }
+        | WaylandCommand::DragMotion { .. }
+        | WaylandCommand::DragDrop
+        | WaylandCommand::DragLeave
+        | WaylandCommand::DragCancel => {
+            (WaylandEvent::Rejected { reason: "dnd not implemented".into() }, false)
         }
     }
 }
@@ -596,13 +629,16 @@ fn mock_surface_registry() -> SurfaceRegistrySnapshot {
                 buffer_attached: true,
             },
         ],
+        foreign_toplevels: vec![],
         selection: WaylandSelectionState {
             clipboard_owner: Some("konsole-1".into()),
             clipboard_payload_id: Some("konsole-clipboard-v1".into()),
             clipboard_source_serial: Some(11),
+            clipboard_offer: None,
             primary_selection_owner: None,
             primary_selection_payload_id: None,
             primary_selection_source_serial: None,
+            primary_offer: None,
         },
         unix_timestamp: now_unix_timestamp(),
     }
@@ -840,9 +876,11 @@ mod tests {
                             clipboard_owner: Some("konsole-1".into()),
                             clipboard_payload_id: Some("konsole-clipboard-v2".into()),
                             clipboard_source_serial: Some(12),
+                            clipboard_offer: None,
                             primary_selection_owner: Some("konsole-1".into()),
                             primary_selection_payload_id: Some("konsole-primary-v1".into()),
                             primary_selection_source_serial: Some(13),
+                            primary_offer: None,
                         },
                     },
                 },
@@ -942,5 +980,38 @@ mod tests {
         let event = super::handle_ime_command(ImeCommand::ClearTextFocus, &mut state);
         assert_eq!(event, ImeEvent::TextFocusChanged { surface_id: None });
         assert_eq!(state.focused_surface_id, None);
+
+        // Test preedit
+        let event = super::handle_ime_command(
+            ImeCommand::PreeditString { text: "hello".into(), cursor_begin: 5, cursor_end: 5 },
+            &mut state,
+        );
+        assert_eq!(
+            event,
+            ImeEvent::PreeditUpdated { text: "hello".into(), cursor_begin: 5, cursor_end: 5 }
+        );
+        assert_eq!(state.preedit_active, true);
+
+        // Test cursor rect
+        let event = super::handle_ime_command(
+            ImeCommand::SetCursorRect { x: 10, y: 20, width: 0, height: 16 },
+            &mut state,
+        );
+        assert_eq!(
+            event,
+            ImeEvent::CursorRectChanged {
+                rect: waybroker_common::Rect { x: 10, y: 20, width: 0, height: 16 }
+            }
+        );
+        assert_eq!(state.cursor_rect.unwrap().y, 20);
+
+        // Test commit
+        let event = super::handle_ime_command(
+            ImeCommand::CommitString { text: "hello".into() },
+            &mut state,
+        );
+        assert_eq!(event, ImeEvent::StringCommitted { text: "hello".into() });
+        assert_eq!(state.preedit_active, false);
+        assert_eq!(state.commit_count, 1);
     }
 }

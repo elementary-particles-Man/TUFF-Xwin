@@ -3,11 +3,12 @@ mod profile;
 mod transport;
 
 pub use ipc::{
-    CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget, HealthState,
-    ImeBridgeMode, ImeCommand, ImeEvent, ImeStatus, IpcEnvelope, LockCommand, LockState,
-    MessageKind, OutputMode, ResumeStage, SessionCommand, SurfacePlacement,
-    SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand, WaylandCommand, WaylandEvent,
-    WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
+    CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget,
+    ForeignToplevelHandle, HealthState, ImeBridgeMode, ImeCommand, ImeEvent, ImeStatus,
+    IpcEnvelope, LayerMetadata, LockCommand, LockState, MessageKind, OutputMode, Rect, ResumeStage,
+    SessionCommand, SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand,
+    WaylandCommand, WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState,
+    WaylandSurfaceRole, WaylandSurfaceState,
 };
 pub use profile::{
     DesktopComponent, DesktopComponentRole, DesktopComponentState, DesktopHealthStatus,
@@ -234,18 +235,21 @@ mod tests {
                         WaylandSurfaceState {
                             id: "panel-1".into(),
                             app_id: "org.kde.plasma.panel".into(),
-                            role: WaylandSurfaceRole::Layer,
+                            role: WaylandSurfaceRole::Layer(super::LayerMetadata::default()),
                             mapped: false,
                             buffer_attached: false,
                         },
                     ],
+                    foreign_toplevels: vec![],
                     selection: WaylandSelectionState {
                         clipboard_owner: Some("panel-1".into()),
                         clipboard_payload_id: Some("panel-clipboard-v1".into()),
                         clipboard_source_serial: Some(41),
+                        clipboard_offer: None,
                         primary_selection_owner: Some("terminal-1".into()),
                         primary_selection_payload_id: Some("terminal-primary-v7".into()),
                         primary_selection_source_serial: Some(77),
+                        primary_offer: None,
                     },
                     unix_timestamp: 1_778_000_200,
                 },
@@ -286,9 +290,11 @@ mod tests {
                         clipboard_owner: Some("terminal-1".into()),
                         clipboard_payload_id: None,
                         clipboard_source_serial: None,
+                        clipboard_offer: None,
                         primary_selection_owner: Some("terminal-1".into()),
                         primary_selection_payload_id: Some("terminal-primary-v7".into()),
                         primary_selection_source_serial: Some(77),
+                        primary_offer: None,
                     },
                 },
             }),
