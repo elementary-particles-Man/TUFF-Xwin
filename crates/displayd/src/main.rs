@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
     let mut clock = FakePresentationClock::default();
     let capture_backend = FakeCaptureBackend;
     let mut record_backend = FakeRecordBackend;
+    let mut display_backend = FakeDisplayBackend;
 
     let listener = bind_service_socket(ServiceRole::Displayd)?;
     let _socket_guard = SocketGuard::new(listener.endpoint().clone());
@@ -56,6 +57,7 @@ async fn main() -> Result<()> {
             &mut clock,
             &capture_backend,
             &mut record_backend,
+            &mut display_backend,
         )
         .await?;
         served += 1;
@@ -113,15 +115,24 @@ async fn handle_client(
     clock: &mut dyn PresentationClock,
     capture_backend: &dyn CaptureBackend,
     record_backend: &mut dyn RecordBackend,
+    display_backend: &mut dyn DisplayBackend,
 ) -> Result<()> {
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
     };
 
-    let response =
-        build_response(request, config, state, vulkan, clock, capture_backend, record_backend)
-            .await?;
+    let response = build_response(
+        request,
+        config,
+        state,
+        vulkan,
+        clock,
+        capture_backend,
+        record_backend,
+        display_backend,
+    )
+    .await?;
     send_json_line(&mut stream, &response)?;
     Ok(())
 }
@@ -134,6 +145,7 @@ async fn build_response(
     clock: &mut dyn PresentationClock,
     capture_backend: &dyn CaptureBackend,
     record_backend: &mut dyn RecordBackend,
+    display_backend: &mut dyn DisplayBackend,
 ) -> Result<IpcEnvelope> {
     let source = request.source;
     let response_kind = match request.kind {
@@ -148,6 +160,7 @@ async fn build_response(
                     clock,
                     capture_backend,
                     record_backend,
+                    display_backend,
                 )
                 .await?,
             )
@@ -175,13 +188,16 @@ async fn handle_display_command(
     clock: &mut dyn PresentationClock,
     capture_backend: &dyn CaptureBackend,
     record_backend: &mut dyn RecordBackend,
+    display_backend: &mut dyn DisplayBackend,
 ) -> Result<DisplayEvent> {
     match command {
         DisplayCommand::EnumerateOutputs => {
-            println!("service=displayd op=enumerate_outputs event=success");
-            Ok(DisplayEvent::OutputInventory { outputs: vec![stub_output_mode()] })
+            let outputs = display_backend.enumerate_outputs()?;
+            println!("service=displayd op=enumerate_outputs event=success count={}", outputs.len());
+            Ok(DisplayEvent::OutputInventory { outputs })
         }
         DisplayCommand::SetMode { output, mode } => {
+            display_backend.set_mode(&output, &mode)?;
             println!("service=displayd op=set_mode event=success output={output} mode={:?}", mode);
             Ok(DisplayEvent::ModeApplied { output, mode })
         }
@@ -259,7 +275,8 @@ async fn handle_display_command(
             println!("service=displayd op=secure_blank event=success output={:?}", output);
             Ok(DisplayEvent::BlankApplied { output })
         }
-        DisplayCommand::SetGamma { output, .. } => {
+        DisplayCommand::SetGamma { output, red, green, blue } => {
+            display_backend.set_gamma(&output, &red, &green, &blue)?;
             println!("service=displayd op=set_gamma event=success output={output}");
             Ok(DisplayEvent::GammaApplied { output })
         }
@@ -318,6 +335,31 @@ trait CaptureBackend {
 trait RecordBackend {
     fn start(&mut self, output: &str, fps: u32) -> Result<String>;
     fn stop(&mut self, output: &str, session_id: &str, config: &Config) -> Result<PathBuf>;
+}
+
+trait DisplayBackend {
+    fn enumerate_outputs(&self) -> Result<Vec<OutputMode>>;
+    fn set_mode(&mut self, output: &str, mode: &OutputMode) -> Result<()>;
+    fn set_gamma(&mut self, output: &str, red: &[u16], green: &[u16], blue: &[u16]) -> Result<()>;
+}
+
+struct FakeDisplayBackend;
+
+impl DisplayBackend for FakeDisplayBackend {
+    fn enumerate_outputs(&self) -> Result<Vec<OutputMode>> {
+        Ok(vec![stub_output_mode()])
+    }
+
+    fn set_mode(&mut self, _output: &str, _mode: &OutputMode) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_gamma(&mut self, _output: &str, red: &[u16], green: &[u16], blue: &[u16]) -> Result<()> {
+        if red.len() != green.len() || green.len() != blue.len() {
+            bail!("gamma LUT size mismatch");
+        }
+        Ok(())
+    }
 }
 
 struct FakeCaptureBackend;
@@ -676,6 +718,7 @@ mod tests {
         let mut clock = FakePresentationClock::default();
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
+        let mut display_backend = FakeDisplayBackend;
 
         let result = handle_display_command(
             DisplayCommand::CaptureOutput { output: "eDP-1".into() },
@@ -686,6 +729,7 @@ mod tests {
             &mut clock,
             &capture_backend,
             &mut record_backend,
+            &mut display_backend,
         )
         .await
         .expect("handle capture");
@@ -718,6 +762,7 @@ mod tests {
             &mut clock,
             &capture_backend,
             &mut record_backend,
+            &mut display_backend,
         )
         .await
         .expect("handle commit");
@@ -735,6 +780,7 @@ mod tests {
                 &mut clock,
                 &capture_backend,
                 &mut record_backend,
+                &mut display_backend,
             )
             .await
             .expect("handle feedback query");
