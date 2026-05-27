@@ -689,18 +689,13 @@ fn reconcile_scene_with_registry(
                 }
                 kept_surfaces.push(surface);
             }
-            None => {
-                // DO NOT drop surfaces for now, as waylandd registry might be incomplete (stub mode)
-                // This preserves IME candidate windows and other untracked surfaces.
-                println!("service=compd op=scene_reconcile event=surface_untracked id={} action=keep", surface.id);
-                kept_surfaces.push(surface);
-            }
+            None => dropped_surface_ids.push(surface.id),
         }
     }
 
     let focus = reconcile_focus(&scene.focus, &kept_surfaces, &active_registry);
     let (selection, selection_handoffs) =
-        reconcile_selection(&registry.selection, &focus, &kept_surfaces, &active_registry);
+        reconcile_selection(&registry.selection, &focus, &active_registry);
 
     // Apply basic layout rules based on roles
     for surface in &mut kept_surfaces {
@@ -745,14 +740,7 @@ fn apply_role_based_layout(surface: &mut SurfaceSnapshot, role: WaylandSurfaceRo
             surface.placement.height = STUB_PANEL_HEIGHT;
             surface.placement.z = 100;
         }
-        WaylandSurfaceRole::Popup => {
-            // IME candidate windows and menus should be at the very top
-            if surface.placement.z < 200 {
-                surface.placement.z = 200;
-            }
-        }
         WaylandSurfaceRole::Toplevel => {
-            // Keep existing Z if it's already above background
             if surface.placement.z < 10 {
                 surface.placement.z = 10;
             }
@@ -767,24 +755,15 @@ fn reconcile_focus(
     active_registry: &BTreeMap<&str, &WaylandSurfaceState>,
 ) -> FocusTarget {
     match previous_focus {
-        FocusTarget::Surface { id } => {
-            // Check if surface still exists in the scene
-            if surfaces.iter().any(|s| &s.id == id) {
-                // If it's in the registry, respect the focusable role check.
-                // If it's NOT in the registry (untracked), assume it might be focusable to avoid breaking real apps.
-                let focusable = active_registry
-                    .get(id.as_str())
-                    .map(|surface| is_focusable_role(surface.role))
-                    .unwrap_or(true); // Default to true for untracked surfaces
-
-                if focusable {
-                    return FocusTarget::Surface { id: id.clone() };
-                }
-            }
+        FocusTarget::Surface { id }
+            if active_registry
+                .get(id.as_str())
+                .is_some_and(|surface| is_focusable_role(surface.role)) =>
+        {
+            FocusTarget::Surface { id: id.clone() }
         }
-        _ => {}
+        _ => fallback_focus_target(surfaces, active_registry),
     }
-    fallback_focus_target(surfaces, active_registry)
 }
 
 fn fallback_focus_target(
@@ -795,17 +774,10 @@ fn fallback_focus_target(
         .iter()
         .filter(|surface| surface.placement.visible)
         .filter_map(|surface| {
-            // Similar leniency for fallback
-            let focusable = active_registry
-                .get(surface.id.as_str())
-                .map(|registry_surface| is_focusable_role(registry_surface.role))
-                .unwrap_or(true); // Default to true for untracked surfaces
-
-            if focusable {
-                Some((surface.placement.z, &surface.id))
-            } else {
-                None
-            }
+            active_registry.get(surface.id.as_str()).and_then(|registry_surface| {
+                is_focusable_role(registry_surface.role)
+                    .then_some((surface.placement.z, &surface.id))
+            })
         })
         .max_by_key(|(z, _)| *z)
         .map(|(_, id)| FocusTarget::Surface { id: id.clone() })
@@ -815,7 +787,6 @@ fn fallback_focus_target(
 fn reconcile_selection(
     previous_selection: &WaylandSelectionState,
     focus: &FocusTarget,
-    surfaces: &[SurfaceSnapshot],
     active_registry: &BTreeMap<&str, &WaylandSurfaceState>,
 ) -> (WaylandSelectionState, usize) {
     let (clipboard_owner, clipboard_payload_id, clipboard_source_serial, clipboard_changed) =
@@ -824,7 +795,6 @@ fn reconcile_selection(
             previous_selection.clipboard_payload_id.as_deref(),
             previous_selection.clipboard_source_serial,
             focus,
-            surfaces,
             active_registry,
         );
     let (
@@ -837,7 +807,6 @@ fn reconcile_selection(
         previous_selection.primary_selection_payload_id.as_deref(),
         previous_selection.primary_selection_source_serial,
         focus,
-        surfaces,
         active_registry,
     );
 
@@ -859,11 +828,10 @@ fn reconcile_selection_slot(
     previous_payload_id: Option<&str>,
     previous_source_serial: Option<u64>,
     focus: &FocusTarget,
-    surfaces: &[SurfaceSnapshot],
     active_registry: &BTreeMap<&str, &WaylandSurfaceState>,
 ) -> (Option<String>, Option<String>, Option<u64>, bool) {
     match previous_owner {
-        Some(id) if active_registry.contains_key(id) || surfaces.iter().any(|s| s.id == id) => (
+        Some(id) if active_registry.contains_key(id) => (
             Some(id.to_owned()),
             previous_payload_id.map(str::to_owned),
             previous_source_serial,
@@ -871,17 +839,12 @@ fn reconcile_selection_slot(
         ),
         Some(_) => {
             let handoff = match focus {
-                FocusTarget::Surface { id } => {
-                    let focusable = active_registry
+                FocusTarget::Surface { id }
+                    if active_registry
                         .get(id.as_str())
-                        .map(|surface| is_focusable_role(surface.role))
-                        .unwrap_or(true); // Default to true for untracked surfaces
-
-                    if focusable {
-                        Some(id.clone())
-                    } else {
-                        None
-                    }
+                        .is_some_and(|surface| is_focusable_role(surface.role)) =>
+                {
+                    Some(id.clone())
                 }
                 _ => None,
             };
@@ -1000,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_surfaces_missing_from_wayland_registry_leniently() {
+    fn drops_surfaces_missing_from_wayland_registry() {
         let reconciled = reconcile_scene_with_registry(
             CompdScene {
                 target_output: "eDP-1".into(),
@@ -1061,17 +1024,13 @@ mod tests {
             },
         );
 
-        // Lenient: should keep both even if panel-1 is missing from registry
-        assert_eq!(reconciled.scene.surfaces.len(), 2);
+        assert_eq!(reconciled.scene.surfaces.len(), 1);
         assert_eq!(reconciled.scene.surfaces[0].id, "terminal-1");
         assert_eq!(reconciled.scene.surfaces[0].app_id, "org.kde.konsole");
-        assert_eq!(reconciled.scene.surfaces[1].id, "panel-1");
-        // focus remains on panel-1 because it survived and is focusable (default for untracked)
-        assert_eq!(reconciled.scene.focus, FocusTarget::Surface { id: "panel-1".into() });
-        // selection owner is kept because panel-1 survived in the scene
-        assert_eq!(reconciled.scene.selection.clipboard_owner.as_deref(), Some("panel-1"));
-        assert_eq!(reconciled.scene.selection.clipboard_payload_id.as_deref(), Some("panel-clipboard-v1"));
-        assert_eq!(reconciled.scene.selection.clipboard_source_serial, Some(41));
+        assert_eq!(reconciled.scene.focus, FocusTarget::Surface { id: "terminal-1".into() });
+        assert_eq!(reconciled.scene.selection.clipboard_owner.as_deref(), Some("terminal-1"));
+        assert_eq!(reconciled.scene.selection.clipboard_payload_id, None);
+        assert_eq!(reconciled.scene.selection.clipboard_source_serial, None);
         assert_eq!(
             reconciled.scene.selection.primary_selection_owner.as_deref(),
             Some("terminal-1")
@@ -1081,9 +1040,9 @@ mod tests {
             Some("terminal-primary-v7")
         );
         assert_eq!(reconciled.scene.selection.primary_selection_source_serial, Some(77));
-        assert_eq!(reconciled.dropped_surface_ids, Vec::<String>::new());
+        assert_eq!(reconciled.dropped_surface_ids, vec!["panel-1"]);
         assert_eq!(reconciled.updated_app_ids, 1);
-        assert_eq!(reconciled.selection_handoffs, 0);
+        assert_eq!(reconciled.selection_handoffs, 1);
     }
 
     #[test]
