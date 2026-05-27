@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
     };
 
     let mut state = DisplayState::load(&config.session_instance_id)?;
+    let mut clock = FakePresentationClock::default();
 
     let listener = bind_service_socket(ServiceRole::Displayd)?;
     let _socket_guard = SocketGuard::new(listener.endpoint().clone());
@@ -45,7 +46,7 @@ async fn main() -> Result<()> {
     let mut served = 0usize;
     for stream in listener.incoming() {
         let stream = stream?;
-        handle_client(stream, &config, &mut state, vulkan.as_ref()).await?;
+        handle_client(stream, &config, &mut state, vulkan.as_ref(), &mut clock).await?;
         served += 1;
 
         if config.serve_once {
@@ -98,13 +99,14 @@ async fn handle_client(
     config: &Config,
     state: &mut DisplayState,
     vulkan: Option<&VulkanBackend>,
+    clock: &mut dyn PresentationClock,
 ) -> Result<()> {
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
     };
 
-    let response = build_response(request, config, state, vulkan).await?;
+    let response = build_response(request, config, state, vulkan, clock).await?;
     send_json_line(&mut stream, &response)?;
     Ok(())
 }
@@ -114,12 +116,13 @@ async fn build_response(
     config: &Config,
     state: &mut DisplayState,
     vulkan: Option<&VulkanBackend>,
+    clock: &mut dyn PresentationClock,
 ) -> Result<IpcEnvelope> {
     let source = request.source;
     let response_kind = match request.kind {
         MessageKind::DisplayCommand(command) if request.destination == ServiceRole::Displayd => {
             MessageKind::DisplayEvent(
-                handle_display_command(command, source, config, state, vulkan).await?,
+                handle_display_command(command, source, config, state, vulkan, clock).await?,
             )
         }
         MessageKind::DisplayCommand(_) => MessageKind::DisplayEvent(DisplayEvent::Rejected {
@@ -142,6 +145,7 @@ async fn handle_display_command(
     config: &Config,
     state: &mut DisplayState,
     vulkan: Option<&VulkanBackend>,
+    clock: &mut dyn PresentationClock,
 ) -> Result<DisplayEvent> {
     match command {
         DisplayCommand::EnumerateOutputs => {
@@ -181,6 +185,17 @@ async fn handle_display_command(
             };
             let surface_count = snapshot.surfaces.len();
             state.record_commit(snapshot)?;
+            state.next_commit_id += 1;
+
+            let feedback = DisplayEvent::FramePresented {
+                commit_id,
+                timestamp: clock.now(),
+                refresh_ns: 16_666_666,
+                seq: clock.current_seq(),
+                flags: 0,
+            };
+            state.presentation_feedbacks.insert(commit_id, feedback);
+
             println!(
                 "service=displayd op=commit_scene event=success commit_id={} surfaces={} path={} session_instance_id={}",
                 commit_id,
@@ -189,6 +204,15 @@ async fn handle_display_command(
                 config.session_instance_id
             );
             Ok(DisplayEvent::SceneCommitted { target, focus, selection, surface_count, commit_id })
+        }
+        DisplayCommand::GetPresentationFeedback { commit_id } => {
+            if let Some(feedback) = state.presentation_feedbacks.get(&commit_id) {
+                Ok(feedback.clone())
+            } else {
+                Ok(DisplayEvent::Rejected {
+                    reason: format!("no feedback for commit_id {commit_id}"),
+                })
+            }
         }
         DisplayCommand::GetSceneSnapshot { output } => {
             Ok(handle_scene_snapshot_request(output, state))
@@ -241,6 +265,7 @@ struct DisplayState {
     snapshot_path: PathBuf,
     active_recordings: HashMap<String, RecordingState>,
     pointer_constraints: HashMap<String, waybroker_common::PointerConstraints>,
+    presentation_feedbacks: HashMap<u64, DisplayEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -248,6 +273,38 @@ struct RecordingState {
     session_id: String,
     fps: u32,
     start_timestamp: u64,
+}
+
+trait PresentationClock {
+    fn now(&self) -> u64; // monotonic timestamp in ns
+    fn current_seq(&self) -> u64;
+}
+
+struct FakePresentationClock {
+    time_ns: u64,
+    seq: u64,
+}
+
+impl Default for FakePresentationClock {
+    fn default() -> Self {
+        Self { time_ns: 1_000_000_000, seq: 1 }
+    }
+}
+
+impl PresentationClock for FakePresentationClock {
+    fn now(&self) -> u64 {
+        self.time_ns
+    }
+    fn current_seq(&self) -> u64 {
+        self.seq
+    }
+}
+
+impl FakePresentationClock {
+    fn advance_frame(&mut self) {
+        self.time_ns += 16_666_666; // 60Hz
+        self.seq += 1;
+    }
 }
 
 impl DisplayState {
@@ -284,6 +341,7 @@ impl DisplayState {
             snapshot_path,
             active_recordings: HashMap::new(),
             pointer_constraints: HashMap::new(),
+            presentation_feedbacks: HashMap::new(),
         })
     }
 
@@ -541,6 +599,7 @@ mod tests {
             snapshot_path: temp_dir.path().join("scene-snapshot"),
             active_recordings: HashMap::new(),
             pointer_constraints: HashMap::new(),
+            presentation_feedbacks: HashMap::new(),
         };
 
         // Ensure runtime dir exists
@@ -548,7 +607,18 @@ mod tests {
         let session_runtime_dir = temp_dir.path().join("waybroker").join(session_id);
         std::fs::create_dir_all(&session_runtime_dir).unwrap();
 
-        let result = handle_capture_output("eDP-1", &config, &state, None).await.unwrap();
+        let mut clock = FakePresentationClock::default();
+
+        let result = handle_display_command(
+            DisplayCommand::CaptureOutput { output: "eDP-1".into() },
+            ServiceRole::Sessiond,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+        )
+        .await
+        .expect("handle capture");
 
         if let DisplayEvent::OutputCaptured { output, width, height, format, artifact_path } =
             result
@@ -561,6 +631,49 @@ mod tests {
             assert!(std::path::Path::new(&artifact_path).exists());
         } else {
             panic!("Unexpected event: {:?}", result);
+        }
+
+        // Test CommitScene and Presentation Feedback
+        let commit_result = handle_display_command(
+            DisplayCommand::CommitScene {
+                target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+                focus: waybroker_common::FocusTarget::None,
+                selection: waybroker_common::WaylandSelectionState::default(),
+                surfaces: vec![],
+            },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+        )
+        .await
+        .expect("handle commit");
+
+        if let DisplayEvent::SceneCommitted { commit_id, .. } = commit_result {
+            assert_eq!(commit_id, 1);
+
+            // Query feedback
+            let feedback_result = handle_display_command(
+                DisplayCommand::GetPresentationFeedback { commit_id: 1 },
+                ServiceRole::Waylandd,
+                &config,
+                &mut state,
+                None,
+                &mut clock,
+            )
+            .await
+            .expect("handle feedback query");
+
+            if let DisplayEvent::FramePresented { commit_id: fid, timestamp, .. } = feedback_result
+            {
+                assert_eq!(fid, 1);
+                assert_eq!(timestamp, 1_000_000_000);
+            } else {
+                panic!("Expected FramePresented");
+            }
+        } else {
+            panic!("Expected SceneCommitted");
         }
     }
 }

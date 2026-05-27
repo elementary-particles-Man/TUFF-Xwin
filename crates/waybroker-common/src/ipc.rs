@@ -124,6 +124,9 @@ pub enum DisplayCommand {
         output: String,
         constraints: PointerConstraints,
     },
+    GetPresentationFeedback {
+        commit_id: u64,
+    },
     ResumeBegin,
 }
 
