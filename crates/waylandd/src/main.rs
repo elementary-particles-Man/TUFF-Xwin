@@ -31,6 +31,9 @@ struct ImeRuntimeState {
     preedit_active: bool,
     commit_count: u64,
     cursor_rect: Option<waybroker_common::Rect>,
+    surrounding_text: Option<String>,
+    surrounding_cursor: u32,
+    content_purpose: u32,
 }
 
 impl Default for ImeRuntimeState {
@@ -41,6 +44,9 @@ impl Default for ImeRuntimeState {
             preedit_active: false,
             commit_count: 0,
             cursor_rect: None,
+            surrounding_text: None,
+            surrounding_cursor: 0,
+            content_purpose: 0,
         }
     }
 }
@@ -53,8 +59,29 @@ impl ImeRuntimeState {
             preedit_active: self.preedit_active,
             commit_count: self.commit_count,
             cursor_rect: self.cursor_rect,
+            surrounding_text: self.surrounding_text.clone(),
+            surrounding_cursor: self.surrounding_cursor,
+            content_purpose: self.content_purpose,
         }
     }
+}
+
+trait ImeBackend {
+    fn set_cursor_rect(&mut self, rect: waybroker_common::Rect);
+    fn set_surrounding_text(&mut self, text: &str, cursor: u32, anchor: u32);
+    fn set_content_type(&mut self, hint: u32, purpose: u32);
+    fn clear_focus(&mut self);
+    fn focus_surface(&mut self, surface_id: &str);
+}
+
+struct FakeImeBackend;
+
+impl ImeBackend for FakeImeBackend {
+    fn set_cursor_rect(&mut self, _rect: waybroker_common::Rect) {}
+    fn set_surrounding_text(&mut self, _text: &str, _cursor: u32, _anchor: u32) {}
+    fn set_content_type(&mut self, _hint: u32, _purpose: u32) {}
+    fn clear_focus(&mut self) {}
+    fn focus_surface(&mut self, _surface_id: &str) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,8 +162,16 @@ async fn main() -> Result<()> {
             Err(err) => println!("waylandd displayd_state=unreachable reason={err}"),
         }
 
-        serve_ipc(&config, &mut registry, &mut ime_state, &mut data_payloads, vulkan.as_ref())
-            .await?;
+        let mut ime_backend = FakeImeBackend;
+        serve_ipc(
+            &config,
+            &mut registry,
+            &mut ime_state,
+            &mut ime_backend,
+            &mut data_payloads,
+            vulkan.as_ref(),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -209,6 +244,7 @@ async fn serve_ipc(
     config: &Config,
     registry: &mut SurfaceRegistrySnapshot,
     ime_state: &mut ImeRuntimeState,
+    ime_backend: &mut dyn ImeBackend,
     data_payloads: &mut DataPayloadRegistry,
     vulkan: Option<&VulkanBackend>,
 ) -> Result<()> {
@@ -241,6 +277,7 @@ async fn serve_ipc(
             stream,
             registry,
             ime_state,
+            ime_backend,
             data_payloads,
             vulkan,
             config,
@@ -262,6 +299,7 @@ async fn handle_client(
     mut stream: ServiceStream,
     registry: &mut SurfaceRegistrySnapshot,
     ime_state: &mut ImeRuntimeState,
+    ime_backend: &mut dyn ImeBackend,
     data_payloads: &mut DataPayloadRegistry,
     vulkan: Option<&VulkanBackend>,
     config: &Config,
@@ -273,7 +311,8 @@ async fn handle_client(
     };
 
     let (response, registry_changed) =
-        build_response(request, registry, ime_state, data_payloads, vulkan, config).await;
+        build_response(request, registry, ime_state, ime_backend, data_payloads, vulkan, config)
+            .await;
     send_json_line(&mut stream, &response)?;
     if registry_changed {
         write_surface_registry_artifact(registry, session_instance_id)?;
@@ -285,6 +324,7 @@ async fn build_response(
     request: IpcEnvelope,
     registry: &mut SurfaceRegistrySnapshot,
     ime_state: &mut ImeRuntimeState,
+    ime_backend: &mut dyn ImeBackend,
     data_payloads: &mut DataPayloadRegistry,
     vulkan: Option<&VulkanBackend>,
     config: &Config,
@@ -297,7 +337,7 @@ async fn build_response(
             (MessageKind::WaylandEvent(event), changed)
         }
         MessageKind::ImeCommand(command) if request.destination == ServiceRole::Waylandd => {
-            let event = handle_ime_command(command, ime_state);
+            let event = handle_ime_command(command, ime_state, ime_backend);
             (MessageKind::ImeEvent(event), false)
         }
         MessageKind::WaylandCommand(_) | MessageKind::ImeCommand(_) => (
@@ -320,7 +360,11 @@ async fn build_response(
     (IpcEnvelope::new(ServiceRole::Waylandd, source, response_kind), registry_changed)
 }
 
-fn handle_ime_command(command: ImeCommand, state: &mut ImeRuntimeState) -> ImeEvent {
+fn handle_ime_command(
+    command: ImeCommand,
+    state: &mut ImeRuntimeState,
+    backend: &mut dyn ImeBackend,
+) -> ImeEvent {
     match command {
         ImeCommand::GetImeStatus => ImeEvent::Status { status: state.status() },
         ImeCommand::SetImeBridgeMode { mode } => {
@@ -330,12 +374,14 @@ fn handle_ime_command(command: ImeCommand, state: &mut ImeRuntimeState) -> ImeEv
         }
         ImeCommand::FocusTextSurface { surface_id } => {
             state.focused_surface_id = Some(surface_id.clone());
+            backend.focus_surface(&surface_id);
             println!("service=waylandd op=ime_focus event=changed surface_id={}", surface_id);
             ImeEvent::TextFocusChanged { surface_id: Some(surface_id) }
         }
         ImeCommand::ClearTextFocus => {
             state.focused_surface_id = None;
             state.preedit_active = false; // also clear preedit on defocus
+            backend.clear_focus();
             println!("service=waylandd op=ime_focus event=cleared");
             ImeEvent::TextFocusChanged { surface_id: None }
         }
@@ -357,8 +403,22 @@ fn handle_ime_command(command: ImeCommand, state: &mut ImeRuntimeState) -> ImeEv
         ImeCommand::SetCursorRect { x, y, width, height } => {
             let rect = waybroker_common::Rect { x, y, width, height };
             state.cursor_rect = Some(rect);
+            backend.set_cursor_rect(rect);
             println!("service=waylandd op=ime_cursor_rect event=updated");
             ImeEvent::CursorRectChanged { rect }
+        }
+        ImeCommand::SetSurroundingText { text, cursor, anchor } => {
+            state.surrounding_text = Some(text.clone());
+            state.surrounding_cursor = cursor;
+            backend.set_surrounding_text(&text, cursor, anchor);
+            println!("service=waylandd op=ime_surrounding_text event=updated");
+            ImeEvent::SurroundingTextChanged { text, cursor, anchor }
+        }
+        ImeCommand::SetContentType { hint, purpose } => {
+            state.content_purpose = purpose;
+            backend.set_content_type(hint, purpose);
+            println!("service=waylandd op=ime_content_type event=updated");
+            ImeEvent::ContentTypeChanged { hint, purpose }
         }
     }
 }
@@ -1041,12 +1101,14 @@ mod tests {
     async fn test_ime_state_transitions() {
         use waybroker_common::{ImeBridgeMode, ImeCommand, ImeEvent};
         let mut state = super::ImeRuntimeState::default();
+        let mut backend = super::FakeImeBackend;
         assert_eq!(state.bridge_mode, ImeBridgeMode::Disabled);
 
         // Test mode change
         let event = super::handle_ime_command(
             ImeCommand::SetImeBridgeMode { mode: ImeBridgeMode::ProtocolStub },
             &mut state,
+            &mut backend,
         );
         assert_eq!(event, ImeEvent::BridgeModeChanged { mode: ImeBridgeMode::ProtocolStub });
         assert_eq!(state.bridge_mode, ImeBridgeMode::ProtocolStub);
@@ -1055,12 +1117,13 @@ mod tests {
         let event = super::handle_ime_command(
             ImeCommand::FocusTextSurface { surface_id: "editor-1".into() },
             &mut state,
+            &mut backend,
         );
         assert_eq!(event, ImeEvent::TextFocusChanged { surface_id: Some("editor-1".into()) });
         assert_eq!(state.focused_surface_id.as_deref(), Some("editor-1"));
 
         // Test status query
-        let event = super::handle_ime_command(ImeCommand::GetImeStatus, &mut state);
+        let event = super::handle_ime_command(ImeCommand::GetImeStatus, &mut state, &mut backend);
         if let ImeEvent::Status { status } = event {
             assert_eq!(status.bridge_mode, ImeBridgeMode::ProtocolStub);
             assert_eq!(status.focused_surface_id.as_deref(), Some("editor-1"));
@@ -1069,7 +1132,7 @@ mod tests {
         }
 
         // Test clear focus
-        let event = super::handle_ime_command(ImeCommand::ClearTextFocus, &mut state);
+        let event = super::handle_ime_command(ImeCommand::ClearTextFocus, &mut state, &mut backend);
         assert_eq!(event, ImeEvent::TextFocusChanged { surface_id: None });
         assert_eq!(state.focused_surface_id, None);
 
@@ -1077,6 +1140,7 @@ mod tests {
         let event = super::handle_ime_command(
             ImeCommand::PreeditString { text: "hello".into(), cursor_begin: 5, cursor_end: 5 },
             &mut state,
+            &mut backend,
         );
         assert_eq!(
             event,
@@ -1088,6 +1152,7 @@ mod tests {
         let event = super::handle_ime_command(
             ImeCommand::SetCursorRect { x: 10, y: 20, width: 0, height: 16 },
             &mut state,
+            &mut backend,
         );
         assert_eq!(
             event,
@@ -1101,10 +1166,31 @@ mod tests {
         let event = super::handle_ime_command(
             ImeCommand::CommitString { text: "hello".into() },
             &mut state,
+            &mut backend,
         );
         assert_eq!(event, ImeEvent::StringCommitted { text: "hello".into() });
         assert_eq!(state.preedit_active, false);
         assert_eq!(state.commit_count, 1);
+
+        // Test surrounding text and content type
+        let event = super::handle_ime_command(
+            ImeCommand::SetSurroundingText { text: "world".into(), cursor: 5, anchor: 5 },
+            &mut state,
+            &mut backend,
+        );
+        assert_eq!(
+            event,
+            ImeEvent::SurroundingTextChanged { text: "world".into(), cursor: 5, anchor: 5 }
+        );
+        assert_eq!(state.surrounding_text.as_deref(), Some("world"));
+
+        let event = super::handle_ime_command(
+            ImeCommand::SetContentType { hint: 1, purpose: 2 },
+            &mut state,
+            &mut backend,
+        );
+        assert_eq!(event, ImeEvent::ContentTypeChanged { hint: 1, purpose: 2 });
+        assert_eq!(state.content_purpose, 2);
     }
 
     #[tokio::test]

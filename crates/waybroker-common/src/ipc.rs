@@ -44,6 +44,8 @@ pub enum ImeCommand {
     PreeditString { text: String, cursor_begin: i32, cursor_end: i32 },
     DeleteSurroundingText { before_length: u32, after_length: u32 },
     SetCursorRect { x: i32, y: i32, width: u32, height: u32 },
+    SetSurroundingText { text: String, cursor: u32, anchor: u32 },
+    SetContentType { hint: u32, purpose: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +63,9 @@ pub struct ImeStatus {
     pub preedit_active: bool,
     pub commit_count: u64,
     pub cursor_rect: Option<Rect>,
+    pub surrounding_text: Option<String>,
+    pub surrounding_cursor: u32,
+    pub content_purpose: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,6 +78,8 @@ pub enum ImeEvent {
     PreeditUpdated { text: String, cursor_begin: i32, cursor_end: i32 },
     SurroundingTextDeleted { before_length: u32, after_length: u32 },
     CursorRectChanged { rect: Rect },
+    SurroundingTextChanged { text: String, cursor: u32, anchor: u32 },
+    ContentTypeChanged { hint: u32, purpose: u32 },
     Rejected { reason: String },
 }
 
