@@ -662,7 +662,10 @@ fn bind_single_wayland_display_socket(
         })
         .context("failed to spawn Wayland display listener")?;
 
-    println!("service=waylandd op=wayland_display event=socket_bound path={}", path.display());
+    println!(
+        "service=waylandd op=wayland_display event=diagnostic_listener_bound path={} info=\"this is a minimal listener for connection observation only\"",
+        path.display()
+    );
     Ok(WaylandDisplaySocket { path: path.to_path_buf(), lock_path: lock_path.to_path_buf() })
 }
 

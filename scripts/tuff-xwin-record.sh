@@ -2,15 +2,33 @@
 # TUFF-Xwin Screen Recording Tool
 # Sends StartRecord / StopRecord command to displayd
 
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/waybroker"
-SESSION_ID="${1:-default-single-session}"
-OP="${2:-start}"
-OUTPUT_NAME="${3:-eDP-1}"
+RUNTIME_DIR="${WAYBROKER_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/waybroker}"
+OP="${1:-start}"
+OUTPUT_NAME="${2:-eDP-1}"
+SESSION_ID="${3:-}"
 
-SOCKET_PATH="$RUNTIME_DIR/$SESSION_ID/displayd.sock"
+# Candidate paths
+CANDIDATES=(
+    "$RUNTIME_DIR/displayd.sock"
+)
+if [ -n "$SESSION_ID" ]; then
+    CANDIDATES+=("$RUNTIME_DIR/$SESSION_ID/displayd.sock")
+fi
 
-if [ ! -S "$SOCKET_PATH" ]; then
-    echo "Error: displayd socket not found at $SOCKET_PATH"
+SOCKET_PATH=""
+for CANDIDATE in "${CANDIDATES[@]}"; do
+    if [ -S "$CANDIDATE" ]; then
+        SOCKET_PATH="$CANDIDATE"
+        break
+    fi
+done
+
+if [ -z "$SOCKET_PATH" ]; then
+    echo "Error: displayd socket not found."
+    echo "Searched candidates:"
+    for CANDIDATE in "${CANDIDATES[@]}"; do
+        echo "  - $CANDIDATE"
+    done
     exit 1
 fi
 
@@ -46,7 +64,7 @@ elif [ "$OP" == "stop" ]; then
 EOF
 )
 else
-  echo "Usage: $0 [session_id] [start|stop] [output_name]"
+  echo "Usage: $0 [start|stop] [output_name] [optional_session_id]"
   exit 1
 fi
 

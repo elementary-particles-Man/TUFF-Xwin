@@ -2,15 +2,33 @@
 # TUFF-Xwin Idle Inhibition Tool
 # Sends InhibitIdle / ReleaseIdle command to sessiond
 
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/waybroker"
-SESSION_ID="${1:-default-single-session}"
-OP="${2:-inhibit}"
-REASON="${3:-testing idle inhibition}"
+RUNTIME_DIR="${WAYBROKER_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/waybroker}"
+OP="${1:-inhibit}"
+REASON="${2:-testing idle inhibition}"
+SESSION_ID="${3:-}"
 
-SOCKET_PATH="$RUNTIME_DIR/$SESSION_ID/sessiond.sock"
+# Candidate paths
+CANDIDATES=(
+    "$RUNTIME_DIR/sessiond.sock"
+)
+if [ -n "$SESSION_ID" ]; then
+    CANDIDATES+=("$RUNTIME_DIR/$SESSION_ID/sessiond.sock")
+fi
 
-if [ ! -S "$SOCKET_PATH" ]; then
-    echo "Error: sessiond socket not found at $SOCKET_PATH"
+SOCKET_PATH=""
+for CANDIDATE in "${CANDIDATES[@]}"; do
+    if [ -S "$CANDIDATE" ]; then
+        SOCKET_PATH="$CANDIDATE"
+        break
+    fi
+done
+
+if [ -z "$SOCKET_PATH" ]; then
+    echo "Error: sessiond socket not found."
+    echo "Searched candidates:"
+    for CANDIDATE in "${CANDIDATES[@]}"; do
+        echo "  - $CANDIDATE"
+    done
     exit 1
 fi
 
@@ -45,7 +63,7 @@ elif [ "$OP" == "release" ]; then
 EOF
 )
 else
-  echo "Usage: $0 [session_id] [inhibit|release] [reason]"
+  echo "Usage: $0 [inhibit|release] [reason] [optional_session_id]"
   exit 1
 fi
 

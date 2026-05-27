@@ -421,10 +421,11 @@ async fn handle_stop_record(
     let artifact_path = session_artifact_path(&config.session_instance_id, &artifact_name);
 
     // Mock: create an empty file to represent the finished recording
+    // TODO: Integrate with PipeWire and real frame capture for actual recording
     fs::write(&artifact_path, b"mock-video-data")?;
 
     println!(
-        "service=displayd op=stop_record event=success output={output} session_id={} path={}",
+        "service=displayd op=stop_record event=success_mock output={output} session_id={} path={} info=\"artifact is mock data\"",
         recording.session_id,
         artifact_path.display()
     );
@@ -509,6 +510,7 @@ impl Drop for SocketGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn test_handle_capture_output() {
@@ -524,6 +526,7 @@ mod tests {
             last_scene: None,
             next_commit_id: 1,
             snapshot_path: temp_dir.path().join("scene-snapshot"),
+            active_recordings: HashMap::new(),
         };
 
         // Ensure runtime dir exists

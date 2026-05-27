@@ -717,21 +717,27 @@ fn reconcile_scene_with_registry(
     }
 }
 
+const STUB_SCREEN_WIDTH: u32 = 1920;
+const STUB_SCREEN_HEIGHT: u32 = 1080;
+const STUB_PANEL_HEIGHT: u32 = 36;
+
 fn apply_role_based_layout(surface: &mut SurfaceSnapshot, role: WaylandSurfaceRole) {
     match role {
         WaylandSurfaceRole::Background => {
+            // TODO: Use real output geometry from displayd inventory
             surface.placement.x = 0;
             surface.placement.y = 0;
-            surface.placement.width = 1920; // Stub: should use output geometry
-            surface.placement.height = 1080;
+            surface.placement.width = STUB_SCREEN_WIDTH;
+            surface.placement.height = STUB_SCREEN_HEIGHT;
             surface.placement.z = 0;
         }
         WaylandSurfaceRole::Layer => {
-            // Stub: assume it's a top panel
+            // TODO: Support full wlr-layer-shell-v1 properties (anchor, margin, exclusive zone)
+            // Currently stubs a top panel
             surface.placement.x = 0;
             surface.placement.y = 0;
-            surface.placement.width = 1920;
-            surface.placement.height = 36;
+            surface.placement.width = STUB_SCREEN_WIDTH;
+            surface.placement.height = STUB_PANEL_HEIGHT;
             surface.placement.z = 100;
         }
         WaylandSurfaceRole::Toplevel => {
