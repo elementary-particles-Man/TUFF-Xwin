@@ -216,6 +216,8 @@ pub enum WaylandCommand {
     DragDrop,
     DragLeave,
     DragCancel,
+    WriteData { source_id: String, mime_type: String, data: Vec<u8> },
+    ReadData { source_id: String, mime_type: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -264,6 +266,11 @@ pub enum WaylandEvent {
     DragDropped,
     DragLeft,
     DragCancelled,
+    DataRead {
+        source_id: String,
+        mime_type: String,
+        data: Option<Vec<u8>>,
+    },
     Rejected {
         reason: String,
     },

@@ -57,6 +57,44 @@ impl ImeRuntimeState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DnDStatus {
+    Inactive,
+    Dragging,
+    Dropped,
+}
+
+#[derive(Debug, Clone)]
+struct DnDState {
+    status: DnDStatus,
+    source_id: Option<String>,
+    origin_surface_id: Option<String>,
+    target_surface_id: Option<String>,
+    x: f64,
+    y: f64,
+    mime_types: Vec<String>,
+}
+
+impl Default for DnDState {
+    fn default() -> Self {
+        Self {
+            status: DnDStatus::Inactive,
+            source_id: None,
+            origin_surface_id: None,
+            target_surface_id: None,
+            x: 0.0,
+            y: 0.0,
+            mime_types: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct DataPayloadRegistry {
+    dnd: DnDState,
+    fake_buffers: std::collections::HashMap<(String, String), Vec<u8>>, // (source_id, mime_type) -> data
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::from_args(env::args().skip(1))?;
@@ -81,6 +119,7 @@ async fn main() -> Result<()> {
     if config.serve_ipc {
         let mut registry = load_surface_registry(config.registry_path.as_ref())?;
         let mut ime_state = ImeRuntimeState::default();
+        let mut data_payloads = DataPayloadRegistry::default();
         write_surface_registry_artifact(&registry, &config.session_instance_id)?;
         log_surface_registry(&registry);
 
@@ -96,7 +135,8 @@ async fn main() -> Result<()> {
             Err(err) => println!("waylandd displayd_state=unreachable reason={err}"),
         }
 
-        serve_ipc(&config, &mut registry, &mut ime_state, vulkan.as_ref()).await?;
+        serve_ipc(&config, &mut registry, &mut ime_state, &mut data_payloads, vulkan.as_ref())
+            .await?;
         return Ok(());
     }
 
@@ -169,6 +209,7 @@ async fn serve_ipc(
     config: &Config,
     registry: &mut SurfaceRegistrySnapshot,
     ime_state: &mut ImeRuntimeState,
+    data_payloads: &mut DataPayloadRegistry,
     vulkan: Option<&VulkanBackend>,
 ) -> Result<()> {
     let _wayland_display = match config.bind_wayland_display.as_deref() {
@@ -196,8 +237,16 @@ async fn serve_ipc(
                 return Err(err).context("waylandd IPC accept failed");
             }
         };
-        handle_client(stream, registry, ime_state, vulkan, config, &config.session_instance_id)
-            .await?;
+        handle_client(
+            stream,
+            registry,
+            ime_state,
+            data_payloads,
+            vulkan,
+            config,
+            &config.session_instance_id,
+        )
+        .await?;
         served += 1;
 
         if config.serve_once {
@@ -213,6 +262,7 @@ async fn handle_client(
     mut stream: ServiceStream,
     registry: &mut SurfaceRegistrySnapshot,
     ime_state: &mut ImeRuntimeState,
+    data_payloads: &mut DataPayloadRegistry,
     vulkan: Option<&VulkanBackend>,
     config: &Config,
     session_instance_id: &str,
@@ -223,7 +273,7 @@ async fn handle_client(
     };
 
     let (response, registry_changed) =
-        build_response(request, registry, ime_state, vulkan, config).await;
+        build_response(request, registry, ime_state, data_payloads, vulkan, config).await;
     send_json_line(&mut stream, &response)?;
     if registry_changed {
         write_surface_registry_artifact(registry, session_instance_id)?;
@@ -235,13 +285,15 @@ async fn build_response(
     request: IpcEnvelope,
     registry: &mut SurfaceRegistrySnapshot,
     ime_state: &mut ImeRuntimeState,
+    data_payloads: &mut DataPayloadRegistry,
     vulkan: Option<&VulkanBackend>,
     config: &Config,
 ) -> (IpcEnvelope, bool) {
     let source = request.source;
     let (response_kind, registry_changed) = match request.kind {
         MessageKind::WaylandCommand(command) if request.destination == ServiceRole::Waylandd => {
-            let (event, changed) = handle_wayland_command(command, registry, vulkan, config).await;
+            let (event, changed) =
+                handle_wayland_command(command, registry, data_payloads, vulkan, config).await;
             (MessageKind::WaylandEvent(event), changed)
         }
         MessageKind::ImeCommand(command) if request.destination == ServiceRole::Waylandd => {
@@ -314,6 +366,7 @@ fn handle_ime_command(command: ImeCommand, state: &mut ImeRuntimeState) -> ImeEv
 async fn handle_wayland_command(
     command: WaylandCommand,
     registry: &mut SurfaceRegistrySnapshot,
+    data_payloads: &mut DataPayloadRegistry,
     vulkan: Option<&VulkanBackend>,
     config: &Config,
 ) -> (WaylandEvent, bool) {
@@ -374,13 +427,50 @@ async fn handle_wayland_command(
         WaylandCommand::StopRecord { output } => {
             handle_wayland_record_request(&output, None, config, vulkan).await
         }
-        WaylandCommand::StartDrag { .. }
-        | WaylandCommand::DragEnter { .. }
-        | WaylandCommand::DragMotion { .. }
-        | WaylandCommand::DragDrop
-        | WaylandCommand::DragLeave
-        | WaylandCommand::DragCancel => {
-            (WaylandEvent::Rejected { reason: "dnd not implemented".into() }, false)
+        WaylandCommand::StartDrag { source_id, surface_id, mime_types } => {
+            data_payloads.dnd.status = DnDStatus::Dragging;
+            data_payloads.dnd.source_id = Some(source_id.clone());
+            data_payloads.dnd.origin_surface_id = Some(surface_id);
+            data_payloads.dnd.mime_types = mime_types;
+            (WaylandEvent::DragStarted { source_id }, false)
+        }
+        WaylandCommand::DragEnter { surface_id, x, y, mime_types } => {
+            data_payloads.dnd.target_surface_id = Some(surface_id.clone());
+            data_payloads.dnd.x = x;
+            data_payloads.dnd.y = y;
+            data_payloads.dnd.mime_types = mime_types; // update or match
+            (WaylandEvent::DragEntered { surface_id }, false)
+        }
+        WaylandCommand::DragMotion { surface_id, x, y, time: _ } => {
+            data_payloads.dnd.x = x;
+            data_payloads.dnd.y = y;
+            (WaylandEvent::DragMotioned { surface_id }, false)
+        }
+        WaylandCommand::DragDrop => {
+            data_payloads.dnd.status = DnDStatus::Dropped;
+            (WaylandEvent::DragDropped, false)
+        }
+        WaylandCommand::DragLeave => {
+            data_payloads.dnd.target_surface_id = None;
+            (WaylandEvent::DragLeft, false)
+        }
+        WaylandCommand::DragCancel => {
+            data_payloads.dnd = DnDState::default();
+            (WaylandEvent::DragCancelled, false)
+        }
+        WaylandCommand::WriteData { source_id, mime_type, data } => {
+            data_payloads.fake_buffers.insert((source_id, mime_type), data);
+            // We just return a success acknowledgement using DataRead with the written data, or maybe we don't have a specific Write response.
+            // Let's just return a dummy event. We can reuse rejected for missing or just use DataRead as an ack.
+            (
+                WaylandEvent::DataRead { source_id: "".into(), mime_type: "".into(), data: None },
+                false,
+            )
+        }
+        WaylandCommand::ReadData { source_id, mime_type } => {
+            let data =
+                data_payloads.fake_buffers.get(&(source_id.clone(), mime_type.clone())).cloned();
+            (WaylandEvent::DataRead { source_id, mime_type, data }, false)
         }
     }
 }
@@ -867,6 +957,7 @@ mod tests {
     #[test]
     fn applies_selection_handoff_to_active_surface() {
         let mut registry = mock_surface_registry();
+        let mut data_payloads = super::DataPayloadRegistry::default();
         let (event, changed) =
             tokio::runtime::Runtime::new().unwrap().block_on(handle_wayland_command(
                 WaylandCommand::ApplySelectionHandoff {
@@ -885,6 +976,7 @@ mod tests {
                     },
                 },
                 &mut registry,
+                &mut data_payloads,
                 None,
                 &super::Config::default(),
             ));
@@ -1013,5 +1105,90 @@ mod tests {
         assert_eq!(event, ImeEvent::StringCommitted { text: "hello".into() });
         assert_eq!(state.preedit_active, false);
         assert_eq!(state.commit_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_dnd_and_data_transfer_lifecycle() {
+        use waybroker_common::{WaylandCommand, WaylandEvent};
+        let mut registry = mock_surface_registry();
+        let mut data_payloads = super::DataPayloadRegistry::default();
+        let config = super::Config::default();
+
+        // Start Drag
+        let (event, _) = super::handle_wayland_command(
+            WaylandCommand::StartDrag {
+                source_id: "src-1".into(),
+                surface_id: "konsole-1".into(),
+                mime_types: vec!["text/plain".into()],
+            },
+            &mut registry,
+            &mut data_payloads,
+            None,
+            &config,
+        )
+        .await;
+        assert_eq!(event, WaylandEvent::DragStarted { source_id: "src-1".into() });
+        assert_eq!(data_payloads.dnd.status, super::DnDStatus::Dragging);
+        assert_eq!(data_payloads.dnd.source_id.as_deref(), Some("src-1"));
+
+        // Drag Enter
+        let (event, _) = super::handle_wayland_command(
+            WaylandCommand::DragEnter {
+                surface_id: "target-1".into(),
+                x: 100.0,
+                y: 200.0,
+                mime_types: vec!["text/plain".into()],
+            },
+            &mut registry,
+            &mut data_payloads,
+            None,
+            &config,
+        )
+        .await;
+        assert_eq!(event, WaylandEvent::DragEntered { surface_id: "target-1".into() });
+        assert_eq!(data_payloads.dnd.target_surface_id.as_deref(), Some("target-1"));
+
+        // Write Data
+        let _ = super::handle_wayland_command(
+            WaylandCommand::WriteData {
+                source_id: "src-1".into(),
+                mime_type: "text/plain".into(),
+                data: b"hello drop".to_vec(),
+            },
+            &mut registry,
+            &mut data_payloads,
+            None,
+            &config,
+        )
+        .await;
+
+        // Drop
+        let (event, _) = super::handle_wayland_command(
+            WaylandCommand::DragDrop,
+            &mut registry,
+            &mut data_payloads,
+            None,
+            &config,
+        )
+        .await;
+        assert_eq!(event, WaylandEvent::DragDropped);
+        assert_eq!(data_payloads.dnd.status, super::DnDStatus::Dropped);
+
+        // Read Data
+        let (event, _) = super::handle_wayland_command(
+            WaylandCommand::ReadData { source_id: "src-1".into(), mime_type: "text/plain".into() },
+            &mut registry,
+            &mut data_payloads,
+            None,
+            &config,
+        )
+        .await;
+        if let WaylandEvent::DataRead { source_id, mime_type, data } = event {
+            assert_eq!(source_id, "src-1");
+            assert_eq!(mime_type, "text/plain");
+            assert_eq!(data.unwrap(), b"hello drop");
+        } else {
+            panic!("Expected DataRead");
+        }
     }
 }
