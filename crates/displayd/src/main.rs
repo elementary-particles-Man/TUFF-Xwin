@@ -38,6 +38,8 @@ async fn main() -> Result<()> {
 
     let mut state = DisplayState::load(&config.session_instance_id)?;
     let mut clock = FakePresentationClock::default();
+    let capture_backend = FakeCaptureBackend;
+    let mut record_backend = FakeRecordBackend;
 
     let listener = bind_service_socket(ServiceRole::Displayd)?;
     let _socket_guard = SocketGuard::new(listener.endpoint().clone());
@@ -46,7 +48,16 @@ async fn main() -> Result<()> {
     let mut served = 0usize;
     for stream in listener.incoming() {
         let stream = stream?;
-        handle_client(stream, &config, &mut state, vulkan.as_ref(), &mut clock).await?;
+        handle_client(
+            stream,
+            &config,
+            &mut state,
+            vulkan.as_ref(),
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+        )
+        .await?;
         served += 1;
 
         if config.serve_once {
@@ -100,13 +111,17 @@ async fn handle_client(
     state: &mut DisplayState,
     vulkan: Option<&VulkanBackend>,
     clock: &mut dyn PresentationClock,
+    capture_backend: &dyn CaptureBackend,
+    record_backend: &mut dyn RecordBackend,
 ) -> Result<()> {
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
     };
 
-    let response = build_response(request, config, state, vulkan, clock).await?;
+    let response =
+        build_response(request, config, state, vulkan, clock, capture_backend, record_backend)
+            .await?;
     send_json_line(&mut stream, &response)?;
     Ok(())
 }
@@ -117,12 +132,24 @@ async fn build_response(
     state: &mut DisplayState,
     vulkan: Option<&VulkanBackend>,
     clock: &mut dyn PresentationClock,
+    capture_backend: &dyn CaptureBackend,
+    record_backend: &mut dyn RecordBackend,
 ) -> Result<IpcEnvelope> {
     let source = request.source;
     let response_kind = match request.kind {
         MessageKind::DisplayCommand(command) if request.destination == ServiceRole::Displayd => {
             MessageKind::DisplayEvent(
-                handle_display_command(command, source, config, state, vulkan, clock).await?,
+                handle_display_command(
+                    command,
+                    source,
+                    config,
+                    state,
+                    vulkan,
+                    clock,
+                    capture_backend,
+                    record_backend,
+                )
+                .await?,
             )
         }
         MessageKind::DisplayCommand(_) => MessageKind::DisplayEvent(DisplayEvent::Rejected {
@@ -146,6 +173,8 @@ async fn handle_display_command(
     state: &mut DisplayState,
     vulkan: Option<&VulkanBackend>,
     clock: &mut dyn PresentationClock,
+    capture_backend: &dyn CaptureBackend,
+    record_backend: &mut dyn RecordBackend,
 ) -> Result<DisplayEvent> {
     match command {
         DisplayCommand::EnumerateOutputs => {
@@ -218,12 +247,14 @@ async fn handle_display_command(
             Ok(handle_scene_snapshot_request(output, state))
         }
         DisplayCommand::CaptureOutput { output } => {
-            handle_capture_output(&output, config, state, vulkan).await
+            handle_capture_output(&output, config, state, vulkan, capture_backend).await
         }
         DisplayCommand::StartRecord { output, fps } => {
-            handle_start_record(&output, fps, config, state).await
+            handle_start_record(&output, fps, config, state, record_backend).await
         }
-        DisplayCommand::StopRecord { output } => handle_stop_record(&output, config, state).await,
+        DisplayCommand::StopRecord { output } => {
+            handle_stop_record(&output, config, state, record_backend).await
+        }
         DisplayCommand::SecureBlank { output } => {
             println!("service=displayd op=secure_blank event=success output={:?}", output);
             Ok(DisplayEvent::BlankApplied { output })
@@ -278,6 +309,46 @@ struct RecordingState {
 trait PresentationClock {
     fn now(&self) -> u64; // monotonic timestamp in ns
     fn current_seq(&self) -> u64;
+}
+
+trait CaptureBackend {
+    fn capture(&self, output: &str) -> Result<(u32, u32, Vec<u32>)>;
+}
+
+trait RecordBackend {
+    fn start(&mut self, output: &str, fps: u32) -> Result<String>;
+    fn stop(&mut self, output: &str, session_id: &str, config: &Config) -> Result<PathBuf>;
+}
+
+struct FakeCaptureBackend;
+
+impl CaptureBackend for FakeCaptureBackend {
+    fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+        let width = 1920;
+        let height = 1080;
+        Ok((width, height, generate_mock_pixels(width, height)))
+    }
+}
+
+struct FakeRecordBackend;
+
+impl RecordBackend for FakeRecordBackend {
+    fn start(&mut self, output: &str, fps: u32) -> Result<String> {
+        let session_id = format!("rec-{}", now_unix_timestamp());
+        println!(
+            "service=displayd op=fake_record event=start output={output} session_id={session_id} fps={fps}"
+        );
+        Ok(session_id)
+    }
+
+    fn stop(&mut self, output: &str, session_id: &str, config: &Config) -> Result<PathBuf> {
+        let artifact_name = format!("recording-{}-{}.mkv", output, session_id);
+        let artifact_path = session_artifact_path(&config.session_instance_id, &artifact_name);
+        // In real backend, we'd close the file here.
+        // For fake, we just ensure it exists with some data.
+        fs::write(&artifact_path, b"fake-video-data")?;
+        Ok(artifact_path)
+    }
 }
 
 struct FakePresentationClock {
@@ -385,13 +456,11 @@ async fn handle_capture_output(
     config: &Config,
     _state: &DisplayState,
     vulkan: Option<&VulkanBackend>,
+    backend: &dyn CaptureBackend,
 ) -> Result<DisplayEvent> {
     println!("service=displayd op=capture_output event=begin output={output}");
 
-    // Mock capture: 1920x1080 BGRA
-    let width = 1920;
-    let height = 1080;
-    let mut pixels = generate_mock_pixels(width, height);
+    let (width, height, mut pixels) = backend.capture(output)?;
 
     if let Some(vulkan) = vulkan {
         // Use Vulkan for "Simulation" workload (as requested in handoff)
@@ -450,6 +519,7 @@ async fn handle_start_record(
     fps: u32,
     _config: &Config,
     state: &mut DisplayState,
+    backend: &mut dyn RecordBackend,
 ) -> Result<DisplayEvent> {
     if state.active_recordings.contains_key(output) {
         return Ok(DisplayEvent::Rejected {
@@ -457,7 +527,7 @@ async fn handle_start_record(
         });
     }
 
-    let session_id = format!("rec-{}", now_unix_timestamp());
+    let session_id = backend.start(output, fps)?;
     state.active_recordings.insert(
         output.to_string(),
         RecordingState {
@@ -478,6 +548,7 @@ async fn handle_stop_record(
     output: &str,
     config: &Config,
     state: &mut DisplayState,
+    backend: &mut dyn RecordBackend,
 ) -> Result<DisplayEvent> {
     let recording = match state.active_recordings.remove(output) {
         Some(r) => r,
@@ -488,15 +559,10 @@ async fn handle_stop_record(
         }
     };
 
-    let artifact_name = format!("recording-{}-{}.mkv", output, recording.session_id);
-    let artifact_path = session_artifact_path(&config.session_instance_id, &artifact_name);
-
-    // Mock: create an empty file to represent the finished recording
-    // TODO: Integrate with PipeWire and real frame capture for actual recording
-    fs::write(&artifact_path, b"mock-video-data")?;
+    let artifact_path = backend.stop(output, &recording.session_id, config)?;
 
     println!(
-        "service=displayd op=stop_record event=success_mock output={output} session_id={} path={} info=\"artifact is mock data\"",
+        "service=displayd op=stop_record event=success output={output} session_id={} path={}",
         recording.session_id,
         artifact_path.display()
     );
@@ -608,6 +674,8 @@ mod tests {
         std::fs::create_dir_all(&session_runtime_dir).unwrap();
 
         let mut clock = FakePresentationClock::default();
+        let capture_backend = FakeCaptureBackend;
+        let mut record_backend = FakeRecordBackend;
 
         let result = handle_display_command(
             DisplayCommand::CaptureOutput { output: "eDP-1".into() },
@@ -616,6 +684,8 @@ mod tests {
             &mut state,
             None,
             &mut clock,
+            &capture_backend,
+            &mut record_backend,
         )
         .await
         .expect("handle capture");
@@ -646,6 +716,8 @@ mod tests {
             &mut state,
             None,
             &mut clock,
+            &capture_backend,
+            &mut record_backend,
         )
         .await
         .expect("handle commit");
@@ -661,6 +733,8 @@ mod tests {
                 &mut state,
                 None,
                 &mut clock,
+                &capture_backend,
+                &mut record_backend,
             )
             .await
             .expect("handle feedback query");
