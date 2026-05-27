@@ -253,6 +253,27 @@ async fn prepare_scene(
     Ok(scene)
 }
 
+fn query_output_inventory_from_displayd() -> Result<Vec<waybroker_common::OutputMode>> {
+    let mut stream = connect_service_socket(ServiceRole::Displayd)?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Compd,
+        ServiceRole::Displayd,
+        MessageKind::DisplayCommand(DisplayCommand::EnumerateOutputs),
+    );
+    send_json_line(&mut stream, &request)?;
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let response: IpcEnvelope = read_json_line(&mut reader)?;
+
+    match response.kind {
+        MessageKind::DisplayEvent(DisplayEvent::OutputInventory { outputs }) => Ok(outputs),
+        MessageKind::DisplayEvent(DisplayEvent::Rejected { reason }) => {
+            bail!("displayd rejected inventory query: {reason}")
+        }
+        other => bail!("unexpected displayd response: {other:?}"),
+    }
+}
+
 async fn reconcile_scene(
     config: &Config,
     scene: Option<CompdScene>,
@@ -262,6 +283,17 @@ async fn reconcile_scene(
         println!("service=compd op=scene_reconcile event=skipped reason=no-scene");
         return Ok(None);
     };
+
+    let target_output_name = scene.target_output.clone();
+    let outputs = query_output_inventory_from_displayd().unwrap_or_default();
+    let default_output = waybroker_common::OutputMode {
+        name: target_output_name.clone(),
+        width: STUB_SCREEN_WIDTH,
+        height: STUB_SCREEN_HEIGHT,
+        refresh_hz: 60,
+    };
+    let output_mode =
+        outputs.into_iter().find(|o| o.name == target_output_name).unwrap_or(default_output);
 
     match query_surface_registry_from_waylandd() {
         Ok(snapshot) => {
@@ -288,7 +320,7 @@ async fn reconcile_scene(
                 );
             }
 
-            let reconciled = reconcile_scene_with_registry(scene, &snapshot);
+            let reconciled = reconcile_scene_with_registry(scene, &snapshot, &output_mode);
             println!(
                 "service=compd op=scene_reconcile event=success kept={} dropped={} app_id_updates={} selection_handoffs={} focus={:?} clipboard_owner={} primary_selection_owner={}",
                 reconciled.scene.surfaces.len(),
@@ -668,6 +700,7 @@ struct SceneReconcileResult {
 fn reconcile_scene_with_registry(
     scene: CompdScene,
     registry: &SurfaceRegistrySnapshot,
+    output_mode: &waybroker_common::OutputMode,
 ) -> SceneReconcileResult {
     let active_registry: BTreeMap<&str, &WaylandSurfaceState> = registry
         .surfaces
@@ -700,7 +733,7 @@ fn reconcile_scene_with_registry(
     // Apply basic layout rules based on roles
     for surface in &mut kept_surfaces {
         if let Some(reg) = active_registry.get(surface.id.as_str()) {
-            apply_role_based_layout(surface, &reg.role);
+            apply_role_based_layout(surface, &reg.role, output_mode);
         }
     }
 
@@ -721,28 +754,61 @@ const STUB_SCREEN_WIDTH: u32 = 1920;
 const STUB_SCREEN_HEIGHT: u32 = 1080;
 const STUB_PANEL_HEIGHT: u32 = 36;
 
-fn apply_role_based_layout(surface: &mut SurfaceSnapshot, role: &WaylandSurfaceRole) {
+fn apply_role_based_layout(
+    surface: &mut SurfaceSnapshot,
+    role: &WaylandSurfaceRole,
+    output: &waybroker_common::OutputMode,
+) {
     match role {
         WaylandSurfaceRole::Background => {
-            // TODO: Use real output geometry from displayd inventory
             surface.placement.x = 0;
             surface.placement.y = 0;
-            surface.placement.width = STUB_SCREEN_WIDTH;
-            surface.placement.height = STUB_SCREEN_HEIGHT;
+            surface.placement.width = output.width;
+            surface.placement.height = output.height;
             surface.placement.z = 0;
         }
-        WaylandSurfaceRole::Layer(_) => {
-            // TODO: Support full wlr-layer-shell-v1 properties (anchor, margin, exclusive zone)
-            // Currently stubs a top panel
-            surface.placement.x = 0;
-            surface.placement.y = 0;
-            surface.placement.width = STUB_SCREEN_WIDTH;
-            surface.placement.height = STUB_PANEL_HEIGHT;
-            surface.placement.z = 100;
+        WaylandSurfaceRole::Layer(metadata) => {
+            let width = if metadata.anchor & 1 != 0 && metadata.anchor & 2 != 0 {
+                output
+                    .width
+                    .saturating_sub((metadata.margin_left + metadata.margin_right).max(0) as u32)
+            } else {
+                STUB_SCREEN_WIDTH
+            };
+
+            let height = if metadata.exclusive_zone > 0 {
+                metadata.exclusive_zone as u32
+            } else {
+                STUB_PANEL_HEIGHT
+            };
+
+            surface.placement.x = metadata.margin_left;
+
+            if metadata.anchor & 4 != 0 {
+                // Anchor Top
+                surface.placement.y = metadata.margin_top;
+            } else if metadata.anchor & 8 != 0 {
+                // Anchor Bottom
+                surface.placement.y =
+                    (output.height.saturating_sub(height)) as i32 - metadata.margin_bottom;
+            } else {
+                surface.placement.y = 0;
+            }
+
+            surface.placement.width = width;
+            surface.placement.height = height;
+
+            surface.placement.z = match metadata.layer {
+                0 => 10,  // Background
+                1 => 20,  // Bottom
+                2 => 100, // Top
+                3 => 200, // Overlay
+                _ => 100,
+            };
         }
         WaylandSurfaceRole::Toplevel => {
-            if surface.placement.z < 10 {
-                surface.placement.z = 10;
+            if surface.placement.z < 30 {
+                surface.placement.z = 30;
             }
         }
         _ => {}
@@ -873,7 +939,10 @@ fn is_focusable_role(role: &WaylandSurfaceRole) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompdScene, mock_demo_scene, reconcile_scene_with_registry, scene_from_snapshot};
+    use super::{
+        CompdScene, apply_role_based_layout, mock_demo_scene, reconcile_scene_with_registry,
+        scene_from_snapshot,
+    };
     use waybroker_common::{
         CommitTarget, CommittedSceneState, FocusTarget, ServiceRole, SurfacePlacement,
         SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandSelectionState, WaylandSurfaceRole,
@@ -966,6 +1035,12 @@ mod tests {
 
     #[test]
     fn drops_surfaces_missing_from_wayland_registry() {
+        let dummy_output = waybroker_common::OutputMode {
+            name: "eDP-1".into(),
+            width: 1920,
+            height: 1080,
+            refresh_hz: 60,
+        };
         let reconciled = reconcile_scene_with_registry(
             CompdScene {
                 target_output: "eDP-1".into(),
@@ -1029,6 +1104,7 @@ mod tests {
                 },
                 unix_timestamp: 1,
             },
+            &dummy_output,
         );
 
         assert_eq!(reconciled.scene.surfaces.len(), 1);
@@ -1054,6 +1130,12 @@ mod tests {
 
     #[test]
     fn falls_back_to_no_focus_when_only_background_survives() {
+        let dummy_output = waybroker_common::OutputMode {
+            name: "eDP-1".into(),
+            width: 1920,
+            height: 1080,
+            refresh_hz: 60,
+        };
         let reconciled = reconcile_scene_with_registry(
             CompdScene {
                 target_output: "eDP-1".into(),
@@ -1103,6 +1185,7 @@ mod tests {
                 },
                 unix_timestamp: 1,
             },
+            &dummy_output,
         );
 
         assert_eq!(reconciled.scene.focus, FocusTarget::None);
@@ -1114,5 +1197,79 @@ mod tests {
         assert_eq!(reconciled.scene.selection.primary_selection_source_serial, None);
         assert!(reconciled.dropped_surface_ids.is_empty());
         assert_eq!(reconciled.selection_handoffs, 2);
+    }
+
+    #[test]
+    fn test_layer_shell_layout_logic() {
+        let output = waybroker_common::OutputMode {
+            name: "eDP-1".into(),
+            width: 1920,
+            height: 1080,
+            refresh_hz: 60,
+        };
+
+        let mut bg = SurfaceSnapshot {
+            id: "bg".into(),
+            app_id: "bg".into(),
+            placement: SurfacePlacement {
+                x: 10,
+                y: 10,
+                width: 100,
+                height: 100,
+                z: 5,
+                visible: true,
+            },
+        };
+        apply_role_based_layout(&mut bg, &WaylandSurfaceRole::Background, &output);
+        assert_eq!(bg.placement.x, 0);
+        assert_eq!(bg.placement.y, 0);
+        assert_eq!(bg.placement.width, 1920);
+        assert_eq!(bg.placement.height, 1080);
+        assert_eq!(bg.placement.z, 0);
+
+        let mut panel = SurfaceSnapshot {
+            id: "panel".into(),
+            app_id: "panel".into(),
+            placement: SurfacePlacement { x: 0, y: 0, width: 0, height: 0, z: 0, visible: true },
+        };
+        let metadata = waybroker_common::LayerMetadata {
+            layer: 2,          // Top
+            anchor: 1 | 2 | 4, // Left | Right | Top
+            exclusive_zone: 30,
+            margin_top: 5,
+            margin_bottom: 0,
+            margin_left: 10,
+            margin_right: 10,
+            keyboard_interactivity: 0,
+        };
+        apply_role_based_layout(&mut panel, &WaylandSurfaceRole::Layer(metadata), &output);
+        assert_eq!(panel.placement.x, 10);
+        assert_eq!(panel.placement.y, 5);
+        assert_eq!(panel.placement.width, 1900); // 1920 - 10 - 10
+        assert_eq!(panel.placement.height, 30);
+        assert_eq!(panel.placement.z, 100);
+
+        let mut overlay = SurfaceSnapshot {
+            id: "overlay".into(),
+            app_id: "overlay".into(),
+            placement: SurfacePlacement { x: 0, y: 0, width: 0, height: 0, z: 0, visible: true },
+        };
+        let overlay_metadata = waybroker_common::LayerMetadata {
+            layer: 3,  // Overlay
+            anchor: 8, // Bottom
+            exclusive_zone: 0,
+            margin_top: 0,
+            margin_bottom: 20,
+            margin_left: 0,
+            margin_right: 0,
+            keyboard_interactivity: 0,
+        };
+        apply_role_based_layout(
+            &mut overlay,
+            &WaylandSurfaceRole::Layer(overlay_metadata),
+            &output,
+        );
+        assert_eq!(overlay.placement.y, 1080 - 36 - 20);
+        assert_eq!(overlay.placement.z, 200);
     }
 }
