@@ -641,11 +641,9 @@ fn bind_single_wayland_display_socket(
         .spawn(move || {
             for stream in _listener.incoming() {
                 match stream {
-                    Ok(mut stream) => {
-                        let mut buf = [0_u8; 16];
-                        let _ = stream.read(&mut buf);
+                    Ok(_stream) => {
                         println!(
-                            "service=waylandd op=wayland_display event=client_connected path={}",
+                            "service=waylandd op=wayland_display event=client_connected path={} info=\"connection accepted by diagnostic listener (no data read)\"",
                             log_path.display()
                         );
                     }
