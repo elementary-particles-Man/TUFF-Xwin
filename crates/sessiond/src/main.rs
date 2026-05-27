@@ -1381,9 +1381,14 @@ fn handle_session_command(
         SessionCommand::InhibitIdle { reason } => {
             if let Some(supervisor) = supervisor {
                 supervisor.idle_inhibitors.push(reason.clone());
-                println!("service=sessiond op=inhibit_idle event=success reason=\"{reason}\" total_inhibitors={}", supervisor.idle_inhibitors.len());
+                println!(
+                    "service=sessiond op=inhibit_idle event=success reason=\"{reason}\" total_inhibitors={}",
+                    supervisor.idle_inhibitors.len()
+                );
             } else {
-                println!("service=sessiond op=inhibit_idle event=skipped reason=\"no supervisor active\"");
+                println!(
+                    "service=sessiond op=inhibit_idle event=skipped reason=\"no supervisor active\""
+                );
             }
             Ok(SessionCommand::InhibitIdle { reason })
         }
@@ -1391,12 +1396,19 @@ fn handle_session_command(
             if let Some(supervisor) = supervisor {
                 if let Some(pos) = supervisor.idle_inhibitors.iter().position(|r| r == &reason) {
                     supervisor.idle_inhibitors.remove(pos);
-                    println!("service=sessiond op=release_idle event=success reason=\"{reason}\" total_inhibitors={}", supervisor.idle_inhibitors.len());
+                    println!(
+                        "service=sessiond op=release_idle event=success reason=\"{reason}\" total_inhibitors={}",
+                        supervisor.idle_inhibitors.len()
+                    );
                 } else {
-                    println!("service=sessiond op=release_idle event=failed reason=\"not found: {reason}\"");
+                    println!(
+                        "service=sessiond op=release_idle event=failed reason=\"not found: {reason}\""
+                    );
                 }
             } else {
-                println!("service=sessiond op=release_idle event=skipped reason=\"no supervisor active\"");
+                println!(
+                    "service=sessiond op=release_idle event=skipped reason=\"no supervisor active\""
+                );
             }
             Ok(SessionCommand::ReleaseIdle { reason })
         }

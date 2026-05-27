@@ -199,9 +199,7 @@ async fn handle_display_command(
         DisplayCommand::StartRecord { output, fps } => {
             handle_start_record(&output, fps, config, state).await
         }
-        DisplayCommand::StopRecord { output } => {
-            handle_stop_record(&output, config, state).await
-        }
+        DisplayCommand::StopRecord { output } => handle_stop_record(&output, config, state).await,
         DisplayCommand::SecureBlank { output } => {
             println!("service=displayd op=secure_blank event=success output={:?}", output);
             Ok(DisplayEvent::BlankApplied { output })
@@ -211,7 +209,10 @@ async fn handle_display_command(
             Ok(DisplayEvent::GammaApplied { output })
         }
         DisplayCommand::SetPointerConstraints { output, constraints } => {
-            println!("service=displayd op=set_pointer_constraints event=success output={output} constraints={:?}", constraints);
+            println!(
+                "service=displayd op=set_pointer_constraints event=success output={output} constraints={:?}",
+                constraints
+            );
             Ok(DisplayEvent::PointerConstraintsApplied { output, constraints })
         }
         DisplayCommand::ResumeBegin => {

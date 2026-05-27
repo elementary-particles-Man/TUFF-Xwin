@@ -14,14 +14,45 @@ use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
 };
 use waybroker_common::{
-    DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope, MessageKind, OutputMode, ServiceBanner,
-    ServiceEndpoint, ServiceRole, ServiceStream, SurfaceRegistrySnapshot, WaylandCommand,
-    WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
-    WaylandSurfaceState, bind_service_socket, connect_service_socket, ensure_runtime_dir,
-    now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
+    DisplayCommand, DisplayEvent, FocusTarget, ImeBridgeMode, ImeCommand, ImeEvent, ImeStatus,
+    IpcEnvelope, MessageKind, OutputMode, ServiceBanner, ServiceEndpoint, ServiceRole,
+    ServiceStream, SurfaceRegistrySnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff,
+    WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState, bind_service_socket,
+    connect_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line,
+    session_artifact_path,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
+
+#[derive(Debug, Clone)]
+struct ImeRuntimeState {
+    bridge_mode: ImeBridgeMode,
+    focused_surface_id: Option<String>,
+    preedit_active: bool,
+    commit_count: u64,
+}
+
+impl Default for ImeRuntimeState {
+    fn default() -> Self {
+        Self {
+            bridge_mode: ImeBridgeMode::Disabled,
+            focused_surface_id: None,
+            preedit_active: false,
+            commit_count: 0,
+        }
+    }
+}
+
+impl ImeRuntimeState {
+    fn status(&self) -> ImeStatus {
+        ImeStatus {
+            bridge_mode: self.bridge_mode,
+            focused_surface_id: self.focused_surface_id.clone(),
+            preedit_active: self.preedit_active,
+            commit_count: self.commit_count,
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,6 +77,7 @@ async fn main() -> Result<()> {
 
     if config.serve_ipc {
         let mut registry = load_surface_registry(config.registry_path.as_ref())?;
+        let mut ime_state = ImeRuntimeState::default();
         write_surface_registry_artifact(&registry, &config.session_instance_id)?;
         log_surface_registry(&registry);
 
@@ -61,7 +93,7 @@ async fn main() -> Result<()> {
             Err(err) => println!("waylandd displayd_state=unreachable reason={err}"),
         }
 
-        serve_ipc(&config, &mut registry, vulkan.as_ref()).await?;
+        serve_ipc(&config, &mut registry, &mut ime_state, vulkan.as_ref()).await?;
         return Ok(());
     }
 
@@ -133,6 +165,7 @@ impl Config {
 async fn serve_ipc(
     config: &Config,
     registry: &mut SurfaceRegistrySnapshot,
+    ime_state: &mut ImeRuntimeState,
     vulkan: Option<&VulkanBackend>,
 ) -> Result<()> {
     let _wayland_display = match config.bind_wayland_display.as_deref() {
@@ -160,7 +193,8 @@ async fn serve_ipc(
                 return Err(err).context("waylandd IPC accept failed");
             }
         };
-        handle_client(stream, registry, vulkan, config, &config.session_instance_id).await?;
+        handle_client(stream, registry, ime_state, vulkan, config, &config.session_instance_id)
+            .await?;
         served += 1;
 
         if config.serve_once {
@@ -175,6 +209,7 @@ async fn serve_ipc(
 async fn handle_client(
     mut stream: ServiceStream,
     registry: &mut SurfaceRegistrySnapshot,
+    ime_state: &mut ImeRuntimeState,
     vulkan: Option<&VulkanBackend>,
     config: &Config,
     session_instance_id: &str,
@@ -184,7 +219,8 @@ async fn handle_client(
         read_json_line(&mut reader)?
     };
 
-    let (response, registry_changed) = build_response(request, registry, vulkan, config).await;
+    let (response, registry_changed) =
+        build_response(request, registry, ime_state, vulkan, config).await;
     send_json_line(&mut stream, &response)?;
     if registry_changed {
         write_surface_registry_artifact(registry, session_instance_id)?;
@@ -195,6 +231,7 @@ async fn handle_client(
 async fn build_response(
     request: IpcEnvelope,
     registry: &mut SurfaceRegistrySnapshot,
+    ime_state: &mut ImeRuntimeState,
     vulkan: Option<&VulkanBackend>,
     config: &Config,
 ) -> (IpcEnvelope, bool) {
@@ -204,7 +241,11 @@ async fn build_response(
             let (event, changed) = handle_wayland_command(command, registry, vulkan, config).await;
             (MessageKind::WaylandEvent(event), changed)
         }
-        MessageKind::WaylandCommand(_) => (
+        MessageKind::ImeCommand(command) if request.destination == ServiceRole::Waylandd => {
+            let event = handle_ime_command(command, ime_state);
+            (MessageKind::ImeEvent(event), false)
+        }
+        MessageKind::WaylandCommand(_) | MessageKind::ImeCommand(_) => (
             MessageKind::WaylandEvent(WaylandEvent::Rejected {
                 reason: format!(
                     "waylandd received message addressed to {}",
@@ -222,6 +263,27 @@ async fn build_response(
     };
 
     (IpcEnvelope::new(ServiceRole::Waylandd, source, response_kind), registry_changed)
+}
+
+fn handle_ime_command(command: ImeCommand, state: &mut ImeRuntimeState) -> ImeEvent {
+    match command {
+        ImeCommand::GetImeStatus => ImeEvent::Status { status: state.status() },
+        ImeCommand::SetImeBridgeMode { mode } => {
+            state.bridge_mode = mode;
+            println!("service=waylandd op=ime_bridge_mode event=changed mode={:?}", mode);
+            ImeEvent::BridgeModeChanged { mode }
+        }
+        ImeCommand::FocusTextSurface { surface_id } => {
+            state.focused_surface_id = Some(surface_id.clone());
+            println!("service=waylandd op=ime_focus event=changed surface_id={}", surface_id);
+            ImeEvent::TextFocusChanged { surface_id: Some(surface_id) }
+        }
+        ImeCommand::ClearTextFocus => {
+            state.focused_surface_id = None;
+            println!("service=waylandd op=ime_focus event=cleared");
+            ImeEvent::TextFocusChanged { surface_id: None }
+        }
+    }
 }
 
 async fn handle_wayland_command(
@@ -318,7 +380,9 @@ async fn handle_wayland_record_request(
                 (WaylandEvent::Rejected { reason }, false)
             }
             other => {
-                println!("service=waylandd op={op} event=failed reason=\"unexpected response: {other:?}\"");
+                println!(
+                    "service=waylandd op={op} event=failed reason=\"unexpected response: {other:?}\""
+                );
                 (WaylandEvent::Rejected { reason: "unexpected displayd response".into() }, false)
             }
         },
@@ -337,7 +401,11 @@ fn request_record_from_displayd(output: &str, fps: Option<u32>) -> Result<Displa
         DisplayCommand::StopRecord { output: output.to_string() }
     };
 
-    let request = IpcEnvelope::new(ServiceRole::Waylandd, ServiceRole::Displayd, MessageKind::DisplayCommand(command));
+    let request = IpcEnvelope::new(
+        ServiceRole::Waylandd,
+        ServiceRole::Displayd,
+        MessageKind::DisplayCommand(command),
+    );
     send_json_line(&mut stream, &request)?;
 
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -837,5 +905,42 @@ mod tests {
         } else {
             panic!("Expected rejection when displayd is missing, got {:?}", event);
         }
+    }
+
+    #[tokio::test]
+    async fn test_ime_state_transitions() {
+        use waybroker_common::{ImeBridgeMode, ImeCommand, ImeEvent};
+        let mut state = super::ImeRuntimeState::default();
+        assert_eq!(state.bridge_mode, ImeBridgeMode::Disabled);
+
+        // Test mode change
+        let event = super::handle_ime_command(
+            ImeCommand::SetImeBridgeMode { mode: ImeBridgeMode::ProtocolStub },
+            &mut state,
+        );
+        assert_eq!(event, ImeEvent::BridgeModeChanged { mode: ImeBridgeMode::ProtocolStub });
+        assert_eq!(state.bridge_mode, ImeBridgeMode::ProtocolStub);
+
+        // Test focus change
+        let event = super::handle_ime_command(
+            ImeCommand::FocusTextSurface { surface_id: "editor-1".into() },
+            &mut state,
+        );
+        assert_eq!(event, ImeEvent::TextFocusChanged { surface_id: Some("editor-1".into()) });
+        assert_eq!(state.focused_surface_id.as_deref(), Some("editor-1"));
+
+        // Test status query
+        let event = super::handle_ime_command(ImeCommand::GetImeStatus, &mut state);
+        if let ImeEvent::Status { status } = event {
+            assert_eq!(status.bridge_mode, ImeBridgeMode::ProtocolStub);
+            assert_eq!(status.focused_surface_id.as_deref(), Some("editor-1"));
+        } else {
+            panic!("expected status event");
+        }
+
+        // Test clear focus
+        let event = super::handle_ime_command(ImeCommand::ClearTextFocus, &mut state);
+        assert_eq!(event, ImeEvent::TextFocusChanged { surface_id: None });
+        assert_eq!(state.focused_surface_id, None);
     }
 }

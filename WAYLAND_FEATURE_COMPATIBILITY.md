@@ -11,7 +11,7 @@ This table compares standard Wayland features (as seen in major compositors like
 | **Drag and Drop** | `wl_data_device` | **Missing** | Not currently implemented in the IPC or state tracking. |
 | **Layer Shell** | `wlr-layer-shell-v1` | **Partial (Stub)** | Added basic role-based layout logic (Background/Layer) in `compd`. **Hardcoded geometry (1920x1080 / height 36).** |
 | **Idle Inhibition** | `idle-inhibit-v1` | **Partial (IPC)** | Added `InhibitIdle` / `ReleaseIdle` IPC in `sessiond`. Tracks inhibitors in memory. |
-| **Input Method / IME** | `text-input-v3`, `input-method-v2` | **Missing** | No virtual keyboard or international input support. |
+| **Input Method / IME** | `text-input-v3`, `input-method-v2` | **Partial (Scaffold)** | Added `ImeCommand` / `ImeEvent` IPC. Internal state tracking in `waylandd`. **No real Mozc/Fcitx connection or protocol support yet.** |
 | **Pointer Constraints** | `wp_pointer_constraints_v1` | **Partial (Log-only)** | Added `SetPointerConstraints` IPC in `displayd`. **Diagnostic log only; no real input device locking.** |
 | **Relative Pointer** | `zwp_relative_pointer_v1` | **Missing** | Required for unaccelerated relative motion (e.g., in FPS games). |
 | **Gamma Control** | `wlr-gamma-control-v1` | **Partial (Log-only)** | Added `SetGamma` IPC in `displayd`. **Diagnostic log only; no real hardware LUT modification.** |
@@ -36,3 +36,7 @@ This table compares standard Wayland features (as seen in major compositors like
    - **Note**: Uses hardcoded values for screen size and panel height.
 5. **Wayland Display Listener (Diagnostic)**:
    - `waylandd` includes a minimal listener for `client_connected` observation. This is **not** a full Wayland protocol server.
+6. **IME Scaffold (IPC)**:
+   - Added `ImeCommand` and `ImeEvent` to `waybroker-common`.
+   - Implemented `ImeRuntimeState` and handlers in `waylandd` for internal state tracking (BridgeMode, TextFocus).
+   - **Note**: This is a repository-only implementation for testing state transitions. No interaction with running Mozc/Fcitx processes.

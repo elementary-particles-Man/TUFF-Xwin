@@ -4,10 +4,10 @@ mod transport;
 
 pub use ipc::{
     CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget, HealthState,
-    IpcEnvelope, LockCommand, LockState, MessageKind, OutputMode, ResumeStage, SessionCommand,
-    SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand, WaylandCommand,
-    WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
-    WaylandSurfaceState,
+    ImeBridgeMode, ImeCommand, ImeEvent, ImeStatus, IpcEnvelope, LockCommand, LockState,
+    MessageKind, OutputMode, ResumeStage, SessionCommand, SurfacePlacement,
+    SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand, WaylandCommand, WaylandEvent,
+    WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
 };
 pub use profile::{
     DesktopComponent, DesktopComponentRole, DesktopComponentState, DesktopHealthStatus,
@@ -435,5 +435,23 @@ mod tests {
 
         assert_eq!(decoded, envelope);
         assert!(json.contains("\"op\":\"resync-launch-state\""));
+    }
+
+    #[test]
+    fn roundtrips_ime_commands_and_events() {
+        let envelope = IpcEnvelope::new(
+            ServiceRole::Compd,
+            ServiceRole::Waylandd,
+            MessageKind::ImeCommand(super::ImeCommand::SetImeBridgeMode {
+                mode: super::ImeBridgeMode::PassthroughExternal,
+            }),
+        );
+
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let decoded: IpcEnvelope = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded, envelope);
+        assert!(json.contains("\"op\":\"set-ime-bridge-mode\""));
+        assert!(json.contains("\"mode\":\"passthrough-external\""));
     }
 }

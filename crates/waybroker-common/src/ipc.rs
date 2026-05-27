@@ -29,6 +29,42 @@ pub enum MessageKind {
     SessionCommand(SessionCommand),
     WatchdogCommand(WatchdogCommand),
     HealthState(HealthState),
+    ImeCommand(ImeCommand),
+    ImeEvent(ImeEvent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "kebab-case")]
+pub enum ImeCommand {
+    GetImeStatus,
+    SetImeBridgeMode { mode: ImeBridgeMode },
+    FocusTextSurface { surface_id: String },
+    ClearTextFocus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImeBridgeMode {
+    Disabled,
+    PassthroughExternal,
+    ProtocolStub,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImeStatus {
+    pub bridge_mode: ImeBridgeMode,
+    pub focused_surface_id: Option<String>,
+    pub preedit_active: bool,
+    pub commit_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "kebab-case")]
+pub enum ImeEvent {
+    Status { status: ImeStatus },
+    BridgeModeChanged { mode: ImeBridgeMode },
+    TextFocusChanged { surface_id: Option<String> },
+    Rejected { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
