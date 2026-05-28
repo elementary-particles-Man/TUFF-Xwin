@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{BufReader, Read},
+    io::BufReader,
     path::{Path, PathBuf},
     thread,
     time::Duration,

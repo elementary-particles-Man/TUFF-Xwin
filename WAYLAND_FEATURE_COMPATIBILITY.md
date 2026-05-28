@@ -22,7 +22,10 @@ This table compares standard Wayland features (as seen in major compositors like
 ## Current Parity Status
 
 1. **Architectural Parity Baseline**: Complete. Core broker architecture and trait boundaries are established.
-2. **Wire Protocol Parity (P1)**: Started. Headless wire protocol core (`wayland-wire`) added for low-level message framing and ID management.
+2. **Wire Protocol Parity (P1-P3)**: Underway. 
+   - P1: Headless wire protocol core (`wayland-wire`) added.
+   - P2: `wl_compositor`, `wl_surface`, `wl_shm` state machines added.
+   - P3: Repository-local XML protocol spec parser and metadata validation integrated. Reduces reliance on external `wayland-scanner`.
 
 ## Implementation Progress (2026-05-27)
 

@@ -1,8 +1,11 @@
 pub mod args;
 pub mod codec;
 pub mod core;
+pub mod generated;
+pub mod protocol;
 pub mod registry;
 pub mod shm;
+pub mod signature;
 pub mod surface;
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +21,8 @@ pub enum WireError {
     InvalidSize(u32),
     #[error("Invalid object ID: {0}")]
     InvalidObjectId(u32),
+    #[error("Protocol error: {0}")]
+    ProtocolError(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

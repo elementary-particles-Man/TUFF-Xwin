@@ -42,6 +42,27 @@ impl Default for HeadlessWireCore {
 impl HeadlessWireCore {
     pub fn dispatch(&mut self, message: WaylandMessage) -> Result<()> {
         let obj = self.registry.get_object(message.header.object_id)?;
+        let spec = crate::generated::core_protocol_spec();
+        let iface_spec = spec.interfaces.get(&obj.interface).ok_or_else(|| {
+            WireError::ProtocolError(format!("unknown interface: {}", obj.interface))
+        })?;
+
+        let msg_spec =
+            iface_spec.requests.get(message.header.opcode.0 as usize).ok_or_else(|| {
+                WireError::ProtocolError(format!(
+                    "unknown opcode {} for {}",
+                    message.header.opcode.0, obj.interface
+                ))
+            })?;
+
+        // Validate arguments
+        let args = crate::codec::decode_arguments(&message.payload, msg_spec)?;
+        if !crate::signature::validate_args(msg_spec, &args) {
+            return Err(WireError::ProtocolError(format!(
+                "argument mismatch for {} opcode {}",
+                obj.interface, message.header.opcode.0
+            )));
+        }
 
         match (obj.interface.as_str(), message.header.opcode.0) {
             ("wl_display", 1) => self.handle_get_registry(message),
@@ -265,13 +286,19 @@ mod tests {
 
         let mut p1 = vec![0u8; 4];
         LittleEndian::write_u32(&mut p1, 10);
-        core.dispatch(WaylandMessage::new(WaylandObjectId::DISPLAY, WaylandOpcode(1), p1)).unwrap();
+        core.dispatch(WaylandMessage::new(WaylandObjectId::DISPLAY, WaylandOpcode(1), p1))
+            .unwrap();
 
         // Bind wl_compositor (assume name 1)
-        let mut p2 = vec![0u8; 12];
-        LittleEndian::write_u32(&mut p2[0..4], 1); // name
-        LittleEndian::write_u32(&mut p2[8..12], 11); // new_id
-        core.dispatch(WaylandMessage::new(WaylandObjectId(10), WaylandOpcode(0), p2)).unwrap();
+        // Signature: name (u32), interface (string), version (u32), id (new_id)
+        let mut p2 = Vec::new();
+        p2.extend_from_slice(&1u32.to_le_bytes()); // name
+        crate::args::encode_string("wl_compositor", &mut p2); // interface
+        p2.extend_from_slice(&4u32.to_le_bytes()); // version
+        p2.extend_from_slice(&11u32.to_le_bytes()); // new_id
+
+        core.dispatch(WaylandMessage::new(WaylandObjectId(10), WaylandOpcode(0), p2))
+            .unwrap();
 
         assert!(core.registry.get_object(WaylandObjectId(11)).is_ok());
         assert_eq!(
@@ -279,4 +306,5 @@ mod tests {
             "wl_compositor"
         );
     }
+
 }
