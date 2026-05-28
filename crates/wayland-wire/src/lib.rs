@@ -1,0 +1,50 @@
+pub mod codec;
+pub mod core;
+pub mod registry;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum WireError {
+    #[error("Incomplete message (need more bytes)")]
+    Incomplete,
+    #[error("Invalid message size: {0}")]
+    InvalidSize(u32),
+    #[error("Invalid object ID: {0}")]
+    InvalidObjectId(u32),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+pub type Result<T> = std::result::Result<T, WireError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct WaylandObjectId(pub u32);
+
+impl WaylandObjectId {
+    pub const DISPLAY: Self = WaylandObjectId(1);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct WaylandOpcode(pub u16);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaylandHeader {
+    pub object_id: WaylandObjectId,
+    pub size: u16,
+    pub opcode: WaylandOpcode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaylandMessage {
+    pub header: WaylandHeader,
+    pub payload: Vec<u8>,
+}
+
+impl WaylandMessage {
+    pub fn new(object_id: WaylandObjectId, opcode: WaylandOpcode, payload: Vec<u8>) -> Self {
+        let size = (payload.len() + 8) as u16;
+        Self { header: WaylandHeader { object_id, size, opcode }, payload }
+    }
+}

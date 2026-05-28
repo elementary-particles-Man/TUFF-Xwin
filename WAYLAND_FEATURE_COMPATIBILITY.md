@@ -19,6 +19,11 @@ This table compares standard Wayland features (as seen in major compositors like
 | **Presentation Time** | `wp_presentation` | **Complete (Logic)** | `PresentationClock` trait and feedback tracking via `FramePresented` events. |
 | **Foreign Toplevel** | `ext-foreign-toplevel-list-v1` | **Complete (State)** | `ForeignToplevelHandle` registry in `SurfaceRegistrySnapshot`. |
 
+## Current Parity Status
+
+1. **Architectural Parity Baseline**: Complete. Core broker architecture and trait boundaries are established.
+2. **Wire Protocol Parity (P1)**: Started. Headless wire protocol core (`wayland-wire`) added for low-level message framing and ID management.
+
 ## Implementation Progress (2026-05-27)
 
 All Wayland parity features have reached **Architectural Completion**. The core broker logic is now decoupled from OS-specific implementations through clean trait boundaries and state machines.

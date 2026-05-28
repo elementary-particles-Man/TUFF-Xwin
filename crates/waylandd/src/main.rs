@@ -22,6 +22,44 @@ use waybroker_common::{
     session_artifact_path,
 };
 
+fn run_wire_headless_test() -> Result<()> {
+    use byteorder::{ByteOrder, LittleEndian};
+    use wayland_wire::{WaylandMessage, WaylandObjectId, WaylandOpcode, core::HeadlessWireCore};
+
+    println!("service=waylandd op=wire_headless_test event=begin");
+    let mut core = HeadlessWireCore::default();
+
+    // Simulate Client: wl_display.get_registry(new_id=2)
+    let mut payload = vec![0u8; 4];
+    LittleEndian::write_u32(&mut payload[0..4], 2);
+    let msg = WaylandMessage::new(WaylandObjectId::DISPLAY, WaylandOpcode(1), payload);
+
+    println!(
+        "service=waylandd op=wire_headless_test event=dispatch_request object_id=1 opcode=1 info=\"get_registry\""
+    );
+    core.dispatch(msg).map_err(|e| anyhow::anyhow!(e))?;
+
+    // Check events
+    let mut event_count = 0;
+    while let Some(ev) = core.pop_event() {
+        println!(
+            "service=waylandd op=wire_headless_test event=pop_event object_id={} opcode={} size={}",
+            ev.header.object_id.0, ev.header.opcode.0, ev.header.size
+        );
+        event_count += 1;
+    }
+
+    if event_count == 3 {
+        println!(
+            "service=waylandd op=wire_headless_test event=success info=\"received 3 global advertisements\""
+        );
+    } else {
+        bail!("expected 3 global events, got {}", event_count);
+    }
+
+    Ok(())
+}
+
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
 
 #[derive(Debug, Clone)]
@@ -143,6 +181,11 @@ async fn main() -> Result<()> {
         None
     };
 
+    if config.wire_headless_test {
+        run_wire_headless_test()?;
+        return Ok(());
+    }
+
     if config.serve_ipc {
         let mut registry = load_surface_registry(config.registry_path.as_ref())?;
         let mut ime_state = ImeRuntimeState::default();
@@ -200,6 +243,7 @@ struct Config {
     bind_wayland_display: Option<String>,
     use_vulkan: bool,
     session_instance_id: String,
+    wire_headless_test: bool,
 }
 
 impl Config {
@@ -214,6 +258,7 @@ impl Config {
                 "--once" => config.serve_once = true,
                 "--print-registry" => config.print_registry = true,
                 "--vulkan" => config.use_vulkan = true,
+                "--wire-headless-test" => config.wire_headless_test = true,
                 "--session-instance-id" => {
                     config.session_instance_id =
                         args.next().context("--session-instance-id requires an id")?;
@@ -228,7 +273,7 @@ impl Config {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: waylandd [--require-displayd] [--serve-ipc] [--once] [--print-registry] [--registry PATH] [--bind-wayland-display NAME] [--vulkan] [--session-instance-id ID]"
+                        "usage: waylandd [--require-displayd] [--serve-ipc] [--once] [--print-registry] [--registry PATH] [--bind-wayland-display NAME] [--vulkan] [--session-instance-id ID] [--wire-headless-test]"
                     );
                     std::process::exit(0);
                 }
