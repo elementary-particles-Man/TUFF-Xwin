@@ -1,9 +1,14 @@
+pub mod args;
 pub mod codec;
 pub mod core;
 pub mod registry;
+pub mod shm;
+pub mod surface;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use args::{FakeFd, WireArg};
 
 #[derive(Debug, Error)]
 pub enum WireError {

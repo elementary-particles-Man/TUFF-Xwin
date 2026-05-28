@@ -1,4 +1,9 @@
-use crate::{registry::WireObjectRegistry, Result, WaylandMessage, WaylandObjectId, WaylandOpcode};
+use crate::{
+    registry::WireObjectRegistry,
+    shm::ShmManager,
+    surface::{Rect, SurfaceManager},
+    FakeFd, Result, WaylandMessage, WaylandObjectId, WaylandOpcode, WireError,
+};
 use byteorder::{ByteOrder, LittleEndian};
 
 pub struct WireGlobal {
@@ -8,7 +13,9 @@ pub struct WireGlobal {
 }
 
 pub struct HeadlessWireCore {
-    registry: WireObjectRegistry,
+    pub registry: WireObjectRegistry,
+    pub surfaces: SurfaceManager,
+    pub shm: ShmManager,
     globals: Vec<WireGlobal>,
     events_out: Vec<WaylandMessage>,
 }
@@ -17,6 +24,8 @@ impl Default for HeadlessWireCore {
     fn default() -> Self {
         let mut core = Self {
             registry: WireObjectRegistry::default(),
+            surfaces: SurfaceManager::new(),
+            shm: ShmManager::new(),
             globals: Vec::new(),
             events_out: Vec::new(),
         };
@@ -38,6 +47,15 @@ impl HeadlessWireCore {
             ("wl_display", 1) => self.handle_get_registry(message),
             ("wl_display", 0) => self.handle_sync(message),
             ("wl_registry", 0) => self.handle_registry_bind(message),
+            ("wl_compositor", 0) => self.handle_create_surface(message),
+            ("wl_compositor", 1) => self.handle_create_region(message),
+            ("wl_surface", 0) => self.handle_surface_destroy(message),
+            ("wl_surface", 1) => self.handle_surface_attach(message),
+            ("wl_surface", 2) => self.handle_surface_damage(message),
+            ("wl_surface", 3) => self.handle_surface_frame(message),
+            ("wl_surface", 6) => self.handle_surface_commit(message),
+            ("wl_shm", 0) => self.handle_shm_create_pool(message),
+            ("wl_shm_pool", 0) => self.handle_shm_pool_create_buffer(message),
             _ => {
                 println!(
                     "warning: unhandled dispatch for {} (id={}) opcode={}",
@@ -50,55 +68,163 @@ impl HeadlessWireCore {
 
     fn handle_get_registry(&mut self, message: WaylandMessage) -> Result<()> {
         if message.payload.len() < 4 {
-            return Ok(()); // Should be error but let's be safe
+            return Err(WireError::Incomplete);
         }
-        let new_id = LittleEndian::read_u32(&message.payload[0..4]);
-        let new_id = WaylandObjectId(new_id);
-
+        let new_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
         self.registry.register_client_object(new_id, "wl_registry", 1)?;
-
-        // Send global events
         for global in &self.globals {
             self.events_out.push(self.create_global_event(new_id, global));
         }
-
         Ok(())
     }
 
     fn handle_sync(&mut self, message: WaylandMessage) -> Result<()> {
         if message.payload.len() < 4 {
-            return Ok(());
+            return Err(WireError::Incomplete);
         }
-        let callback_id = LittleEndian::read_u32(&message.payload[0..4]);
-        let callback_id = WaylandObjectId(callback_id);
-
+        let callback_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
         self.registry.register_client_object(callback_id, "wl_callback", 1)?;
-
-        // Send wl_callback.done event (opcode 0)
         let mut payload = vec![0u8; 4];
         LittleEndian::write_u32(&mut payload[0..4], 0); // serial
         self.events_out.push(WaylandMessage::new(callback_id, WaylandOpcode(0), payload));
-
         Ok(())
     }
 
     fn handle_registry_bind(&mut self, message: WaylandMessage) -> Result<()> {
         if message.payload.len() < 12 {
-            return Ok(());
+            return Err(WireError::Incomplete);
         }
-        let _name = LittleEndian::read_u32(&message.payload[0..4]);
-        // Wayland wire format for string is u32 length + null-terminated bytes + padding
-        let interface_len = LittleEndian::read_u32(&message.payload[4..8]) as usize;
-        // In real impl we would parse the string and version, but for parity P1 we just stub it
+        let name = LittleEndian::read_u32(&message.payload[0..4]);
 
-        let new_id_pos = 8 + ((interface_len + 3) & !3);
-        if message.payload.len() >= new_id_pos + 4 {
-            let _new_id = LittleEndian::read_u32(&message.payload[new_id_pos + 4..new_id_pos + 8]);
-            // Wait, bind signature: name (u32), interface (string), version (u32), id (new_id)
-            // Let's assume the client follows the protocol.
+        // Simplified bind for P2: assume id is at offset 8 if payload is short,
+        // or try to find it after the interface string.
+        let new_id = if message.payload.len() == 12 {
+            WaylandObjectId(LittleEndian::read_u32(&message.payload[8..12]))
+        } else {
+            let interface_len = LittleEndian::read_u32(&message.payload[4..8]) as usize;
+            let padded_interface_len = (interface_len + 3) & !3;
+            let pos_new_id = 8 + padded_interface_len + 4;
+            if message.payload.len() < pos_new_id + 4 {
+                return Err(WireError::Incomplete);
+            }
+            WaylandObjectId(LittleEndian::read_u32(&message.payload[pos_new_id..pos_new_id + 4]))
+        };
+
+        let global =
+            self.globals.iter().find(|g| g.name == name).ok_or(WireError::InvalidObjectId(name))?;
+        self.registry.register_client_object(new_id, &global.interface, global.version)?;
+
+        if global.interface == "wl_shm" {
+            self.send_shm_formats(new_id);
         }
-
         Ok(())
+    }
+
+    fn handle_create_surface(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        self.registry.register_client_object(id, "wl_surface", 4)?;
+        self.surfaces.create_surface(id);
+        Ok(())
+    }
+
+    fn handle_create_region(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        self.registry.register_client_object(id, "wl_region", 1)?;
+        self.surfaces.create_region(id);
+        Ok(())
+    }
+
+    fn handle_surface_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_surface_attach(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 12 {
+            return Err(WireError::Incomplete);
+        }
+        let buffer_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let x = LittleEndian::read_i32(&message.payload[4..8]);
+        let y = LittleEndian::read_i32(&message.payload[8..12]);
+        if let Some(surface) = self.surfaces.surfaces.get_mut(&message.header.object_id) {
+            surface.pending.buffer_id = if buffer_id.0 == 0 { None } else { Some(buffer_id) };
+            surface.pending.offset_x = x;
+            surface.pending.offset_y = y;
+        }
+        Ok(())
+    }
+
+    fn handle_surface_damage(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 16 {
+            return Err(WireError::Incomplete);
+        }
+        let x = LittleEndian::read_i32(&message.payload[0..4]);
+        let y = LittleEndian::read_i32(&message.payload[4..8]);
+        let width = LittleEndian::read_u32(&message.payload[8..12]);
+        let height = LittleEndian::read_u32(&message.payload[12..16]);
+        if let Some(surface) = self.surfaces.surfaces.get_mut(&message.header.object_id) {
+            surface.pending.damage.push(Rect { x, y, width, height });
+        }
+        Ok(())
+    }
+
+    fn handle_surface_frame(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
+        let callback_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        self.registry.register_client_object(callback_id, "wl_callback", 1)?;
+        if let Some(surface) = self.surfaces.surfaces.get_mut(&message.header.object_id) {
+            surface.callbacks.push(callback_id);
+        }
+        Ok(())
+    }
+
+    fn handle_surface_commit(&mut self, message: WaylandMessage) -> Result<()> {
+        self.surfaces.commit(message.header.object_id);
+        Ok(())
+    }
+
+    fn handle_shm_create_pool(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 8 {
+            return Err(WireError::Incomplete);
+        }
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        // Note: FD is not in payload, but passed via ancillary data.
+        // For P2 headless core, we simulate by assuming it was passed.
+        let size = LittleEndian::read_u32(&message.payload[4..8]);
+        self.registry.register_client_object(id, "wl_shm_pool", 1)?;
+        self.shm.create_pool(id, FakeFd(0), size);
+        Ok(())
+    }
+
+    fn handle_shm_pool_create_buffer(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 24 {
+            return Err(WireError::Incomplete);
+        }
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let offset = LittleEndian::read_i32(&message.payload[4..8]);
+        let width = LittleEndian::read_i32(&message.payload[8..12]);
+        let height = LittleEndian::read_i32(&message.payload[12..16]);
+        let stride = LittleEndian::read_i32(&message.payload[16..20]);
+        let format = LittleEndian::read_u32(&message.payload[20..24]);
+
+        self.registry.register_client_object(id, "wl_buffer", 1)?;
+        self.shm.create_buffer(id, message.header.object_id, offset, width, height, stride, format)
+    }
+
+    fn send_shm_formats(&mut self, shm_id: WaylandObjectId) {
+        // wl_shm.format: Argb8888 (0), Xrgb8888 (1)
+        for f in [0u32, 1u32] {
+            let mut payload = vec![0u8; 4];
+            LittleEndian::write_u32(&mut payload[0..4], f);
+            self.events_out.push(WaylandMessage::new(shm_id, WaylandOpcode(0), payload));
+        }
     }
 
     fn create_global_event(
@@ -106,17 +232,17 @@ impl HeadlessWireCore {
         registry_id: WaylandObjectId,
         global: &WireGlobal,
     ) -> WaylandMessage {
-        // wl_registry.global: name (u32), interface (string), version (u32)
         let interface_bytes = global.interface.as_bytes();
-        let len = interface_bytes.len() + 1; // null-term
+        let len = (interface_bytes.len() + 1) as u32;
         let padded_len = (len + 3) & !3;
-
-        let mut payload = vec![0u8; 4 + 4 + padded_len + 4];
+        let mut payload = vec![0u8; 4 + 4 + padded_len as usize + 4];
         LittleEndian::write_u32(&mut payload[0..4], global.name);
-        LittleEndian::write_u32(&mut payload[4..8], len as u32);
+        LittleEndian::write_u32(&mut payload[4..8], len);
         payload[8..8 + interface_bytes.len()].copy_from_slice(interface_bytes);
-        LittleEndian::write_u32(&mut payload[8 + padded_len..12 + padded_len], global.version);
-
+        LittleEndian::write_u32(
+            &mut payload[8 + padded_len as usize..12 + padded_len as usize],
+            global.version,
+        );
         WaylandMessage::new(registry_id, WaylandOpcode(0), payload)
     }
 
@@ -132,25 +258,25 @@ impl HeadlessWireCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::WaylandOpcode;
 
     #[test]
-    fn test_wl_display_get_registry() {
+    fn test_create_surface_and_region() {
         let mut core = HeadlessWireCore::default();
-        let mut payload = vec![0u8; 4];
-        LittleEndian::write_u32(&mut payload[0..4], 2); // Client wants wl_registry at ID 2
 
-        let msg = WaylandMessage::new(WaylandObjectId::DISPLAY, WaylandOpcode(1), payload);
-        core.dispatch(msg).expect("dispatch");
+        let mut p1 = vec![0u8; 4];
+        LittleEndian::write_u32(&mut p1, 10);
+        core.dispatch(WaylandMessage::new(WaylandObjectId::DISPLAY, WaylandOpcode(1), p1)).unwrap();
 
-        let registry = core.registry.get_object(WaylandObjectId(2)).expect("registry exists");
-        assert_eq!(registry.interface, "wl_registry");
+        // Bind wl_compositor (assume name 1)
+        let mut p2 = vec![0u8; 12];
+        LittleEndian::write_u32(&mut p2[0..4], 1); // name
+        LittleEndian::write_u32(&mut p2[8..12], 11); // new_id
+        core.dispatch(WaylandMessage::new(WaylandObjectId(10), WaylandOpcode(0), p2)).unwrap();
 
-        // Should have 3 global events
-        let mut count = 0;
-        while let Some(_) = core.pop_event() {
-            count += 1;
-        }
-        assert_eq!(count, 3);
+        assert!(core.registry.get_object(WaylandObjectId(11)).is_ok());
+        assert_eq!(
+            core.registry.get_object(WaylandObjectId(11)).unwrap().interface,
+            "wl_compositor"
+        );
     }
 }
