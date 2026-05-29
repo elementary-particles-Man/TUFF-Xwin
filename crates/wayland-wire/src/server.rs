@@ -12,8 +12,8 @@ pub struct WireServerConfig {
 }
 
 pub struct WireServer {
-    config: WireServerConfig,
-    core: HeadlessWireCore,
+    pub config: WireServerConfig,
+    pub core: HeadlessWireCore,
 }
 
 impl WireServer {

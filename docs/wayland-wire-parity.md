@@ -26,6 +26,13 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - **Fake Client**: Added `WireFakeClient` to simulate client requests over the wire.
 - **E2E Testing**: Established end-to-end tests that perform a full Wayland handshake and surface commit over a temporary Unix socket.
 - **Strict Path Validation**: Both `wayland-wire` and `waylandd` reject socket paths in runtime directories to ensure isolation.
+- **Isolated Socket Harness**: Server and Fake Client for byte-stream verification.
+
+## Phase 4b: Surface Commit E2E (Current)
+- **Extended E2E**: Verified the full sequence (`registry` -> `bind` -> `create_surface` -> `create_pool` -> `attach` -> `commit` -> `callback.done`) over a temporary Unix socket.
+- **State Split**: Confirmed that `pending` state remains isolated until `commit` is received.
+- **Resource Management**: Verified SHM pool and buffer lifecycle, including bounds checking.
+- **Event Consistency**: Ensured stable event order for `wl_shm.format` and frame callbacks.
 
 ## Current Status
 - [x] **Headless Wire Core**: Base crate `wayland-wire` added to workspace.
@@ -35,6 +42,7 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - [x] **Protocol XML Parser**: Local parser for `.xml` protocol definitions.
 - [x] **Metadata Validation**: Automated verification of opcode and arguments.
 - [x] **Isolated Socket Harness**: Server and Fake Client for byte-stream verification.
+- [x] **Surface Commit E2E**: Full protocol sequence verified over wire.
 - [ ] **Full Interop**: Compatibility with standard libwayland-based clients is **unimplemented**.
 
 

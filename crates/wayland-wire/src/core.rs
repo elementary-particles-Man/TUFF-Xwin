@@ -82,6 +82,7 @@ impl HeadlessWireCore {
             ("wl_surface", 2) => self.handle_surface_damage(message)?,
             ("wl_surface", 3) => self.handle_surface_frame(message)?,
             ("wl_surface", 6) => self.handle_surface_commit(message)?,
+            ("wl_surface", 9) => self.handle_surface_damage(message)?,
             ("wl_shm", 0) => self.handle_shm_create_pool(message)?,
             ("wl_shm_pool", 0) => self.handle_shm_pool_create_buffer(message)?,
             _ => {
@@ -215,7 +216,21 @@ impl HeadlessWireCore {
     }
 
     fn handle_surface_commit(&mut self, message: WaylandMessage) -> Result<()> {
-        self.surfaces.commit(message.header.object_id);
+        let id = message.header.object_id;
+        self.surfaces.commit(id);
+
+        // Handle frame callbacks
+        if let Some(surface) = self.surfaces.surfaces.get_mut(&id) {
+            for callback_id in surface.callbacks.drain(..) {
+                let mut payload = vec![0u8; 4];
+                LittleEndian::write_u32(&mut payload[0..4], 0); // serial
+                self.events_out.push(WaylandMessage::new(callback_id, WaylandOpcode(0), payload));
+                // Callback objects are typically destroyed after use.
+                // We should also unregister them from the registry.
+                // But wait, the dispatcher will need them for unregistering.
+                // Let's at least emit the event.
+            }
+        }
         Ok(())
     }
 
