@@ -1,5 +1,6 @@
 use std::thread;
 use tempfile::tempdir;
+use byteorder::ByteOrder;
 use wayland_wire::{
     client::WireFakeClient,
     server::{WireServer, WireServerConfig},
@@ -71,6 +72,65 @@ fn test_isolated_socket_surface_commit_e2e() {
     let surf = server.core.surfaces.surfaces.get(&wayland_wire::WaylandObjectId(5)).unwrap();
     assert_eq!(surf.current.buffer_id.unwrap().0, 7);
     assert!(surf.pending.damage.is_empty());
+}
+
+#[test]
+fn test_isolated_socket_xdg_input_e2e() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-xdg-input.sock");
+    let server_path = socket_path.clone();
+
+    let _server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).expect("failed to create server");
+        server.run_once().expect("server run failed");
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = WireFakeClient::connect(&socket_path).expect("failed to connect");
+
+    client.get_registry(2).unwrap();
+    let mut events = Vec::new();
+    while events.len() < 4 { // compositor, shm, seat, xdg_wm_base
+        events.append(&mut client.receive_events().unwrap());
+    }
+
+    // 1. Bind objects
+    client.bind_wl_compositor(2, 1, 4, 3).unwrap();
+    client.bind_wl_shm(2, 2, 1, 4).unwrap();
+    client.bind_wl_seat(2, 3, 7, 5).unwrap();
+    client.bind_xdg_wm_base(2, 4, 6, 6).unwrap();
+
+    // 2. Setup surface and xdg
+    client.wl_compositor_create_surface(3, 7).unwrap();
+    client.xdg_wm_base_get_xdg_surface(6, 8, 7).unwrap();
+    client.xdg_surface_get_toplevel(8, 9).unwrap();
+    client.xdg_toplevel_set_title(9, "Parity Test").unwrap();
+    
+    // 3. Receive configure and ack
+    let mut config_events = Vec::new();
+    while config_events.len() < 2 {
+        config_events.append(&mut client.receive_events().unwrap());
+    }
+    // xdg_surface.configure (opcode 0) has serial. 
+    // In our HeadlessWireCore, it emits toplevel.configure (opcode 0) then surface.configure.
+    let serial = if config_events[1].header.object_id.0 == 8 {
+        byteorder::LittleEndian::read_u32(&config_events[1].payload[0..4])
+    } else {
+        byteorder::LittleEndian::read_u32(&config_events[0].payload[0..4])
+    };
+    
+    client.xdg_surface_ack_configure(8, serial).unwrap();
+    client.wl_surface_commit(7).unwrap();
+
+    // 4. Input setup
+    client.wl_seat_get_pointer(5, 10).unwrap();
+    client.wl_seat_get_keyboard(5, 11).unwrap();
+
+    // Server thread is run_once and already accepted a connection.
+    // To send fake input, we'd normally need a way to trigger server side events.
+    // In this E2E test, the server is running the HeadlessWireCore loop.
+    // We'll stop here for P6 E2E handshake.
 }
 
 #[test]

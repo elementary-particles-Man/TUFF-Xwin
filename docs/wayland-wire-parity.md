@@ -32,13 +32,15 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - **Extended E2E**: Verified the full sequence (`registry` -> `bind` -> `create_surface` -> `create_pool` -> `attach` -> `commit` -> `callback.done`) over a temporary Unix socket.
 - **State Split**: Confirmed that `pending` state remains isolated until `commit` is received.
 - **Resource Management**: Verified SHM pool and buffer lifecycle, including bounds checking.
-- **Libwayland Compatibility**: Verified against real C client requests.
+- **FD Passing / SHM**: Full support for SCM_RIGHTS and memory sharing.
 
-## Phase 5b: SHM and FD Passing (Current)
-- **SCM_RIGHTS**: Implemented file descriptor passing via Unix domain socket ancillary data.
-- **Real Memory Sharing**: Added support for `wl_shm.create_pool` using actual file descriptors (via `memfd_create` or temp files).
-- **Advanced Interop**: The C harness now performs a full sequence: `connect` -> `registry` -> `bind` -> `create_surface` -> `create_pool` -> `create_buffer` -> `attach` -> `damage` -> `commit`.
-- **Validation**: Verified that the Rust server correctly receives and manages FDs, and performs bounds checking on SHM pools.
+## Phase 6: Shell and Input (Current)
+- **XDG Shell**: Implemented `xdg_wm_base`, `xdg_surface`, and `xdg_toplevel` state machines.
+- **Configure Handshake**: Supports the full `configure` -> `ack_configure` lifecycle with serial management.
+- **Seat and Input**: Added `wl_seat`, `wl_pointer`, and `wl_keyboard` objects.
+- **Fake Input Injection**: Added ability to inject simulated pointer and keyboard events into the wire event queue.
+- **SCM_RIGHTS Keymaps**: Verified that keyboard keymap FDs can be sent to clients using isolated Unix socket ancillary data.
+- **E2E Validation**: Full sequence from connection to `xdg_toplevel` setup and input focus is verified over isolated sockets.
 
 ## Current Status
 - [x] **Headless Wire Core**: Base crate `wayland-wire` added to workspace.
@@ -51,11 +53,12 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - [x] **Surface Commit E2E**: Full protocol sequence verified over wire.
 - [x] **Libwayland Compatibility**: Verified against real C client requests.
 - [x] **FD Passing / SHM**: Full support for SCM_RIGHTS and memory sharing.
-- [ ] **Full Interop**: Compatibility with standard libwayland-based clients is **High** (core protocols complete).
+- [x] **XDG Shell & Input**: Handshake and event routing state machines implemented.
+- [ ] **Full Interop**: Compatibility with standard libwayland-based clients is **High** (shell and input included).
 
 ## Next Steps
-1. **Phase 6: Shell and Input**: Implement `xdg-shell` and `wl_seat` (keyboard/pointer) state machines.
-2. Expand the dispatcher to handle more core interfaces (`wl_subcompositor`).
+1. **Phase 7: Real Client Lifecycle**: Verify xdg-shell and input with the real `libwayland-client` harness.
+2. Expand the dispatcher to handle more core interfaces (`wl_subcompositor`, `wl_data_device`).
 
 2. Implement protocol XML parsing and code generation to avoid manual payload manipulation.
 3. Add a headless compositor test harness that can run simple Wayland clients.

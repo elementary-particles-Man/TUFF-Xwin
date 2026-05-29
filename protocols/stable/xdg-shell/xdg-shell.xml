@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="xdg_shell">
+  <interface name="xdg_wm_base" version="6">
+    <request name="destroy" type="destructor"/>
+    <request name="create_positioner">
+      <arg name="id" type="new_id" interface="xdg_positioner"/>
+    </request>
+    <request name="get_xdg_surface">
+      <arg name="id" type="new_id" interface="xdg_surface"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+    <request name="pong">
+      <arg name="serial" type="uint"/>
+    </request>
+    <event name="ping">
+      <arg name="serial" type="uint"/>
+    </event>
+  </interface>
+
+  <interface name="xdg_positioner" version="6">
+    <request name="destroy" type="destructor"/>
+    <request name="set_size">
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+    <request name="set_anchor_rect">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+  </interface>
+
+  <interface name="xdg_surface" version="6">
+    <request name="destroy" type="destructor"/>
+    <request name="get_toplevel">
+      <arg name="id" type="new_id" interface="xdg_toplevel"/>
+    </request>
+    <request name="get_popup">
+      <arg name="id" type="new_id" interface="xdg_popup"/>
+      <arg name="parent" type="object" interface="xdg_surface" allow-null="true"/>
+      <arg name="positioner" type="object" interface="xdg_positioner"/>
+    </request>
+    <request name="set_window_geometry">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+    <request name="ack_configure">
+      <arg name="serial" type="uint"/>
+    </request>
+    <event name="configure">
+      <arg name="serial" type="uint"/>
+    </event>
+  </interface>
+
+  <interface name="xdg_toplevel" version="6">
+    <request name="destroy" type="destructor"/>
+    <request name="set_parent">
+      <arg name="parent" type="object" interface="xdg_toplevel" allow-null="true"/>
+    </request>
+    <request name="set_title">
+      <arg name="title" type="string"/>
+    </request>
+    <request name="set_app_id">
+      <arg name="app_id" type="string"/>
+    </request>
+    <event name="configure">
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="states" type="array"/>
+    </event>
+    <event name="close"/>
+  </interface>
+
+  <interface name="xdg_popup" version="6">
+    <request name="destroy" type="destructor"/>
+    <request name="grab">
+      <arg name="seat" type="object" interface="wl_seat"/>
+      <arg name="serial" type="uint"/>
+    </request>
+    <event name="configure">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+    <event name="popup_done"/>
+  </interface>
+</protocol>

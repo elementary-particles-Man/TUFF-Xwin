@@ -2,12 +2,20 @@ use crate::protocol::ProtocolSpec;
 use std::sync::OnceLock;
 
 const CORE_XML: &str = include_str!("../../../protocols/core/wayland-core.xml");
+const XDG_SHELL_XML: &str = include_str!("../../../protocols/stable/xdg-shell/xdg-shell.xml");
 
 static CORE_SPEC: OnceLock<ProtocolSpec> = OnceLock::new();
 
 pub fn core_protocol_spec() -> &'static ProtocolSpec {
     CORE_SPEC.get_or_init(|| {
-        ProtocolSpec::parse(CORE_XML).expect("failed to parse core wayland protocol XML")
+        let mut core = ProtocolSpec::parse(CORE_XML).expect("failed to parse core wayland protocol XML");
+        let xdg = ProtocolSpec::parse(XDG_SHELL_XML).expect("failed to parse xdg-shell protocol XML");
+        
+        // Merge xdg interfaces into core spec for simple lookup
+        for (name, iface) in xdg.interfaces {
+            core.interfaces.insert(name, iface);
+        }
+        core
     })
 }
 

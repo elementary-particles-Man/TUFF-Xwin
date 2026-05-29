@@ -4,12 +4,14 @@ pub mod codec;
 pub mod core;
 pub mod fd;
 pub mod generated;
+pub mod input;
 pub mod protocol;
 pub mod registry;
 pub mod server;
 pub mod shm;
 pub mod signature;
 pub mod surface;
+pub mod xdg_shell;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -33,7 +35,7 @@ pub enum WireError {
 
 pub type Result<T> = std::result::Result<T, WireError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 pub struct WaylandObjectId(pub u32);
 
 impl WaylandObjectId {

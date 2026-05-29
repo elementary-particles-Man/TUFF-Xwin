@@ -155,4 +155,112 @@
       <arg name="name" type="string"/>
     </event>
   </interface>
+
+  <interface name="wl_pointer" version="7">
+    <request name="set_cursor">
+      <arg name="serial" type="uint"/>
+      <arg name="surface" type="object" interface="wl_surface" allow-null="true"/>
+      <arg name="hotspot_x" type="int"/>
+      <arg name="hotspot_y" type="int"/>
+    </request>
+    <request name="release" type="destructor"/>
+    <event name="enter">
+      <arg name="serial" type="uint"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="surface_x" type="fixed"/>
+      <arg name="surface_y" type="fixed"/>
+    </event>
+    <event name="leave">
+      <arg name="serial" type="uint"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </event>
+    <event name="motion">
+      <arg name="time" type="uint"/>
+      <arg name="surface_x" type="fixed"/>
+      <arg name="surface_y" type="fixed"/>
+    </event>
+    <event name="button">
+      <arg name="serial" type="uint"/>
+      <arg name="time" type="uint"/>
+      <arg name="button" type="uint"/>
+      <arg name="state" type="uint"/>
+    </event>
+    <event name="axis">
+      <arg name="time" type="uint"/>
+      <arg name="axis" type="uint"/>
+      <arg name="value" type="fixed"/>
+    </event>
+    <event name="frame"/>
+    <event name="axis_source">
+      <arg name="axis_source" type="uint"/>
+    </event>
+    <event name="axis_stop">
+      <arg name="time" type="uint"/>
+      <arg name="axis" type="uint"/>
+    </event>
+    <event name="axis_discrete">
+      <arg name="axis" type="uint"/>
+      <arg name="discrete" type="int"/>
+    </event>
+  </interface>
+
+  <interface name="wl_keyboard" version="7">
+    <request name="release" type="destructor"/>
+    <event name="keymap">
+      <arg name="format" type="uint"/>
+      <arg name="fd" type="fd"/>
+      <arg name="size" type="uint"/>
+    </event>
+    <event name="enter">
+      <arg name="serial" type="uint"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="keys" type="array"/>
+    </event>
+    <event name="leave">
+      <arg name="serial" type="uint"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </event>
+    <event name="key">
+      <arg name="serial" type="uint"/>
+      <arg name="time" type="uint"/>
+      <arg name="key" type="uint"/>
+      <arg name="state" type="uint"/>
+    </event>
+    <event name="modifiers">
+      <arg name="serial" type="uint"/>
+      <arg name="mods_depressed" type="uint"/>
+      <arg name="mods_latched" type="uint"/>
+      <arg name="mods_locked" type="uint"/>
+      <arg name="group" type="uint"/>
+    </event>
+    <event name="repeat_info">
+      <arg name="rate" type="int"/>
+      <arg name="delay" type="int"/>
+    </event>
+  </interface>
+
+  <interface name="wl_touch" version="7">
+    <request name="release" type="destructor"/>
+    <event name="down">
+      <arg name="serial" type="uint"/>
+      <arg name="time" type="uint"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="id" type="int"/>
+      <arg name="x" type="fixed"/>
+      <arg name="y" type="fixed"/>
+    </event>
+    <event name="up">
+      <arg name="serial" type="uint"/>
+      <arg name="time" type="uint"/>
+      <arg name="id" type="int"/>
+    </event>
+    <event name="motion">
+      <arg name="time" type="uint"/>
+      <arg name="id" type="int"/>
+      <arg name="x" type="fixed"/>
+      <arg name="y" type="fixed"/>
+    </event>
+    <event name="frame"/>
+    <event name="cancel"/>
+  </interface>
 </protocol>

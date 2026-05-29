@@ -97,6 +97,93 @@ impl WireFakeClient {
         self.send_message(&msg)
     }
 
+    pub fn bind_xdg_wm_base(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("xdg_wm_base", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn bind_wl_seat(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("wl_seat", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn xdg_wm_base_get_xdg_surface(
+        &mut self,
+        wm_base_id: u32,
+        new_id: u32,
+        wl_surf_id: u32,
+    ) -> Result<()> {
+        let mut p = vec![0u8; 8];
+        byteorder::LittleEndian::write_u32(&mut p[0..4], new_id);
+        byteorder::LittleEndian::write_u32(&mut p[4..8], wl_surf_id);
+        let msg = WaylandMessage::new(WaylandObjectId(wm_base_id), WaylandOpcode(3), p);
+        self.send_message(&msg)
+    }
+
+    pub fn xdg_surface_get_toplevel(&mut self, xdg_surf_id: u32, new_id: u32) -> Result<()> {
+        let mut p = vec![0u8; 4];
+        byteorder::LittleEndian::write_u32(&mut p, new_id);
+        let msg = WaylandMessage::new(WaylandObjectId(xdg_surf_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+
+    pub fn xdg_surface_ack_configure(&mut self, xdg_surf_id: u32, serial: u32) -> Result<()> {
+        let mut p = vec![0u8; 4];
+        byteorder::LittleEndian::write_u32(&mut p, serial);
+        let msg = WaylandMessage::new(WaylandObjectId(xdg_surf_id), WaylandOpcode(4), p);
+        self.send_message(&msg)
+    }
+
+    pub fn xdg_toplevel_set_title(&mut self, xdg_top_id: u32, title: &str) -> Result<()> {
+        let mut p = Vec::new();
+        crate::args::encode_string(title, &mut p);
+        let msg = WaylandMessage::new(WaylandObjectId(xdg_top_id), WaylandOpcode(2), p);
+        self.send_message(&msg)
+    }
+
+    pub fn xdg_toplevel_set_app_id(&mut self, xdg_top_id: u32, app_id: &str) -> Result<()> {
+        let mut p = Vec::new();
+        crate::args::encode_string(app_id, &mut p);
+        let msg = WaylandMessage::new(WaylandObjectId(xdg_top_id), WaylandOpcode(3), p);
+        self.send_message(&msg)
+    }
+
+    pub fn wl_seat_get_pointer(&mut self, seat_id: u32, new_id: u32) -> Result<()> {
+        let mut p = vec![0u8; 4];
+        byteorder::LittleEndian::write_u32(&mut p, new_id);
+        let msg = WaylandMessage::new(WaylandObjectId(seat_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn wl_seat_get_keyboard(&mut self, seat_id: u32, new_id: u32) -> Result<()> {
+        let mut p = vec![0u8; 4];
+        byteorder::LittleEndian::write_u32(&mut p, new_id);
+        let msg = WaylandMessage::new(WaylandObjectId(seat_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+
     pub fn wl_compositor_create_surface(&mut self, compositor_id: u32, new_id: u32) -> Result<()> {
         let mut p = vec![0u8; 4];
         byteorder::LittleEndian::write_u32(&mut p, new_id);
