@@ -9,6 +9,7 @@ members = [
     "crates/watchdog",
     "crates/waybroker-common",
     "crates/wayland-wire",
+    "crates/wayland-wire-harness",
     "crates/waylandd",
     "crates/vulkan-backend"
 ]

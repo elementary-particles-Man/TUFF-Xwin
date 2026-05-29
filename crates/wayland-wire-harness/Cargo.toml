@@ -1,0 +1,20 @@
+[package]
+name = "wayland-wire-harness"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wayland-wire = { path = "../wayland-wire" }
+libc = "0.2"
+anyhow = "1.0"
+
+[build-dependencies]
+cc = "1.0"
+pkg-config = "0.3"
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio = { version = "1.0", features = ["full"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(has_libwayland_client)'] }

@@ -40,18 +40,26 @@ impl WireServer {
         let (mut stream, _) = listener.accept()?;
         println!("service=wire_server event=connected");
 
-        let mut buffer = vec![0u8; 4096];
+        let mut buffer = Vec::with_capacity(4096);
+        let mut read_buf = [0u8; 4096];
         loop {
-            let n = stream.read(&mut buffer)?;
+            let n = stream.read(&mut read_buf)?;
             if n == 0 {
                 break;
             }
+            buffer.extend_from_slice(&read_buf[..n]);
 
             let mut consumed = 0;
-            while consumed < n {
-                match decode_message(&buffer[consumed..n]) {
+            loop {
+                let remaining = &buffer[consumed..];
+                if remaining.len() < 8 {
+                    break;
+                }
+
+                match decode_message(remaining) {
                     Ok(msg) => {
-                        consumed += msg.header.size as usize;
+                        let size = msg.header.size as usize;
+                        consumed += size;
                         let result = self.core.dispatch(msg)?;
                         for ev in result.events {
                             let encoded = encode_message(&ev)?;
@@ -63,11 +71,8 @@ impl WireServer {
                 }
             }
 
-            // Shift remaining bytes
             if consumed > 0 {
                 buffer.drain(0..consumed);
-                // Pad back to 4096
-                buffer.resize(4096, 0);
             }
         }
 
