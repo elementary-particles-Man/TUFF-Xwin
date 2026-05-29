@@ -32,13 +32,13 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - **Extended E2E**: Verified the full sequence (`registry` -> `bind` -> `create_surface` -> `create_pool` -> `attach` -> `commit` -> `callback.done`) over a temporary Unix socket.
 - **State Split**: Confirmed that `pending` state remains isolated until `commit` is received.
 - **Resource Management**: Verified SHM pool and buffer lifecycle, including bounds checking.
-- **Surface Commit E2E**: Full protocol sequence verified over wire.
+- **Libwayland Compatibility**: Verified against real C client requests.
 
-## Phase 5: Libwayland Client Harness (Current)
-- **C Harness**: Added a minimal C client using `libwayland-client` to perform a real handshake (`get_registry`, `bind`, `create_surface`) over an isolated socket.
-- **Interoperability**: Verified that the Rust `wayland-wire` core can correctly handle requests from the official C library.
-- **Batched/Partial Reads**: Refactored `WireServer` to handle real-world network conditions where messages may be bundled or split across read calls.
-- **Safe Boundary**: Maintained strict isolation from the host OS; tests only run if `libwayland-client` is detected via `pkg-config`, and only use temporary sockets.
+## Phase 5b: SHM and FD Passing (Current)
+- **SCM_RIGHTS**: Implemented file descriptor passing via Unix domain socket ancillary data.
+- **Real Memory Sharing**: Added support for `wl_shm.create_pool` using actual file descriptors (via `memfd_create` or temp files).
+- **Advanced Interop**: The C harness now performs a full sequence: `connect` -> `registry` -> `bind` -> `create_surface` -> `create_pool` -> `create_buffer` -> `attach` -> `damage` -> `commit`.
+- **Validation**: Verified that the Rust server correctly receives and manages FDs, and performs bounds checking on SHM pools.
 
 ## Current Status
 - [x] **Headless Wire Core**: Base crate `wayland-wire` added to workspace.
@@ -50,11 +50,12 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - [x] **Isolated Socket Harness**: Server and Fake Client for byte-stream verification.
 - [x] **Surface Commit E2E**: Full protocol sequence verified over wire.
 - [x] **Libwayland Compatibility**: Verified against real C client requests.
-- [ ] **Full Interop**: Compatibility with standard libwayland-based clients is **Partial** (SHM/FD missing).
+- [x] **FD Passing / SHM**: Full support for SCM_RIGHTS and memory sharing.
+- [ ] **Full Interop**: Compatibility with standard libwayland-based clients is **High** (core protocols complete).
 
 ## Next Steps
-1. **Phase 5b: SHM and FD Passing**: Implement `SCM_RIGHTS` support for real memory sharing.
-2. Expand the dispatcher to handle more core interfaces (`wl_shm_pool`, `wl_surface`).
+1. **Phase 6: Shell and Input**: Implement `xdg-shell` and `wl_seat` (keyboard/pointer) state machines.
+2. Expand the dispatcher to handle more core interfaces (`wl_subcompositor`).
 
 2. Implement protocol XML parsing and code generation to avoid manual payload manipulation.
 3. Add a headless compositor test harness that can run simple Wayland clients.

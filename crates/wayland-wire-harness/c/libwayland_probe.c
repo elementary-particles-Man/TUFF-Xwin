@@ -3,11 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <errno.h>
 
 struct probe_state {
     struct wl_compositor *compositor;
     struct wl_shm *shm;
-    int success;
 };
 
 static void registry_handle_global(void *data, struct wl_registry *registry,
@@ -29,6 +31,27 @@ static const struct wl_registry_listener registry_listener = {
     registry_handle_global_remove
 };
 
+static int create_shm_fd(size_t size) {
+    int fd = -1;
+#ifdef MFD_CLOEXEC
+    fd = memfd_create("tuff-xwin-shm", MFD_CLOEXEC);
+#endif
+    if (fd < 0) {
+        char name[] = "/tmp/tuff-xwin-shm-XXXXXX";
+        fd = mkstemp(name);
+        if (fd >= 0) {
+            unlink(name);
+        }
+    }
+    if (fd >= 0) {
+        if (ftruncate(fd, size) < 0) {
+            close(fd);
+            return -1;
+        }
+    }
+    return fd;
+}
+
 int run_libwayland_probe(int fd) {
     struct wl_display *display = wl_display_connect_to_fd(fd);
     if (!display) {
@@ -36,11 +59,10 @@ int run_libwayland_probe(int fd) {
         return -1;
     }
 
-    struct probe_state state = { .compositor = NULL, .shm = NULL, .success = 0 };
+    struct probe_state state = { .compositor = NULL, .shm = NULL };
     struct wl_registry *registry = wl_display_get_registry(display);
     wl_registry_add_listener(registry, &registry_listener, &state);
 
-    // Initial roundtrip to get globals
     if (wl_display_roundtrip(display) < 0) {
         fprintf(stderr, "roundtrip 1 failed\n");
         wl_display_disconnect(display);
@@ -53,21 +75,33 @@ int run_libwayland_probe(int fd) {
         return -3;
     }
 
-    // Try to create a surface
     struct wl_surface *surface = wl_compositor_create_surface(state.compositor);
-    if (!surface) {
-        fprintf(stderr, "failed to create surface\n");
+    
+    // Create SHM pool and buffer
+    size_t size = 64 * 64 * 4;
+    int shm_fd = create_shm_fd(size);
+    if (shm_fd < 0) {
+        fprintf(stderr, "failed to create shm fd\n");
         wl_display_disconnect(display);
-        return -4;
+        return -6;
     }
+    
+    struct wl_shm_pool *pool = wl_shm_create_pool(state.shm, shm_fd, size);
+    struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, 64, 64, 64 * 4, WL_SHM_FORMAT_ARGB8888);
+    close(shm_fd);
 
-    // Final roundtrip to ensure requests are processed
+    wl_surface_attach(surface, buffer, 0, 0);
+    wl_surface_damage(surface, 0, 0, 64, 64);
+    wl_surface_commit(surface);
+
     if (wl_display_roundtrip(display) < 0) {
         fprintf(stderr, "roundtrip 2 failed\n");
         wl_display_disconnect(display);
         return -5;
     }
 
+    wl_buffer_destroy(buffer);
+    wl_shm_pool_destroy(pool);
     wl_surface_destroy(surface);
     wl_compositor_destroy(state.compositor);
     wl_shm_destroy(state.shm);

@@ -14,6 +14,7 @@ pub enum WireArg {
     NewId(u32),
     Array(Vec<u8>),
     Fd(FakeFd),
+    AncillaryFd, // Represents an FD to be consumed from the queue
 }
 
 pub fn decode_string(bytes: &[u8], offset: &mut usize) -> Result<String> {

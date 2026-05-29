@@ -1,11 +1,15 @@
-use crate::{FakeFd, Result, WaylandObjectId, WireError};
+use crate::{Result, WaylandObjectId, WireError};
 use std::collections::HashMap;
+
+pub enum ShmPoolStorage {
+    FakeMemory(Vec<u8>),
+    ReceivedFd(crate::WireOwnedFd),
+}
 
 pub struct ShmPool {
     pub id: WaylandObjectId,
-    pub fd: FakeFd,
+    pub storage: ShmPoolStorage,
     pub size: u32,
-    pub data: Vec<u8>, // Fake backing memory
 }
 
 pub struct ShmBuffer {
@@ -28,8 +32,26 @@ impl ShmManager {
         Self { pools: HashMap::new(), buffers: HashMap::new() }
     }
 
-    pub fn create_pool(&mut self, id: WaylandObjectId, fd: FakeFd, size: u32) {
-        self.pools.insert(id, ShmPool { id, fd, size, data: vec![0u8; size as usize] });
+    pub fn create_pool_from_fake(&mut self, id: WaylandObjectId, size: u32) {
+        self.pools.insert(
+            id,
+            ShmPool {
+                id,
+                storage: ShmPoolStorage::FakeMemory(vec![0u8; size as usize]),
+                size,
+            },
+        );
+    }
+
+    pub fn create_pool_from_fd(&mut self, id: WaylandObjectId, fd: crate::WireOwnedFd, size: u32) {
+        self.pools.insert(
+            id,
+            ShmPool {
+                id,
+                storage: ShmPoolStorage::ReceivedFd(fd),
+                size,
+            },
+        );
     }
 
     pub fn create_buffer(
@@ -44,8 +66,13 @@ impl ShmManager {
     ) -> Result<()> {
         let pool = self.pools.get(&pool_id).ok_or(WireError::InvalidObjectId(pool_id.0))?;
 
-        if offset < 0 || stride < 0 || height < 0 {
+        if offset < 0 || stride < 0 || height < 0 || width < 0 {
             return Err(WireError::InvalidSize(0));
+        }
+
+        // Basic validation for common formats (Argb8888 = 0, Xrgb8888 = 1)
+        if (format == 0 || format == 1) && stride < width * 4 {
+            return Err(WireError::ProtocolError("stride too small for format".into()));
         }
 
         let total_size = (offset as u32) + (stride as u32) * (height as u32);
@@ -53,7 +80,10 @@ impl ShmManager {
             return Err(WireError::InvalidSize(total_size));
         }
 
-        self.buffers.insert(id, ShmBuffer { id, pool_id, offset, width, height, stride, format });
+        self.buffers.insert(
+            id,
+            ShmBuffer { id, pool_id, offset, width, height, stride, format },
+        );
 
         Ok(())
     }

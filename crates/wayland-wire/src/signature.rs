@@ -37,7 +37,7 @@ pub fn validate_args(msg: &MessageSpec, args: &[WireArg]) -> bool {
             ("object", WireArg::Object(_)) => true,
             ("new_id", WireArg::NewId(_)) => true,
             ("array", WireArg::Array(_)) => true,
-            ("fd", WireArg::Fd(_)) => true,
+            ("fd", WireArg::Fd(_)) | ("fd", WireArg::AncillaryFd) => true,
             _ => false,
         };
         if !match_type {

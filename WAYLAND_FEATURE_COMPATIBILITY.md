@@ -29,6 +29,7 @@ This table compares standard Wayland features (as seen in major compositors like
    - P4: Isolated Unix socket harness for handshake verification.
    - P4b: Surface commit E2E verified over wire (registry -> bind -> surface -> shm -> commit).
    - P5: Libwayland client compatibility harness added. Handshake and surface creation verified with real C client.
+   - P5b: SCM_RIGHTS (FD passing) and SHM pool/buffer lifecycle verified with real C client over isolated socket.
 
 ## Implementation Progress (2026-05-27)
 

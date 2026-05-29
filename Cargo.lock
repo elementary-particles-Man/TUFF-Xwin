@@ -625,6 +625,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "byteorder",
+ "libc",
  "quick-xml",
  "serde",
  "serde_json",

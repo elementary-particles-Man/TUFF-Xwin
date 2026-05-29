@@ -2,6 +2,7 @@ pub mod args;
 pub mod client;
 pub mod codec;
 pub mod core;
+pub mod fd;
 pub mod generated;
 pub mod protocol;
 pub mod registry;
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use args::{FakeFd, WireArg};
+pub use fd::WireOwnedFd;
 
 #[derive(Debug, Error)]
 pub enum WireError {

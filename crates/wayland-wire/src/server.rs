@@ -1,9 +1,4 @@
-use crate::{
-    codec::{decode_message, encode_message},
-    core::HeadlessWireCore,
-    Result, WireError,
-};
-use std::io::{Read, Write};
+use crate::{core::HeadlessWireCore, Result, WireError};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
@@ -14,6 +9,7 @@ pub struct WireServerConfig {
 pub struct WireServer {
     pub config: WireServerConfig,
     pub core: HeadlessWireCore,
+    received_fds: Vec<crate::WireOwnedFd>,
 }
 
 impl WireServer {
@@ -26,7 +22,7 @@ impl WireServer {
             return Err(WireError::ProtocolError("Forbidden socket path".into()));
         }
 
-        Ok(Self { config, core: HeadlessWireCore::default() })
+        Ok(Self { config, core: HeadlessWireCore::default(), received_fds: Vec::new() })
     }
 
     pub fn run_once(&mut self) -> Result<()> {
@@ -37,17 +33,18 @@ impl WireServer {
         let listener = UnixListener::bind(&self.config.socket_path)?;
         println!("service=wire_server event=listening path={}", self.config.socket_path.display());
 
-        let (mut stream, _) = listener.accept()?;
+        let (stream, _) = listener.accept()?;
         println!("service=wire_server event=connected");
 
         let mut buffer = Vec::with_capacity(4096);
         let mut read_buf = [0u8; 4096];
         loop {
-            let n = stream.read(&mut read_buf)?;
-            if n == 0 {
+            let (n, fds) = crate::fd::recv_with_fds(&stream, &mut read_buf)?;
+            if n == 0 && fds.is_empty() {
                 break;
             }
             buffer.extend_from_slice(&read_buf[..n]);
+            self.received_fds.extend(fds);
 
             let mut consumed = 0;
             loop {
@@ -56,14 +53,27 @@ impl WireServer {
                     break;
                 }
 
-                match decode_message(remaining) {
+                match crate::codec::decode_message(remaining) {
                     Ok(msg) => {
                         let size = msg.header.size as usize;
                         consumed += size;
-                        let result = self.core.dispatch(msg)?;
+                        
+                        // We need to pass the FDs to dispatch. 
+                        // But which FDs belong to which message?
+                        // In Wayland, FDs are conceptually part of the message they are sent with.
+                        // HeadlessWireCore::dispatch should probably take the whole queue and pop from it.
+                        // For now, let's pass a slice of the queue.
+                        // Actually, I'll pass the whole queue and let the dispatcher pop.
+                        // But HeadlessWireCore::dispatch currently takes Option<usize>.
+                        // I'll change it to take &mut Vec<WireOwnedFd>.
+                        
+                        let result = self.core.dispatch_with_fds(msg, &mut self.received_fds)?;
                         for ev in result.events {
-                            let encoded = encode_message(&ev)?;
-                            stream.write_all(&encoded)?;
+                            let encoded = crate::codec::encode_message(&ev)?;
+                            // We don't send FDs back in events for now
+                            use std::io::Write;
+                            let mut s = &stream;
+                            s.write_all(&encoded)?;
                         }
                     }
                     Err(WireError::Incomplete) => break,

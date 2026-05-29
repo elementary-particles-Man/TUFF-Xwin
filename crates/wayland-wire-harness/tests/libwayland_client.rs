@@ -49,7 +49,18 @@ fn test_libwayland_client_full_sequence() {
 
     let server = server_handle.join().expect("server thread panicked");
 
-    // Verify surface was created
-    // The probe creates 1 surface
-    assert!(!server.core.surfaces.surfaces.is_empty());
+    // Verify state
+    // 1. Surface created
+    let surface_id = wayland_wire::WaylandObjectId(5);
+    let surf = server.core.surfaces.surfaces.get(&surface_id).expect("surface should exist");
+
+    // 2. SHM pool created (ID 6 in probe)
+    assert!(!server.core.shm.pools.is_empty());
+
+    // 3. Commit happened (commit_id should be > 0)
+    // HeadlessWireCore doesn't track commit_count directly on surface instance yet, 
+    // but current buffer_id is updated.
+    assert!(surf.current.buffer_id.is_some());
+    assert_eq!(surf.current.buffer_id.unwrap().0, 7); // buffer id 7 in probe
 }
+

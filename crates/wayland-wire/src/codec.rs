@@ -33,9 +33,14 @@ pub fn decode_message(bytes: &[u8]) -> Result<WaylandMessage> {
 use crate::protocol::MessageSpec;
 use crate::WireArg;
 
-pub fn decode_arguments(bytes: &[u8], spec: &MessageSpec) -> Result<Vec<WireArg>> {
+pub fn decode_arguments(
+    bytes: &[u8],
+    spec: &MessageSpec,
+    total_fds: Option<usize>,
+) -> Result<Vec<WireArg>> {
     let mut offset = 0;
     let mut args = Vec::with_capacity(spec.args.len());
+    let mut fds_needed = 0;
 
     for arg_spec in &spec.args {
         match arg_spec.arg_type.as_str() {
@@ -83,10 +88,11 @@ pub fn decode_arguments(bytes: &[u8], spec: &MessageSpec) -> Result<Vec<WireArg>
                 args.push(WireArg::Array(a));
             }
             "fd" => {
-                // In Wayland, FDs are not in the payload. They are passed as side-channel.
-                // For headless core, we might receive them as FakeFd(0) or something.
-                // We'll stub this as taking 0 bytes from payload.
-                args.push(WireArg::Fd(crate::FakeFd(0)));
+                fds_needed += 1;
+                match total_fds {
+                    Some(_) => args.push(WireArg::AncillaryFd),
+                    None => args.push(WireArg::Fd(crate::FakeFd(0))),
+                }
             }
             _ => {
                 return Err(WireError::ProtocolError(format!(
@@ -94,6 +100,12 @@ pub fn decode_arguments(bytes: &[u8], spec: &MessageSpec) -> Result<Vec<WireArg>
                     arg_spec.arg_type
                 )))
             }
+        }
+    }
+
+    if let Some(total) = total_fds {
+        if fds_needed > total {
+            return Err(WireError::ProtocolError("missing ancillary FD".into()));
         }
     }
 

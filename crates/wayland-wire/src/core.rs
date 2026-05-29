@@ -2,7 +2,7 @@ use crate::{
     registry::WireObjectRegistry,
     shm::ShmManager,
     surface::{Rect, SurfaceManager},
-    FakeFd, Result, WaylandMessage, WaylandObjectId, WaylandOpcode, WireError,
+    Result, WaylandMessage, WaylandObjectId, WaylandOpcode, WireError,
 };
 use byteorder::{ByteOrder, LittleEndian};
 
@@ -46,6 +46,10 @@ pub struct DispatchResult {
 
 impl HeadlessWireCore {
     pub fn dispatch(&mut self, message: WaylandMessage) -> Result<DispatchResult> {
+        self.dispatch_with_fds(message, &mut Vec::new())
+    }
+
+    pub fn dispatch_with_fds(&mut self, message: WaylandMessage, fd_queue: &mut Vec<crate::WireOwnedFd>) -> Result<DispatchResult> {
         let obj = self.registry.get_object(message.header.object_id)?;
         let spec = crate::generated::core_protocol_spec();
         let iface_spec = spec.interfaces.get(&obj.interface).ok_or_else(|| {
@@ -61,7 +65,9 @@ impl HeadlessWireCore {
             })?;
 
         // Validate arguments
-        let args = crate::codec::decode_arguments(&message.payload, msg_spec)?;
+        let total_fds = if fd_queue.is_empty() { None } else { Some(fd_queue.len()) };
+        
+        let args = crate::codec::decode_arguments(&message.payload, msg_spec, total_fds)?;
         if !crate::signature::validate_args(msg_spec, &args) {
             return Err(WireError::ProtocolError(format!(
                 "argument mismatch for {} opcode {}",
@@ -83,7 +89,7 @@ impl HeadlessWireCore {
             ("wl_surface", 3) => self.handle_surface_frame(message)?,
             ("wl_surface", 6) => self.handle_surface_commit(message)?,
             ("wl_surface", 9) => self.handle_surface_damage(message)?,
-            ("wl_shm", 0) => self.handle_shm_create_pool(message)?,
+            ("wl_shm", 0) => self.handle_shm_create_pool(message, fd_queue, &args)?,
             ("wl_shm_pool", 0) => self.handle_shm_pool_create_buffer(message)?,
             _ => {
                 println!(
@@ -234,17 +240,35 @@ impl HeadlessWireCore {
         Ok(())
     }
 
-    fn handle_shm_create_pool(&mut self, message: WaylandMessage) -> Result<()> {
+    fn handle_shm_create_pool(
+        &mut self,
+        message: WaylandMessage,
+        fd_queue: &mut Vec<crate::WireOwnedFd>,
+        args: &[crate::WireArg],
+    ) -> Result<()> {
         if message.payload.len() < 8 {
             return Err(WireError::Incomplete);
         }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
-        // Note: FD is not in payload, but passed via ancillary data.
-        // For P2 headless core, we simulate by assuming it was passed.
         let size = LittleEndian::read_u32(&message.payload[4..8]);
+
         self.registry.register_client_object(id, "wl_shm_pool", 1)?;
-        self.shm.create_pool(id, FakeFd(0), size);
-        Ok(())
+
+        // Find FD arg
+        for arg in args {
+            if let crate::WireArg::AncillaryFd = arg {
+                if !fd_queue.is_empty() {
+                    let fd = fd_queue.remove(0);
+                    self.shm.create_pool_from_fd(id, fd, size);
+                    return Ok(());
+                }
+            } else if let crate::WireArg::Fd(_) = arg {
+                self.shm.create_pool_from_fake(id, size);
+                return Ok(());
+            }
+        }
+
+        Err(WireError::ProtocolError("missing FD for wl_shm.create_pool".into()))
     }
 
     fn handle_shm_pool_create_buffer(&mut self, message: WaylandMessage) -> Result<()> {
