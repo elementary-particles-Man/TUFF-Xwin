@@ -14,7 +14,6 @@ pub fn core_protocol_spec() -> &'static ProtocolSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::MessageKindSpec;
 
     #[test]
     fn test_core_protocol_lookup() {

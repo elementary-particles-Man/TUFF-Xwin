@@ -191,6 +191,19 @@ async fn main() -> Result<()> {
         None
     };
 
+    if let Some(socket_path) = config.wire_test_socket.as_ref() {
+        println!("service=waylandd op=wire_test_socket event=begin path={}", socket_path.display());
+        println!(
+            "service=waylandd info=\"this is an isolated test socket, NOT for production use\""
+        );
+        let mut server =
+            wayland_wire::server::WireServer::new(wayland_wire::server::WireServerConfig {
+                socket_path: socket_path.clone(),
+            })?;
+        server.run_once()?;
+        return Ok(());
+    }
+
     if config.wire_headless_test {
         run_wire_headless_test()?;
         return Ok(());
@@ -254,6 +267,7 @@ struct Config {
     use_vulkan: bool,
     session_instance_id: String,
     wire_headless_test: bool,
+    wire_test_socket: Option<PathBuf>,
 }
 
 impl Config {
@@ -269,6 +283,18 @@ impl Config {
                 "--print-registry" => config.print_registry = true,
                 "--vulkan" => config.use_vulkan = true,
                 "--wire-headless-test" => config.wire_headless_test = true,
+                "--wire-test-socket" => {
+                    let path = args.next().context("--wire-test-socket requires a path")?;
+                    let path = PathBuf::from(path);
+                    let path_str = path.to_string_lossy();
+                    if path_str.contains("/run/user")
+                        || path_str.contains("waybroker")
+                        || path_str.contains("XDG_RUNTIME_DIR")
+                    {
+                        bail!("Forbidden socket path for --wire-test-socket: {}", path_str);
+                    }
+                    config.wire_test_socket = Some(path);
+                }
                 "--session-instance-id" => {
                     config.session_instance_id =
                         args.next().context("--session-instance-id requires an id")?;
@@ -283,7 +309,7 @@ impl Config {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: waylandd [--require-displayd] [--serve-ipc] [--once] [--print-registry] [--registry PATH] [--bind-wayland-display NAME] [--vulkan] [--session-instance-id ID] [--wire-headless-test]"
+                        "usage: waylandd [--require-displayd] [--serve-ipc] [--once] [--print-registry] [--registry PATH] [--bind-wayland-display NAME] [--vulkan] [--session-instance-id ID] [--wire-headless-test] [--wire-test-socket PATH]"
                     );
                     std::process::exit(0);
                 }
@@ -1392,5 +1418,23 @@ mod tests {
         } else {
             panic!("Expected RelativePointerMotion");
         }
+    }
+
+    #[test]
+    fn test_wire_test_socket_path_validation() {
+        use super::Config;
+        let args = vec![
+            "waylandd".to_string(),
+            "--wire-test-socket".to_string(),
+            "/run/user/1000/test.sock".to_string(),
+        ];
+        assert!(Config::from_args(args.into_iter().skip(1)).is_err());
+
+        let args2 = vec![
+            "waylandd".to_string(),
+            "--wire-test-socket".to_string(),
+            "/tmp/test.sock".to_string(),
+        ];
+        assert!(Config::from_args(args2.into_iter().skip(1)).is_ok());
     }
 }

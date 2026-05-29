@@ -1,9 +1,11 @@
 pub mod args;
+pub mod client;
 pub mod codec;
 pub mod core;
 pub mod generated;
 pub mod protocol;
 pub mod registry;
+pub mod server;
 pub mod shm;
 pub mod signature;
 pub mod surface;

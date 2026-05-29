@@ -58,12 +58,13 @@ impl ProtocolSpec {
                     Event::Start(ref e) | Event::Empty(ref e) => {
                         let is_empty = matches!(event, Event::Empty(_));
                         let tag_name = e.name();
-                        
+
                         match tag_name.as_ref() {
                             b"protocol" => {
                                 for attr in e.attributes().flatten() {
                                     if attr.key.as_ref() == b"name" {
-                                        protocol_name = String::from_utf8_lossy(&attr.value).into_owned();
+                                        protocol_name =
+                                            String::from_utf8_lossy(&attr.value).into_owned();
                                     }
                                 }
                             }
@@ -72,9 +73,13 @@ impl ProtocolSpec {
                                 let mut version = 1;
                                 for attr in e.attributes().flatten() {
                                     match attr.key.as_ref() {
-                                        b"name" => name = String::from_utf8_lossy(&attr.value).into_owned(),
+                                        b"name" => {
+                                            name = String::from_utf8_lossy(&attr.value).into_owned()
+                                        }
                                         b"version" => {
-                                            version = String::from_utf8_lossy(&attr.value).parse().unwrap_or(1);
+                                            version = String::from_utf8_lossy(&attr.value)
+                                                .parse()
+                                                .unwrap_or(1);
                                         }
                                         _ => {}
                                     }
@@ -98,7 +103,7 @@ impl ProtocolSpec {
                                         name = String::from_utf8_lossy(&attr.value).into_owned();
                                     }
                                 }
-                                
+
                                 let opcode = if let Some(ref iface) = current_interface {
                                     if kind == MessageKindSpec::Request {
                                         iface.requests.len() as u16
@@ -109,7 +114,12 @@ impl ProtocolSpec {
                                     0
                                 };
 
-                                let msg = MessageSpec { name, kind: kind.clone(), opcode, args: Vec::new() };
+                                let msg = MessageSpec {
+                                    name,
+                                    kind: kind.clone(),
+                                    opcode,
+                                    args: Vec::new(),
+                                };
                                 if is_empty {
                                     if let Some(ref mut iface) = current_interface {
                                         let kind = msg.kind.clone();
@@ -129,13 +139,27 @@ impl ProtocolSpec {
                                     let mut arg_type = String::new();
                                     let mut interface = None;
                                     let mut allow_null = false;
-                                    
+
                                     for attr in e.attributes().flatten() {
                                         match attr.key.as_ref() {
-                                            b"name" => arg_name = String::from_utf8_lossy(&attr.value).into_owned(),
-                                            b"type" => arg_type = String::from_utf8_lossy(&attr.value).into_owned(),
-                                            b"interface" => interface = Some(String::from_utf8_lossy(&attr.value).into_owned()),
-                                            b"allow-null" => allow_null = String::from_utf8_lossy(&attr.value) == "true",
+                                            b"name" => {
+                                                arg_name = String::from_utf8_lossy(&attr.value)
+                                                    .into_owned()
+                                            }
+                                            b"type" => {
+                                                arg_type = String::from_utf8_lossy(&attr.value)
+                                                    .into_owned()
+                                            }
+                                            b"interface" => {
+                                                interface = Some(
+                                                    String::from_utf8_lossy(&attr.value)
+                                                        .into_owned(),
+                                                )
+                                            }
+                                            b"allow-null" => {
+                                                allow_null =
+                                                    String::from_utf8_lossy(&attr.value) == "true"
+                                            }
                                             _ => {}
                                         }
                                     }
@@ -150,41 +174,38 @@ impl ProtocolSpec {
                             _ => {}
                         }
                     }
-                    Event::End(e) => {
-                        match e.name().as_ref() {
-                            b"interface" => {
-                                if let Some(iface) = current_interface.take() {
-                                    interfaces.insert(iface.name.clone(), iface);
-                                }
+                    Event::End(e) => match e.name().as_ref() {
+                        b"interface" => {
+                            if let Some(iface) = current_interface.take() {
+                                interfaces.insert(iface.name.clone(), iface);
                             }
-                            b"request" => {
-                                if let Some(msg) = current_message.take() {
-                                    if let Some(ref mut iface) = current_interface {
-                                        iface.requests.push(msg);
-                                    }
-                                }
-                            }
-                            b"event" => {
-                                if let Some(msg) = current_message.take() {
-                                    if let Some(ref mut iface) = current_interface {
-                                        iface.events.push(msg);
-                                    }
-                                }
-                            }
-                            _ => {}
                         }
-                    }
+                        b"request" => {
+                            if let Some(msg) = current_message.take() {
+                                if let Some(ref mut iface) = current_interface {
+                                    iface.requests.push(msg);
+                                }
+                            }
+                        }
+                        b"event" => {
+                            if let Some(msg) = current_message.take() {
+                                if let Some(ref mut iface) = current_interface {
+                                    iface.events.push(msg);
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
                     Event::Eof => break,
                     _ => {}
                 },
-                Err(e) => return Err(WireError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))),
+                Err(e) => {
+                    return Err(WireError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                }
             }
             buf.clear();
         }
 
-        Ok(ProtocolSpec {
-            name: protocol_name,
-            interfaces,
-        })
+        Ok(ProtocolSpec { name: protocol_name, interfaces })
     }
 }

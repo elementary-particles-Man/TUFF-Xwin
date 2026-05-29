@@ -39,8 +39,13 @@ impl Default for HeadlessWireCore {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DispatchResult {
+    pub events: Vec<WaylandMessage>,
+}
+
 impl HeadlessWireCore {
-    pub fn dispatch(&mut self, message: WaylandMessage) -> Result<()> {
+    pub fn dispatch(&mut self, message: WaylandMessage) -> Result<DispatchResult> {
         let obj = self.registry.get_object(message.header.object_id)?;
         let spec = crate::generated::core_protocol_spec();
         let iface_spec = spec.interfaces.get(&obj.interface).ok_or_else(|| {
@@ -64,27 +69,30 @@ impl HeadlessWireCore {
             )));
         }
 
+        self.events_out.clear();
+
         match (obj.interface.as_str(), message.header.opcode.0) {
-            ("wl_display", 1) => self.handle_get_registry(message),
-            ("wl_display", 0) => self.handle_sync(message),
-            ("wl_registry", 0) => self.handle_registry_bind(message),
-            ("wl_compositor", 0) => self.handle_create_surface(message),
-            ("wl_compositor", 1) => self.handle_create_region(message),
-            ("wl_surface", 0) => self.handle_surface_destroy(message),
-            ("wl_surface", 1) => self.handle_surface_attach(message),
-            ("wl_surface", 2) => self.handle_surface_damage(message),
-            ("wl_surface", 3) => self.handle_surface_frame(message),
-            ("wl_surface", 6) => self.handle_surface_commit(message),
-            ("wl_shm", 0) => self.handle_shm_create_pool(message),
-            ("wl_shm_pool", 0) => self.handle_shm_pool_create_buffer(message),
+            ("wl_display", 1) => self.handle_get_registry(message)?,
+            ("wl_display", 0) => self.handle_sync(message)?,
+            ("wl_registry", 0) => self.handle_registry_bind(message)?,
+            ("wl_compositor", 0) => self.handle_create_surface(message)?,
+            ("wl_compositor", 1) => self.handle_create_region(message)?,
+            ("wl_surface", 0) => self.handle_surface_destroy(message)?,
+            ("wl_surface", 1) => self.handle_surface_attach(message)?,
+            ("wl_surface", 2) => self.handle_surface_damage(message)?,
+            ("wl_surface", 3) => self.handle_surface_frame(message)?,
+            ("wl_surface", 6) => self.handle_surface_commit(message)?,
+            ("wl_shm", 0) => self.handle_shm_create_pool(message)?,
+            ("wl_shm_pool", 0) => self.handle_shm_pool_create_buffer(message)?,
             _ => {
                 println!(
                     "warning: unhandled dispatch for {} (id={}) opcode={}",
                     obj.interface, message.header.object_id.0, message.header.opcode.0
                 );
-                Ok(())
             }
         }
+
+        Ok(DispatchResult { events: self.events_out.drain(..).collect() })
     }
 
     fn handle_get_registry(&mut self, message: WaylandMessage) -> Result<()> {
@@ -286,8 +294,7 @@ mod tests {
 
         let mut p1 = vec![0u8; 4];
         LittleEndian::write_u32(&mut p1, 10);
-        core.dispatch(WaylandMessage::new(WaylandObjectId::DISPLAY, WaylandOpcode(1), p1))
-            .unwrap();
+        core.dispatch(WaylandMessage::new(WaylandObjectId::DISPLAY, WaylandOpcode(1), p1)).unwrap();
 
         // Bind wl_compositor (assume name 1)
         // Signature: name (u32), interface (string), version (u32), id (new_id)
@@ -297,8 +304,7 @@ mod tests {
         p2.extend_from_slice(&4u32.to_le_bytes()); // version
         p2.extend_from_slice(&11u32.to_le_bytes()); // new_id
 
-        core.dispatch(WaylandMessage::new(WaylandObjectId(10), WaylandOpcode(0), p2))
-            .unwrap();
+        core.dispatch(WaylandMessage::new(WaylandObjectId(10), WaylandOpcode(0), p2)).unwrap();
 
         assert!(core.registry.get_object(WaylandObjectId(11)).is_ok());
         assert_eq!(
@@ -306,5 +312,4 @@ mod tests {
             "wl_compositor"
         );
     }
-
 }

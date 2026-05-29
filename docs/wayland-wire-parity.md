@@ -21,6 +21,12 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - **Signature Validation**: Ability to generate signature strings and validate `WireArg` counts/types against XML spec.
 - **Metadata-driven Dispatch**: Hand-written dispatchers now validate incoming messages against the parsed metadata.
 
+## Phase 4: Isolated Socket Harness (Current)
+- **Isolated Server**: Added `WireServer` in `wayland-wire` that binds to a caller-specified Unix socket (strictly outside `XDG_RUNTIME_DIR`).
+- **Fake Client**: Added `WireFakeClient` to simulate client requests over the wire.
+- **E2E Testing**: Established end-to-end tests that perform a full Wayland handshake and surface commit over a temporary Unix socket.
+- **Strict Path Validation**: Both `wayland-wire` and `waylandd` reject socket paths in runtime directories to ensure isolation.
+
 ## Current Status
 - [x] **Headless Wire Core**: Base crate `wayland-wire` added to workspace.
 - [x] **Codec**: Support for encoding/decoding object ID, opcode, and size.
@@ -28,7 +34,7 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - [x] **Bootstrap**: Support for `get_registry` and `sync` requests.
 - [x] **Protocol XML Parser**: Local parser for `.xml` protocol definitions.
 - [x] **Metadata Validation**: Automated verification of opcode and arguments.
-- [ ] **Protocol Generation**: `wayland-scanner` equivalent is **unimplemented**.
+- [x] **Isolated Socket Harness**: Server and Fake Client for byte-stream verification.
 - [ ] **Full Interop**: Compatibility with standard libwayland-based clients is **unimplemented**.
 
 
