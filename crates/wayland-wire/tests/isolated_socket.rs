@@ -1,6 +1,6 @@
+use byteorder::ByteOrder;
 use std::thread;
 use tempfile::tempdir;
-use byteorder::ByteOrder;
 use wayland_wire::{
     client::WireFakeClient,
     server::{WireServer, WireServerConfig},
@@ -91,7 +91,8 @@ fn test_isolated_socket_xdg_input_e2e() {
 
     client.get_registry(2).unwrap();
     let mut events = Vec::new();
-    while events.len() < 4 { // compositor, shm, seat, xdg_wm_base
+    while events.len() < 4 {
+        // compositor, shm, seat, xdg_wm_base
         events.append(&mut client.receive_events().unwrap());
     }
 
@@ -106,20 +107,20 @@ fn test_isolated_socket_xdg_input_e2e() {
     client.xdg_wm_base_get_xdg_surface(6, 8, 7).unwrap();
     client.xdg_surface_get_toplevel(8, 9).unwrap();
     client.xdg_toplevel_set_title(9, "Parity Test").unwrap();
-    
+
     // 3. Receive configure and ack
     let mut config_events = Vec::new();
     while config_events.len() < 2 {
         config_events.append(&mut client.receive_events().unwrap());
     }
-    // xdg_surface.configure (opcode 0) has serial. 
+    // xdg_surface.configure (opcode 0) has serial.
     // In our HeadlessWireCore, it emits toplevel.configure (opcode 0) then surface.configure.
     let serial = if config_events[1].header.object_id.0 == 8 {
         byteorder::LittleEndian::read_u32(&config_events[1].payload[0..4])
     } else {
         byteorder::LittleEndian::read_u32(&config_events[0].payload[0..4])
     };
-    
+
     client.xdg_surface_ack_configure(8, serial).unwrap();
     client.wl_surface_commit(7).unwrap();
 
@@ -131,6 +132,113 @@ fn test_isolated_socket_xdg_input_e2e() {
     // To send fake input, we'd normally need a way to trigger server side events.
     // In this E2E test, the server is running the HeadlessWireCore loop.
     // We'll stop here for P6 E2E handshake.
+}
+
+#[test]
+fn test_reject_duplicate_xdg_surface() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-xdg-dup.sock");
+    let server_path = socket_path.clone();
+
+    let _server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).expect("failed to create server");
+        let _ = server.run_once();
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = WireFakeClient::connect(&socket_path).expect("failed to connect");
+
+    client.get_registry(2).unwrap();
+    client.bind_wl_compositor(2, 1, 4, 3).unwrap();
+    client.bind_xdg_wm_base(2, 4, 6, 6).unwrap();
+    client.wl_compositor_create_surface(3, 7).unwrap();
+    
+    // Drain events (globals and ping)
+    thread::sleep(std::time::Duration::from_millis(50));
+    while !client.receive_events().unwrap().is_empty() {}
+
+    // Create first xdg_surface
+    client.xdg_wm_base_get_xdg_surface(6, 8, 7).unwrap();
+    
+    // Create second xdg_surface for SAME wl_surface (id 7) -> should fail on server side
+    client.xdg_wm_base_get_xdg_surface(6, 9, 7).unwrap();
+    
+    thread::sleep(std::time::Duration::from_millis(200));
+    // Connection should be closed by server due to ProtocolError
+    let res = client.receive_events();
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_reject_invalid_ack_configure() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-xdg-ack-fail.sock");
+    let server_path = socket_path.clone();
+
+    let _server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).expect("failed to create server");
+        let _ = server.run_once();
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = WireFakeClient::connect(&socket_path).expect("failed to connect");
+
+    client.get_registry(2).unwrap();
+    client.bind_wl_compositor(2, 1, 4, 3).unwrap();
+    client.bind_xdg_wm_base(2, 4, 6, 6).unwrap();
+    client.wl_compositor_create_surface(3, 7).unwrap();
+    client.xdg_wm_base_get_xdg_surface(6, 8, 7).unwrap();
+
+    // Drain events
+    thread::sleep(std::time::Duration::from_millis(50));
+    while !client.receive_events().unwrap().is_empty() {}
+    
+    // Ack a serial before any configure is sent (last_serial is 0)
+    client.xdg_surface_ack_configure(8, 1234).unwrap();
+    
+    thread::sleep(std::time::Duration::from_millis(200));
+    let res = client.receive_events();
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_reject_xdg_request_after_destroy() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-xdg-dest.sock");
+    let server_path = socket_path.clone();
+
+    let _server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).expect("failed to create server");
+        let _ = server.run_once();
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = WireFakeClient::connect(&socket_path).expect("failed to connect");
+
+    client.get_registry(2).unwrap();
+    client.bind_wl_compositor(2, 1, 4, 3).unwrap();
+    client.bind_xdg_wm_base(2, 4, 6, 6).unwrap();
+    client.wl_compositor_create_surface(3, 7).unwrap();
+    client.xdg_wm_base_get_xdg_surface(6, 8, 7).unwrap();
+    client.xdg_surface_get_toplevel(8, 9).unwrap();
+
+    // Drain events
+    thread::sleep(std::time::Duration::from_millis(50));
+    while !client.receive_events().unwrap().is_empty() {}
+    
+    // Destroy toplevel (opcode 0)
+    let msg = wayland_wire::WaylandMessage::new(wayland_wire::WaylandObjectId(9), wayland_wire::WaylandOpcode(0), vec![]);
+    client.send_message(&msg).unwrap();
+    
+    // Try set_title (opcode 2) on destroyed toplevel -> should fail
+    client.xdg_toplevel_set_title(9, "After Destroy").unwrap();
+    
+    thread::sleep(std::time::Duration::from_millis(200));
+    let res = client.receive_events();
+    assert!(res.is_err());
 }
 
 #[test]

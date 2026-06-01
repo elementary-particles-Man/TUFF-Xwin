@@ -1,9 +1,9 @@
 use crate::{
+    input::SeatManager,
     registry::WireObjectRegistry,
     shm::ShmManager,
     surface::{Rect, SurfaceManager},
     xdg_shell::XdgShellManager,
-    input::SeatManager,
     Result, WaylandMessage, WaylandObjectId, WaylandOpcode, WireError,
 };
 use byteorder::{ByteOrder, LittleEndian};
@@ -56,7 +56,11 @@ impl HeadlessWireCore {
         self.dispatch_with_fds(message, &mut Vec::new())
     }
 
-    pub fn dispatch_with_fds(&mut self, message: WaylandMessage, fd_queue: &mut Vec<crate::WireOwnedFd>) -> Result<DispatchResult> {
+    pub fn dispatch_with_fds(
+        &mut self,
+        message: WaylandMessage,
+        fd_queue: &mut Vec<crate::WireOwnedFd>,
+    ) -> Result<DispatchResult> {
         let obj = self.registry.get_object(message.header.object_id)?;
         let spec = crate::generated::core_protocol_spec();
         let iface_spec = spec.interfaces.get(&obj.interface).ok_or_else(|| {
@@ -73,7 +77,7 @@ impl HeadlessWireCore {
 
         // Validate arguments
         let total_fds = if fd_queue.is_empty() { None } else { Some(fd_queue.len()) };
-        
+
         let args = crate::codec::decode_arguments(&message.payload, msg_spec, total_fds)?;
         if !crate::signature::validate_args(msg_spec, &args) {
             return Err(WireError::ProtocolError(format!(
@@ -104,6 +108,8 @@ impl HeadlessWireCore {
             ("xdg_surface", 4) => self.handle_xdg_surface_ack_configure(message)?,
             ("xdg_toplevel", 2) => self.handle_xdg_toplevel_set_title(message, &args)?,
             ("xdg_toplevel", 3) => self.handle_xdg_toplevel_set_app_id(message, &args)?,
+            ("xdg_surface", 0) => self.handle_xdg_surface_destroy(message)?,
+            ("xdg_toplevel", 0) => self.handle_xdg_toplevel_destroy(message)?,
             ("wl_seat", 0) => self.handle_seat_get_pointer(message)?,
             ("wl_seat", 1) => self.handle_seat_get_keyboard(message)?,
             _ => {
@@ -169,14 +175,28 @@ impl HeadlessWireCore {
             self.send_shm_formats(new_id);
         } else if global.interface == "wl_seat" {
             self.send_seat_capabilities(new_id);
+        } else if global.interface == "xdg_wm_base" {
+            self.send_xdg_ping(new_id);
         }
         Ok(())
+    }
+
+    fn send_xdg_ping(&mut self, wm_base_id: WaylandObjectId) {
+        let mut p = vec![0u8; 4];
+        LittleEndian::write_u32(&mut p, self.xdg_shell.get_next_serial());
+        self.events_out.push(WaylandMessage::new(wm_base_id, WaylandOpcode(0), p));
     }
 
     fn handle_xdg_wm_base_get_xdg_surface(&mut self, message: WaylandMessage) -> Result<()> {
         if message.payload.len() < 8 { return Err(WireError::Incomplete); }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
         let wl_surf_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+
+        // Validation: same wl_surface cannot have multiple xdg_surfaces
+        if self.xdg_shell.surfaces.values().any(|s| s.wl_surface_id == wl_surf_id) {
+             return Err(WireError::ProtocolError("wl_surface already has an xdg_surface".into()));
+        }
+
         self.registry.register_client_object(id, "xdg_surface", 6)?;
         self.xdg_shell.create_xdg_surface(id, wl_surf_id);
         Ok(())
@@ -186,65 +206,95 @@ impl HeadlessWireCore {
         Ok(())
     }
 
+
+    fn handle_xdg_surface_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.xdg_shell.surfaces.remove(&message.header.object_id);
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_xdg_toplevel_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
     fn handle_xdg_surface_get_toplevel(&mut self, message: WaylandMessage) -> Result<()> {
-        if message.payload.len() < 4 { return Err(WireError::Incomplete); }
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
         self.registry.register_client_object(id, "xdg_toplevel", 6)?;
-        
+
         // Emit configure events
         let serial = self.xdg_shell.get_next_serial();
         if let Some(surf) = self.xdg_shell.surfaces.get_mut(&message.header.object_id) {
-             surf.configure_serial = serial;
+            surf.configure_serial = serial;
         }
-        
+
         // xdg_toplevel.configure: width, height, states
         let mut top_p = vec![0u8; 12];
         LittleEndian::write_i32(&mut top_p[0..4], 0); // width
         LittleEndian::write_i32(&mut top_p[4..8], 0); // height
-        // states array empty
+                                                      // states array empty
         self.events_out.push(WaylandMessage::new(id, WaylandOpcode(0), top_p));
-        
+
         // xdg_surface.configure: serial
         let mut surf_p = vec![0u8; 4];
         LittleEndian::write_u32(&mut surf_p, serial);
-        self.events_out.push(WaylandMessage::new(message.header.object_id, WaylandOpcode(0), surf_p));
+        self.events_out.push(WaylandMessage::new(
+            message.header.object_id,
+            WaylandOpcode(0),
+            surf_p,
+        ));
 
         Ok(())
     }
 
     fn handle_xdg_surface_ack_configure(&mut self, message: WaylandMessage) -> Result<()> {
-        if message.payload.len() < 4 { return Err(WireError::Incomplete); }
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
         let serial = LittleEndian::read_u32(&message.payload[0..4]);
         self.xdg_shell.ack_configure(message.header.object_id, serial)
     }
 
-    fn handle_xdg_toplevel_set_title(&mut self, message: WaylandMessage, args: &[crate::WireArg]) -> Result<()> {
+    fn handle_xdg_toplevel_set_title(
+        &mut self,
+        message: WaylandMessage,
+        args: &[crate::WireArg],
+    ) -> Result<()> {
         if let Some(crate::WireArg::String(title)) = args.get(0) {
-             if let Some(surf) = self.xdg_shell.surfaces.get_mut(&message.header.object_id) {
-                 surf.title = Some(title.clone());
-             }
+            if let Some(surf) = self.xdg_shell.surfaces.get_mut(&message.header.object_id) {
+                surf.title = Some(title.clone());
+            }
         }
         Ok(())
     }
 
-    fn handle_xdg_toplevel_set_app_id(&mut self, message: WaylandMessage, args: &[crate::WireArg]) -> Result<()> {
+    fn handle_xdg_toplevel_set_app_id(
+        &mut self,
+        message: WaylandMessage,
+        args: &[crate::WireArg],
+    ) -> Result<()> {
         if let Some(crate::WireArg::String(app_id)) = args.get(0) {
-             if let Some(surf) = self.xdg_shell.surfaces.get_mut(&message.header.object_id) {
-                 surf.app_id = Some(app_id.clone());
-             }
+            if let Some(surf) = self.xdg_shell.surfaces.get_mut(&message.header.object_id) {
+                surf.app_id = Some(app_id.clone());
+            }
         }
         Ok(())
     }
 
     fn handle_seat_get_pointer(&mut self, message: WaylandMessage) -> Result<()> {
-        if message.payload.len() < 4 { return Err(WireError::Incomplete); }
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
         self.registry.register_client_object(id, "wl_pointer", 7)?;
         self.input.get_pointer(message.header.object_id, id)
     }
 
     fn handle_seat_get_keyboard(&mut self, message: WaylandMessage) -> Result<()> {
-        if message.payload.len() < 4 { return Err(WireError::Incomplete); }
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
         self.registry.register_client_object(id, "wl_keyboard", 7)?;
         self.input.get_keyboard(message.header.object_id, id)
@@ -450,5 +500,28 @@ mod tests {
             core.registry.get_object(WaylandObjectId(11)).unwrap().interface,
             "wl_compositor"
         );
+    }
+
+    #[test]
+    fn test_xdg_configure_event_order() {
+        let mut core = HeadlessWireCore::default();
+        core.registry.register_client_object(WaylandObjectId(10), "wl_surface", 4).unwrap();
+        core.registry.register_client_object(WaylandObjectId(11), "xdg_wm_base", 1).unwrap();
+        
+        // 1. Get xdg_surface
+        let mut p1 = vec![0u8; 8];
+        LittleEndian::write_u32(&mut p1[0..4], 12); // xdg_surface id
+        LittleEndian::write_u32(&mut p1[4..8], 10); // wl_surface id
+        core.dispatch(WaylandMessage::new(WaylandObjectId(11), WaylandOpcode(3), p1)).unwrap();
+        
+        // 2. Get toplevel
+        let mut p2 = vec![0u8; 4];
+        LittleEndian::write_u32(&mut p2, 13); // toplevel id
+        let res = core.dispatch(WaylandMessage::new(WaylandObjectId(12), WaylandOpcode(1), p2)).unwrap();
+        
+        // Expect 2 events: toplevel.configure (id 13) then surface.configure (id 12)
+        assert_eq!(res.events.len(), 2);
+        assert_eq!(res.events[0].header.object_id.0, 13);
+        assert_eq!(res.events[1].header.object_id.0, 12);
     }
 }

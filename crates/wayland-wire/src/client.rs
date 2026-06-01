@@ -33,7 +33,7 @@ impl WireFakeClient {
         };
 
         if n == 0 {
-            return Ok(Vec::new());
+            return Err(WireError::ConnectionClosed);
         }
 
         let mut events = Vec::new();

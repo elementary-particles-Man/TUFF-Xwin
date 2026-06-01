@@ -1,4 +1,4 @@
-use crate::{WaylandObjectId, Result, WireError};
+use crate::{Result, WaylandObjectId, WireError};
 use std::collections::HashMap;
 
 pub struct SeatManager {
@@ -29,41 +29,37 @@ pub struct KeyboardState {
 
 impl SeatManager {
     pub fn new() -> Self {
-        Self {
-            seats: HashMap::new(),
-            pointers: HashMap::new(),
-            keyboards: HashMap::new(),
-        }
+        Self { seats: HashMap::new(), pointers: HashMap::new(), keyboards: HashMap::new() }
     }
 
     pub fn create_seat(&mut self, id: WaylandObjectId, name: &str) {
-        self.seats.insert(id, SeatState {
-            name: name.into(),
-            capabilities: 7, // All by default for headless parity
-        });
+        self.seats.insert(
+            id,
+            SeatState {
+                name: name.into(),
+                capabilities: 7, // All by default for headless parity
+            },
+        );
     }
 
     pub fn get_pointer(&mut self, seat_id: WaylandObjectId, new_id: WaylandObjectId) -> Result<()> {
         if !self.seats.contains_key(&seat_id) {
             return Err(WireError::InvalidObjectId(seat_id.0));
         }
-        self.pointers.insert(new_id, PointerState {
-            seat_id,
-            focus_surface_id: None,
-            x: 0.0,
-            y: 0.0,
-        });
+        self.pointers
+            .insert(new_id, PointerState { seat_id, focus_surface_id: None, x: 0.0, y: 0.0 });
         Ok(())
     }
 
-    pub fn get_keyboard(&mut self, seat_id: WaylandObjectId, new_id: WaylandObjectId) -> Result<()> {
+    pub fn get_keyboard(
+        &mut self,
+        seat_id: WaylandObjectId,
+        new_id: WaylandObjectId,
+    ) -> Result<()> {
         if !self.seats.contains_key(&seat_id) {
             return Err(WireError::InvalidObjectId(seat_id.0));
         }
-        self.keyboards.insert(new_id, KeyboardState {
-            seat_id,
-            focus_surface_id: None,
-        });
+        self.keyboards.insert(new_id, KeyboardState { seat_id, focus_surface_id: None });
         Ok(())
     }
 }

@@ -31,11 +31,15 @@ pub enum WireError {
     ProtocolError(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Connection closed")]
+    ConnectionClosed,
 }
 
 pub type Result<T> = std::result::Result<T, WireError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub struct WaylandObjectId(pub u32);
 
 impl WaylandObjectId {

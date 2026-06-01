@@ -58,9 +58,16 @@ fn test_libwayland_client_full_sequence() {
     assert!(!server.core.shm.pools.is_empty());
 
     // 3. Commit happened (commit_id should be > 0)
-    // HeadlessWireCore doesn't track commit_count directly on surface instance yet, 
+    // HeadlessWireCore doesn't track commit_count directly on surface instance yet,
     // but current buffer_id is updated.
     assert!(surf.current.buffer_id.is_some());
     assert_eq!(surf.current.buffer_id.unwrap().0, 7); // buffer id 7 in probe
-}
 
+    // 4. XDG shell metadata
+    let xdg_surf_id = wayland_wire::WaylandObjectId(8);
+    let xdg_surf =
+        server.core.xdg_shell.surfaces.get(&xdg_surf_id).expect("xdg_surface should exist");
+    assert_eq!(xdg_surf.title.as_deref(), Some("Harness Probe"));
+    assert_eq!(xdg_surf.app_id.as_deref(), Some("tuff.xwin.probe"));
+    assert!(xdg_surf.acked_serial > 0);
+}

@@ -10,19 +10,15 @@ impl WireOwnedFd {
     }
 }
 
-pub fn send_with_fds(
-    stream: &UnixStream,
-    data: &[u8],
-    fds: &[RawFd],
-) -> std::io::Result<usize> {
-    use libc::{c_void, iovec, msghdr, sendmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_SPACE, SOL_SOCKET, SCM_RIGHTS};
+pub fn send_with_fds(stream: &UnixStream, data: &[u8], fds: &[RawFd]) -> std::io::Result<usize> {
+    use libc::{
+        c_void, iovec, msghdr, sendmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_SPACE, SCM_RIGHTS,
+        SOL_SOCKET,
+    };
     use std::ptr;
 
     let mut msg: msghdr = unsafe { std::mem::zeroed() };
-    let mut io = iovec {
-        iov_base: data.as_ptr() as *mut c_void,
-        iov_len: data.len(),
-    };
+    let mut io = iovec { iov_base: data.as_ptr() as *mut c_void, iov_len: data.len() };
 
     msg.msg_iov = &mut io;
     msg.msg_iovlen = 1;
@@ -30,7 +26,8 @@ pub fn send_with_fds(
     let mut control_buf = [0u8; 128]; // Enough for a few FDs
     if !fds.is_empty() {
         msg.msg_control = control_buf.as_mut_ptr() as *mut c_void;
-        msg.msg_controllen = unsafe { CMSG_SPACE((fds.len() * std::mem::size_of::<RawFd>()) as u32) } as _;
+        msg.msg_controllen =
+            unsafe { CMSG_SPACE((fds.len() * std::mem::size_of::<RawFd>()) as u32) } as _;
 
         let cmsg = unsafe { CMSG_FIRSTHDR(&msg) };
         if !cmsg.is_null() {
@@ -60,14 +57,14 @@ pub fn recv_with_fds(
     stream: &UnixStream,
     buf: &mut [u8],
 ) -> std::io::Result<(usize, Vec<WireOwnedFd>)> {
-    use libc::{c_void, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR, SOL_SOCKET, SCM_RIGHTS};
+    use libc::{
+        c_void, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR,
+        SCM_RIGHTS, SOL_SOCKET,
+    };
     use std::mem;
 
     let mut msg: msghdr = unsafe { mem::zeroed() };
-    let mut io = iovec {
-        iov_base: buf.as_mut_ptr() as *mut c_void,
-        iov_len: buf.len(),
-    };
+    let mut io = iovec { iov_base: buf.as_mut_ptr() as *mut c_void, iov_len: buf.len() };
 
     msg.msg_iov = &mut io;
     msg.msg_iovlen = 1;
@@ -88,7 +85,7 @@ pub fn recv_with_fds(
             let data_ptr = unsafe { CMSG_DATA(cmsg) };
             let len = unsafe { (*cmsg).cmsg_len } as usize - unsafe { CMSG_LEN(0) } as usize;
             let count = len / mem::size_of::<RawFd>();
-            
+
             unsafe {
                 let fds_ptr = data_ptr as *const RawFd;
                 for i in 0..count {
@@ -112,13 +109,13 @@ mod tests {
     #[test]
     fn test_scm_rights_send_recv() {
         let (s1, s2) = UnixStream::pair().unwrap();
-        
+
         let mut temp = tempfile().unwrap();
         temp.write_all(b"hello fd").unwrap();
         temp.flush().unwrap();
-        
+
         let fd = temp.as_raw_fd();
-        
+
         let send_handle = std::thread::spawn(move || {
             send_with_fds(&s1, b"header", &[fd]).expect("send failed");
         });
@@ -127,7 +124,7 @@ mod tests {
         let (n, mut received) = recv_with_fds(&s2, &mut buf).expect("recv failed");
         assert_eq!(&buf[..n], b"header");
         assert_eq!(received.len(), 1);
-        
+
         let mut received_file = std::fs::File::from(received.remove(0).0);
         let mut content = String::new();
         received_file.seek(std::io::SeekFrom::Start(0)).unwrap();

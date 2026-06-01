@@ -1,4 +1,4 @@
-use crate::{WaylandObjectId, Result, WireError};
+use crate::{Result, WaylandObjectId, WireError};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default)]
@@ -17,10 +17,7 @@ pub struct XdgShellManager {
 
 impl XdgShellManager {
     pub fn new() -> Self {
-        Self {
-            surfaces: HashMap::new(),
-            next_serial: 1,
-        }
+        Self { surfaces: HashMap::new(), next_serial: 1 }
     }
 
     pub fn create_xdg_surface(&mut self, id: WaylandObjectId, wl_surface_id: WaylandObjectId) {
@@ -30,13 +27,7 @@ impl XdgShellManager {
 
 impl XdgSurfaceState {
     pub fn new(wl_surface_id: WaylandObjectId) -> Self {
-        Self {
-            wl_surface_id,
-            configure_serial: 0,
-            acked_serial: 0,
-            title: None,
-            app_id: None,
-        }
+        Self { wl_surface_id, configure_serial: 0, acked_serial: 0, title: None, app_id: None }
     }
 }
 
@@ -49,11 +40,14 @@ impl XdgShellManager {
 
     pub fn ack_configure(&mut self, id: WaylandObjectId, serial: u32) -> Result<()> {
         let surface = self.surfaces.get_mut(&id).ok_or(WireError::InvalidObjectId(id.0))?;
-        if serial > surface.configure_serial && surface.configure_serial != 0 {
-             // Basic validation: can't ack serial we haven't sent (though wrapping makes this tricky)
-             // For parity P6 we just record it.
+        if surface.configure_serial == 0 {
+             return Err(WireError::ProtocolError("ack_configure before any configure sent".into()));
+        }
+        if serial > surface.configure_serial {
+             return Err(WireError::ProtocolError(format!("ack_configure with invalid serial: {} (last sent: {})", serial, surface.configure_serial)));
         }
         surface.acked_serial = serial;
         Ok(())
     }
+
 }

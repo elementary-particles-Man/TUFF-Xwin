@@ -219,7 +219,7 @@ mod tests {
         let xml = include_str!("../../../protocols/stable/xdg-shell/xdg-shell.xml");
         let spec = ProtocolSpec::parse(xml).expect("parse failed");
         assert_eq!(spec.name, "xdg_shell");
-        
+
         let wm_base = spec.interfaces.get("xdg_wm_base").expect("xdg_wm_base exists");
         assert_eq!(wm_base.version, 6);
         assert!(wm_base.requests.iter().any(|r| r.name == "get_xdg_surface"));

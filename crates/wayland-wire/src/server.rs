@@ -57,8 +57,8 @@ impl WireServer {
                     Ok(msg) => {
                         let size = msg.header.size as usize;
                         consumed += size;
-                        
-                        // We need to pass the FDs to dispatch. 
+
+                        // We need to pass the FDs to dispatch.
                         // But which FDs belong to which message?
                         // In Wayland, FDs are conceptually part of the message they are sent with.
                         // HeadlessWireCore::dispatch should probably take the whole queue and pop from it.
@@ -66,7 +66,7 @@ impl WireServer {
                         // Actually, I'll pass the whole queue and let the dispatcher pop.
                         // But HeadlessWireCore::dispatch currently takes Option<usize>.
                         // I'll change it to take &mut Vec<WireOwnedFd>.
-                        
+
                         let result = self.core.dispatch_with_fds(msg, &mut self.received_fds)?;
                         for ev in result.events {
                             let encoded = crate::codec::encode_message(&ev)?;

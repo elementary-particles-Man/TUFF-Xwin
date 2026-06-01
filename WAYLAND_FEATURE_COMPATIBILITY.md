@@ -31,6 +31,7 @@ This table compares standard Wayland features (as seen in major compositors like
    - P5: Libwayland client compatibility harness added. Handshake and surface creation verified with real C client.
    - P5b: SCM_RIGHTS (FD passing) and SHM pool/buffer lifecycle verified with real C client over isolated socket.
    - P6: XDG Shell and Seat/Input state machines verified over isolated wire (handshake -> configure -> ack -> input events).
+   - P7: Full XDG Shell lifecycle verified with real C libwayland-client using repository-local C stubs (avoiding external wayland-scanner).
 
 ## Implementation Progress (2026-05-27)
 

@@ -35,23 +35,12 @@ impl ShmManager {
     pub fn create_pool_from_fake(&mut self, id: WaylandObjectId, size: u32) {
         self.pools.insert(
             id,
-            ShmPool {
-                id,
-                storage: ShmPoolStorage::FakeMemory(vec![0u8; size as usize]),
-                size,
-            },
+            ShmPool { id, storage: ShmPoolStorage::FakeMemory(vec![0u8; size as usize]), size },
         );
     }
 
     pub fn create_pool_from_fd(&mut self, id: WaylandObjectId, fd: crate::WireOwnedFd, size: u32) {
-        self.pools.insert(
-            id,
-            ShmPool {
-                id,
-                storage: ShmPoolStorage::ReceivedFd(fd),
-                size,
-            },
-        );
+        self.pools.insert(id, ShmPool { id, storage: ShmPoolStorage::ReceivedFd(fd), size });
     }
 
     pub fn create_buffer(
@@ -80,10 +69,7 @@ impl ShmManager {
             return Err(WireError::InvalidSize(total_size));
         }
 
-        self.buffers.insert(
-            id,
-            ShmBuffer { id, pool_id, offset, width, height, stride, format },
-        );
+        self.buffers.insert(id, ShmBuffer { id, pool_id, offset, width, height, stride, format });
 
         Ok(())
     }
