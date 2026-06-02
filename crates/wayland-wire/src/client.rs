@@ -714,4 +714,127 @@ impl WireFakeClient {
         let msg = WaylandMessage::new(WaylandObjectId(surface_id), WaylandOpcode(0), Vec::new());
         self.send_message(&msg)
     }
+    pub fn bind_zxdg_output_manager(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("zxdg_output_manager_v1", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn bind_zwlr_output_manager(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("zwlr_output_manager_v1", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn bind_zwlr_screencopy_manager(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("zwlr_screencopy_manager_v1", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn bind_ext_image_copy_capture_manager(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("ext_image_copy_capture_manager_v1", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn zxdg_output_manager_get_xdg_output(&mut self, manager_id: u32, new_id: u32, output_id: u32) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&output_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+
+    pub fn zwlr_output_manager_create_configuration(&mut self, manager_id: u32, new_id: u32, serial: u32) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&serial.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn zwlr_output_configuration_test(&mut self, config_id: u32) -> Result<()> {
+        let msg = WaylandMessage::new(WaylandObjectId(config_id), WaylandOpcode(3), Vec::new());
+        self.send_message(&msg)
+    }
+
+    pub fn zwlr_screencopy_capture_output(&mut self, manager_id: u32, new_id: u32, overlay: u32, output_id: u32) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&overlay.to_le_bytes());
+        p.extend_from_slice(&output_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn zwlr_screencopy_frame_copy(&mut self, frame_id: u32, buffer_id: u32) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&buffer_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(frame_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn ext_image_copy_capture_create_session(&mut self, manager_id: u32, new_id: u32, source_type: u32, source_id: u32) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&source_type.to_le_bytes());
+        p.extend_from_slice(&source_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+
+    pub fn ext_image_copy_capture_create_frame(&mut self, session_id: u32, new_id: u32) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(session_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+
+    pub fn ext_image_copy_capture_frame_copy(&mut self, frame_id: u32, buffer_id: u32) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&buffer_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(frame_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
 }

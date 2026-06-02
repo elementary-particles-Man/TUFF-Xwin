@@ -757,3 +757,113 @@ fn test_presentation_feedback_discard_on_surface_destroy() {
     // Since surface is destroyed, presentation feedback should have been discarded/removed
     assert!(!server.core.presentation.feedbacks.contains_key(&wayland_wire::WaylandObjectId(15)));
 }
+#[test]
+fn test_isolated_socket_output_screencopy_e2e() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-p12.sock");
+    let server_path = socket_path.clone();
+
+    let server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).expect("failed to create server");
+        // OutputManager is created by default. We need to create at least one FakeOutput
+        server.core.output.create_output(wayland_wire::WaylandObjectId(99), "fake-DP-1");
+        
+        server.run_once().expect("server run failed");
+        server
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = WireFakeClient::connect(&socket_path).expect("failed to connect");
+
+    client.get_registry(2).unwrap();
+    thread::sleep(std::time::Duration::from_millis(50));
+    while !client.receive_events().unwrap().is_empty() {}
+
+    // 1. Bind P12 objects
+    client.bind_zxdg_output_manager(2, 13, 3, 3).unwrap();
+    client.bind_zwlr_output_manager(2, 14, 4, 4).unwrap();
+    client.bind_zwlr_screencopy_manager(2, 15, 3, 5).unwrap();
+    client.bind_ext_image_copy_capture_manager(2, 16, 1, 6).unwrap();
+
+    // The server doesn't announce the actual wl_output from registry in this simple fake test
+    // We assume the client knows an output ID, say 99, which we created on the server side.
+    
+    // xdg_output
+    client.zxdg_output_manager_get_xdg_output(3, 7, 99).unwrap();
+    
+    // wlr-output-management
+    // creating configuration
+    client.zwlr_output_manager_create_configuration(4, 8, 1234).unwrap();
+    // testing it
+    client.zwlr_output_configuration_test(8).unwrap();
+    
+    // screencopy
+    client.zwlr_screencopy_capture_output(5, 9, 0, 99).unwrap();
+    let buf_fd = tempfile::tempfile().unwrap();
+    // Simulate buffer creation (assume id 10)
+    // Actually we just pass buffer object ID 10 to copy
+    client.zwlr_screencopy_frame_copy(9, 10).unwrap();
+
+    // image copy capture
+    client.ext_image_copy_capture_create_session(6, 11, 0, 99).unwrap();
+    client.ext_image_copy_capture_create_frame(11, 12).unwrap();
+    client.ext_image_copy_capture_frame_copy(12, 10).unwrap();
+
+    thread::sleep(std::time::Duration::from_millis(50));
+    let events = client.receive_events().unwrap();
+    
+    // Check if we received xdg_output done (opcode 2 for zxdg_output_v1)
+    assert!(events.iter().any(|e| e.header.object_id.0 == 7 && e.header.opcode.0 == 2));
+    
+    // Check configuration succeeded
+    assert!(events.iter().any(|e| e.header.object_id.0 == 8 && e.header.opcode.0 == 0));
+
+    // Check screencopy ready (opcode 2)
+    assert!(events.iter().any(|e| e.header.object_id.0 == 9 && e.header.opcode.0 == 2));
+    
+    // Check image copy ready (opcode 1)
+    assert!(events.iter().any(|e| e.header.object_id.0 == 12 && e.header.opcode.0 == 1));
+
+    drop(client);
+    let server = server_handle.join().unwrap();
+    
+    // Verify states
+    assert!(server.core.xdg_output.outputs.contains_key(&wayland_wire::WaylandObjectId(7)));
+    assert!(server.core.output_management.configs.contains_key(&wayland_wire::WaylandObjectId(8)));
+    assert!(server.core.screencopy.frames.contains_key(&wayland_wire::WaylandObjectId(9)));
+    assert!(server.core.image_copy_capture.sessions.contains_key(&wayland_wire::WaylandObjectId(11)));
+}
+
+#[test]
+fn test_reject_invalid_p12_sequences() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-p12-reject.sock");
+    let server_path = socket_path.clone();
+
+    let server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).expect("failed to create server");
+        server.core.output.create_output(wayland_wire::WaylandObjectId(99), "fake-DP-1");
+        server.run_once().unwrap(); // Will fail on error
+        server
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = WireFakeClient::connect(&socket_path).expect("failed to connect");
+
+    client.get_registry(2).unwrap();
+    thread::sleep(std::time::Duration::from_millis(50));
+    while !client.receive_events().unwrap().is_empty() {}
+
+    client.bind_zxdg_output_manager(2, 13, 3, 3).unwrap();
+    
+    // Double get_xdg_output for the same output
+    client.zxdg_output_manager_get_xdg_output(3, 7, 99).unwrap();
+    client.zxdg_output_manager_get_xdg_output(3, 8, 99).unwrap();
+
+    thread::sleep(std::time::Duration::from_millis(50));
+    drop(client);
+    let res = server_handle.join();
+    assert!(res.is_err() || res.unwrap().core.xdg_output.outputs.len() == 1);
+}

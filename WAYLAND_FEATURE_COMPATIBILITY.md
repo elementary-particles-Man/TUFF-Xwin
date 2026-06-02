@@ -4,8 +4,8 @@ This table compares standard Wayland features (as seen in major compositors like
 
 | Feature Category | Standard Protocol / Feature | TUFF-Xwin Status | Implementation Detail |
 | :--- | :--- | :--- | :--- |
-| **Screenshot** | `wlr-screencopy-v1`, `ext-image-copy-capture` | **Complete (Boundary)** | `CaptureBackend` implemented. `FakeCaptureBackend` used for testing. Production logic isolated behind feature flags. |
-| **Screen Recording** | `wlr-screencopy-v1` + PipeWire | **Complete (Boundary)** | `RecordBackend` implemented. `FakeRecordBackend` used for testing. |
+| **Screenshot** | `wlr-screencopy-v1`, `ext-image-copy-capture` | **Complete (Wire)** | `CaptureBackend` implemented. `FakeCaptureBackend` used for testing. Production logic isolated behind feature flags. |
+| **Screen Recording** | `wlr-screencopy-v1` + PipeWire | **Complete (Wire)** | `RecordBackend` implemented. `FakeRecordBackend` used for testing. |
 | **Clipboard** | `wl_data_device` | **Complete (Wire)**  | `DataPayloadRegistry` implemented. Support for `WriteData` / `ReadData` and offer lifecycle. |
 | **Primary Selection** | `zwp_primary_selection_v1` | **Complete (State)** | Similar to clipboard. Tracks offers and owners across handoffs. |
 | **Drag and Drop** | `wl_data_device` | **Complete (Wire)**  | `DnDState` machine tracks enter/motion/drop/leave/cancel. |
@@ -15,7 +15,7 @@ This table compares standard Wayland features (as seen in major compositors like
 | **Pointer Constraints** | `wp_pointer_constraints_v1` | **Complete (State)** | `DisplayState` tracks locked/confined regions per output. |
 | **Relative Pointer** | `zwp_relative_pointer_v1` | **Complete (Event)** | `RelativePointerMotion` events and `InjectRelativePointerMotion` for testing. |
 | **Gamma Control** | `wlr-gamma-control-v1` | **Complete (Boundary)** | `DisplayBackend` handles gamma LUT validation. |
-| **Output Management** | `wlr-output-management-v1` | **Complete (Boundary)** | `DisplayBackend` abstracts output inventory and mode setting. |
+| **Output Management** | `wlr-output-management-v1`, `xdg-output` | **Complete (Wire)** | `DisplayBackend` abstracts output inventory and mode setting. |
 | **Presentation Time** | `wp_presentation` | **Complete (Wire)** | `PresentationClock` trait and feedback tracking via `FramePresented` events. |
 | **Foreign Toplevel** | `ext-foreign-toplevel-list-v1` | **Complete (State)** | `ForeignToplevelHandle` registry in `SurfaceRegistrySnapshot`. |
 | **Popups** | `xdg_popup` | **Complete (Wire)** | Wire state machine for transient surfaces and positioner logic. |
