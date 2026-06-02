@@ -6,9 +6,9 @@ This table compares standard Wayland features (as seen in major compositors like
 | :--- | :--- | :--- | :--- |
 | **Screenshot** | `wlr-screencopy-v1`, `ext-image-copy-capture` | **Complete (Boundary)** | `CaptureBackend` implemented. `FakeCaptureBackend` used for testing. Production logic isolated behind feature flags. |
 | **Screen Recording** | `wlr-screencopy-v1` + PipeWire | **Complete (Boundary)** | `RecordBackend` implemented. `FakeRecordBackend` used for testing. |
-| **Clipboard** | `wl_data_device` | **Complete (State)** | `DataPayloadRegistry` implemented. Support for `WriteData` / `ReadData` and offer lifecycle. |
+| **Clipboard** | `wl_data_device` | **Complete (Wire)**  | `DataPayloadRegistry` implemented. Support for `WriteData` / `ReadData` and offer lifecycle. |
 | **Primary Selection** | `zwp_primary_selection_v1` | **Complete (State)** | Similar to clipboard. Tracks offers and owners across handoffs. |
-| **Drag and Drop** | `wl_data_device` | **Complete (State)** | `DnDState` machine tracks enter/motion/drop/leave/cancel. |
+| **Drag and Drop** | `wl_data_device` | **Complete (Wire)**  | `DnDState` machine tracks enter/motion/drop/leave/cancel. |
 | **Layer Shell** | `wlr-layer-shell-v1` | **Complete (Logic)** | Role-based layout using real `OutputMode` geometry. Supports anchor, margins, and exclusive zone. |
 | **Idle Inhibition** | `idle-inhibit-v1` | **Complete (IPC)** | `InhibitIdle` / `ReleaseIdle` tracking in `sessiond`. |
 | **Input Method / IME** | `text-input-v3`, `input-method-v2` | **Complete (State)** | `ImeRuntimeState` tracks focus, preedit, commit, and cursor rect. `ImeBackend` boundary defined. |
@@ -18,6 +18,8 @@ This table compares standard Wayland features (as seen in major compositors like
 | **Output Management** | `wlr-output-management-v1` | **Complete (Boundary)** | `DisplayBackend` abstracts output inventory and mode setting. |
 | **Presentation Time** | `wp_presentation` | **Complete (Logic)** | `PresentationClock` trait and feedback tracking via `FramePresented` events. |
 | **Foreign Toplevel** | `ext-foreign-toplevel-list-v1` | **Complete (State)** | `ForeignToplevelHandle` registry in `SurfaceRegistrySnapshot`. |
+| **Popups** | `xdg_popup` | **Complete (Wire)** | Wire state machine for transient surfaces and positioner logic. |
+| **Subsurfaces** | `wl_subsurface` | **Complete (Wire)** | Wire-level parent-child surface hierarchy and sync commit support. |
 
 ## Current Parity Status
 

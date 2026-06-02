@@ -263,4 +263,225 @@
     <event name="frame"/>
     <event name="cancel"/>
   </interface>
+  <interface name="wl_data_offer" version="3">
+    <request name="accept">
+      <arg name="serial" type="uint"/>
+      <arg name="mime_type" type="string" allow-null="true"/>
+    </request>
+    <request name="receive">
+      <arg name="mime_type" type="string"/>
+      <arg name="fd" type="fd"/>
+    </request>
+    <request name="destroy" type="destructor"/>
+    <request name="finish" version="3"/>
+    <request name="set_actions" version="3">
+      <arg name="dnd_actions" type="uint"/>
+      <arg name="preferred_action" type="uint"/>
+    </request>
+    <event name="offer">
+      <arg name="mime_type" type="string"/>
+    </event>
+    <event name="source_actions" version="3">
+      <arg name="source_actions" type="uint"/>
+    </event>
+    <event name="action" version="3">
+      <arg name="dnd_action" type="uint"/>
+    </event>
+  </interface>
+
+  <interface name="wl_data_source" version="3">
+    <request name="offer">
+      <arg name="mime_type" type="string"/>
+    </request>
+    <request name="destroy" type="destructor"/>
+    <request name="set_actions" version="3">
+      <arg name="dnd_actions" type="uint"/>
+    </request>
+    <event name="target">
+      <arg name="mime_type" type="string" allow-null="true"/>
+    </event>
+    <event name="send">
+      <arg name="mime_type" type="string"/>
+      <arg name="fd" type="fd"/>
+    </event>
+    <event name="cancelled"/>
+    <event name="dnd_drop_performed" version="3"/>
+    <event name="dnd_finished" version="3"/>
+    <event name="action" version="3">
+      <arg name="dnd_action" type="uint"/>
+    </event>
+  </interface>
+
+  <interface name="wl_data_device" version="3">
+    <request name="start_drag">
+      <arg name="source" type="object" interface="wl_data_source" allow-null="true"/>
+      <arg name="origin" type="object" interface="wl_surface"/>
+      <arg name="icon" type="object" interface="wl_surface" allow-null="true"/>
+      <arg name="serial" type="uint"/>
+    </request>
+    <request name="set_selection">
+      <arg name="source" type="object" interface="wl_data_source" allow-null="true"/>
+      <arg name="serial" type="uint"/>
+    </request>
+    <request name="release" type="destructor" version="2"/>
+    <event name="data_offer">
+      <arg name="id" type="new_id" interface="wl_data_offer"/>
+    </event>
+    <event name="enter">
+      <arg name="serial" type="uint"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="x" type="fixed"/>
+      <arg name="y" type="fixed"/>
+      <arg name="id" type="object" interface="wl_data_offer" allow-null="true"/>
+    </event>
+    <event name="leave"/>
+    <event name="motion">
+      <arg name="time" type="uint"/>
+      <arg name="x" type="fixed"/>
+      <arg name="y" type="fixed"/>
+    </event>
+    <event name="drop"/>
+    <event name="selection">
+      <arg name="id" type="object" interface="wl_data_offer" allow-null="true"/>
+    </event>
+  </interface>
+
+  <interface name="wl_data_device_manager" version="3">
+    <request name="create_data_source">
+      <arg name="id" type="new_id" interface="wl_data_source"/>
+    </request>
+    <request name="get_data_device">
+      <arg name="id" type="new_id" interface="wl_data_device"/>
+      <arg name="seat" type="object" interface="wl_seat"/>
+    </request>
+    <enum name="dnd_action" bitfield="true">
+      <entry name="none" value="0"/>
+      <entry name="copy" value="1"/>
+      <entry name="move" value="2"/>
+      <entry name="ask" value="4"/>
+    </enum>
+  </interface>
+  <interface name="wl_data_offer" version="3">
+    <request name="accept">
+      <arg name="serial" type="uint"/>
+      <arg name="mime_type" type="string" allow-null="true"/>
+    </request>
+    <request name="receive">
+      <arg name="mime_type" type="string"/>
+      <arg name="fd" type="fd"/>
+    </request>
+    <request name="destroy" type="destructor"/>
+    <request name="finish" version="3"/>
+    <request name="set_actions" version="3">
+      <arg name="dnd_actions" type="uint"/>
+      <arg name="preferred_action" type="uint"/>
+    </request>
+    <event name="offer">
+      <arg name="mime_type" type="string"/>
+    </event>
+    <event name="source_actions" version="3">
+      <arg name="source_actions" type="uint"/>
+    </event>
+    <event name="action" version="3">
+      <arg name="dnd_action" type="uint"/>
+    </event>
+  </interface>
+
+  <interface name="wl_data_source" version="3">
+    <request name="offer">
+      <arg name="mime_type" type="string"/>
+    </request>
+    <request name="destroy" type="destructor"/>
+    <request name="set_actions" version="3">
+      <arg name="dnd_actions" type="uint"/>
+    </request>
+    <event name="target">
+      <arg name="mime_type" type="string" allow-null="true"/>
+    </event>
+    <event name="send">
+      <arg name="mime_type" type="string"/>
+      <arg name="fd" type="fd"/>
+    </event>
+    <event name="cancelled"/>
+    <event name="dnd_drop_performed" version="3"/>
+    <event name="dnd_finished" version="3"/>
+    <event name="action" version="3">
+      <arg name="dnd_action" type="uint"/>
+    </event>
+  </interface>
+
+  <interface name="wl_data_device" version="3">
+    <request name="start_drag">
+      <arg name="source" type="object" interface="wl_data_source" allow-null="true"/>
+      <arg name="origin" type="object" interface="wl_surface"/>
+      <arg name="icon" type="object" interface="wl_surface" allow-null="true"/>
+      <arg name="serial" type="uint"/>
+    </request>
+    <request name="set_selection">
+      <arg name="source" type="object" interface="wl_data_source" allow-null="true"/>
+      <arg name="serial" type="uint"/>
+    </request>
+    <request name="release" type="destructor" version="2"/>
+    <event name="data_offer">
+      <arg name="id" type="new_id" interface="wl_data_offer"/>
+    </event>
+    <event name="enter">
+      <arg name="serial" type="uint"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="x" type="fixed"/>
+      <arg name="y" type="fixed"/>
+      <arg name="id" type="object" interface="wl_data_offer" allow-null="true"/>
+    </event>
+    <event name="leave"/>
+    <event name="motion">
+      <arg name="time" type="uint"/>
+      <arg name="x" type="fixed"/>
+      <arg name="y" type="fixed"/>
+    </event>
+    <event name="drop"/>
+    <event name="selection">
+      <arg name="id" type="object" interface="wl_data_offer" allow-null="true"/>
+    </event>
+  </interface>
+
+  <interface name="wl_data_device_manager" version="3">
+    <request name="create_data_source">
+      <arg name="id" type="new_id" interface="wl_data_source"/>
+    </request>
+    <request name="get_data_device">
+      <arg name="id" type="new_id" interface="wl_data_device"/>
+      <arg name="seat" type="object" interface="wl_seat"/>
+    </request>
+    <enum name="dnd_action" bitfield="true">
+      <entry name="none" value="0"/>
+      <entry name="copy" value="1"/>
+      <entry name="move" value="2"/>
+      <entry name="ask" value="4"/>
+    </enum>
+  </interface>
+
+  <interface name="wl_subcompositor" version="1">
+    <request name="destroy" type="destructor"/>
+    <request name="get_subsurface">
+      <arg name="id" type="new_id" interface="wl_subsurface"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="parent" type="object" interface="wl_surface"/>
+    </request>
+  </interface>
+
+  <interface name="wl_subsurface" version="1">
+    <request name="destroy" type="destructor"/>
+    <request name="set_position">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+    <request name="place_above">
+      <arg name="sibling" type="object" interface="wl_surface"/>
+    </request>
+    <request name="place_below">
+      <arg name="sibling" type="object" interface="wl_surface"/>
+    </request>
+    <request name="set_sync"/>
+    <request name="set_desync"/>
+  </interface>
 </protocol>

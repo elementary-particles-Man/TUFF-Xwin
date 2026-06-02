@@ -63,7 +63,6 @@ impl WireObjectRegistry {
     pub fn next_server_id(&mut self) -> WaylandObjectId {
         let id = WaylandObjectId(self.next_server_id);
         self.next_server_id += 1;
-        self.used_ids.insert(id);
         id
     }
 }

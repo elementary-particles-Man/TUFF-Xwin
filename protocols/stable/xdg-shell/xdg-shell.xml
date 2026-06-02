@@ -29,6 +29,19 @@
       <arg name="width" type="int"/>
       <arg name="height" type="int"/>
     </request>
+    <request name="set_anchor">
+      <arg name="anchor" type="uint"/>
+    </request>
+    <request name="set_gravity">
+      <arg name="gravity" type="uint"/>
+    </request>
+    <request name="set_constraint_adjustment">
+      <arg name="constraint_adjustment" type="uint"/>
+    </request>
+    <request name="set_offset">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
   </interface>
 
   <interface name="xdg_surface" version="6">

@@ -62,3 +62,17 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 
 2. Implement protocol XML parsing and code generation to avoid manual payload manipulation.
 3. Add a headless compositor test harness that can run simple Wayland clients.
+
+## Phase 8: Data Device (Clipboard & DnD)
+- **wl_data_device_manager**: Implemented factory for data sources and data devices.
+- **wl_data_source / wl_data_offer**: Lifecycle management for clipboard and Drag and Drop payloads.
+- **Selection Flow**: Implemented full wire-level handshake for clipboard selection (set_selection -> data_offer/selection events -> receive -> send).
+- **DnD State Machine**: Implemented `start_drag` with automatic pointer focus integration (simulated).
+- **FD Transfer**: Support for transferring payload FDs via isolated `SCM_RIGHTS` ancillary messages.
+- **Strict Validation**: Added reject-tests for invalid serials, destroyed sources/offers, and missing FDs.
+
+## Phase 9: Popup and Subsurface
+- **xdg_popup / xdg_positioner**: Implemented wire state machine for popups, including positioner configuration and layout negotiation.
+- **wl_subcompositor / wl_subsurface**: Implemented parent-child surface relationships at the wire level, supporting position offsets and sync/desync commit modes.
+- **Validation**: Added E2E tests for popup lifecycle and subsurface hierarchical state management in isolated sockets.
+- **Strict Protocol Compliance**: Enforced parent surface existence and positioner validity for popup creation.
