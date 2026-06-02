@@ -513,3 +513,98 @@ fn test_isolated_socket_subsurface_e2e() {
     assert_eq!(sub.parent_id.0, 5);
     assert_eq!(sub.surface_id.0, 6);
 }
+
+#[test]
+fn test_isolated_socket_text_input_ime_e2e() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-ime.sock");
+    let server_path = socket_path.clone();
+
+    let server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).expect("failed to create server");
+        server.run_once().expect("server run failed");
+        server
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = WireFakeClient::connect(&socket_path).expect("failed to connect");
+
+    client.get_registry(2).unwrap();
+    thread::sleep(std::time::Duration::from_millis(50));
+    while !client.receive_events().unwrap().is_empty() {}
+
+    // 1. Bind objects
+    client.bind_wl_seat(2, 3, 7, 5).unwrap();
+    client.bind_text_input_manager_v3(2, 7, 1, 6).unwrap();
+    client.bind_input_method_manager_v2(2, 8, 1, 7).unwrap();
+
+    // 2. Setup text input and input method
+    client.text_input_manager_get_text_input(6, 8, 5).unwrap();
+    client.input_method_manager_get_input_method(7, 5, 9).unwrap();
+
+    // 3. Enable text input and set surrounding text
+    client.text_input_enable(8).unwrap();
+    client.text_input_set_surrounding_text(8, "hello", 5, 5).unwrap();
+    client.text_input_commit(8).unwrap();
+
+    // 4. Input Method should receive activate and surrounding_text
+    thread::sleep(std::time::Duration::from_millis(50));
+    let im_events = client.receive_events().unwrap();
+    // Expected: activate(6), preedit(10), done(13) from our simulated commit
+    assert!(im_events.iter().any(|e| e.header.object_id.0 == 9 && e.header.opcode.0 == 6));
+    assert!(im_events.iter().any(|e| e.header.object_id.0 == 9 && e.header.opcode.0 == 10));
+    assert!(im_events.iter().any(|e| e.header.object_id.0 == 9 && e.header.opcode.0 == 13));
+
+    // 5. IM sends commit string back to TI
+    client.input_method_commit_string(9, "確定").unwrap();
+
+    thread::sleep(std::time::Duration::from_millis(50));
+    let ti_events = client.receive_events().unwrap();
+    // Expected: commit_string(3) on object 8
+    assert!(ti_events.iter().any(|e| e.header.object_id.0 == 8 && e.header.opcode.0 == 3));
+
+    drop(client);
+    let server = server_handle.join().unwrap();
+    assert!(server.core.text_input.inputs.contains_key(&wayland_wire::WaylandObjectId(8)));
+    assert!(server.core.input_method.methods.contains_key(&wayland_wire::WaylandObjectId(9)));
+}
+
+#[test]
+fn test_reject_invalid_text_input_sequences() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-ime-reject.sock");
+    let server_path = socket_path.clone();
+
+    let server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).expect("failed to create server");
+        server.run_once().expect("server run failed");
+        server
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = WireFakeClient::connect(&socket_path).expect("failed to connect");
+
+    client.get_registry(2).unwrap();
+    thread::sleep(std::time::Duration::from_millis(50));
+    while !client.receive_events().unwrap().is_empty() {}
+
+    // 1. Bind objects
+    client.bind_wl_seat(2, 3, 7, 5).unwrap();
+    client.bind_input_method_manager_v2(2, 8, 1, 7).unwrap();
+
+    // 2. Get IM once
+    client.input_method_manager_get_input_method(7, 5, 9).unwrap();
+
+    // 3. Try to get IM again for the same seat (should fail)
+    client.input_method_manager_get_input_method(7, 5, 10).unwrap();
+
+    thread::sleep(std::time::Duration::from_millis(50));
+    // The server should have panicked or returned an error.
+    // In our run_once, it returns an error if dispatch fails.
+
+    drop(client);
+    let server_res = server_handle.join();
+    assert!(server_res.is_err() || server_res.unwrap().core.input_method.methods.len() == 1);
+}

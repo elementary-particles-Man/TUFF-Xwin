@@ -482,3 +482,100 @@ impl WireFakeClient {
         self.send_message(&msg)
     }
 }
+
+impl WireFakeClient {
+    pub fn bind_text_input_manager_v3(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("zwp_text_input_manager_v3", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn bind_input_method_manager_v2(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("zwp_input_method_manager_v2", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn text_input_manager_get_text_input(
+        &mut self,
+        manager_id: u32,
+        new_id: u32,
+        seat_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&seat_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+
+    pub fn text_input_enable(&mut self, ti_id: u32) -> Result<()> {
+        let msg = WaylandMessage::new(WaylandObjectId(ti_id), WaylandOpcode(1), Vec::new());
+        self.send_message(&msg)
+    }
+
+    pub fn text_input_disable(&mut self, ti_id: u32) -> Result<()> {
+        let msg = WaylandMessage::new(WaylandObjectId(ti_id), WaylandOpcode(2), Vec::new());
+        self.send_message(&msg)
+    }
+
+    pub fn text_input_set_surrounding_text(
+        &mut self,
+        ti_id: u32,
+        text: &str,
+        cursor: i32,
+        anchor: i32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        crate::args::encode_string(text, &mut p);
+        p.extend_from_slice(&cursor.to_le_bytes());
+        p.extend_from_slice(&anchor.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(ti_id), WaylandOpcode(3), p);
+        self.send_message(&msg)
+    }
+
+    pub fn text_input_commit(&mut self, ti_id: u32) -> Result<()> {
+        let msg = WaylandMessage::new(WaylandObjectId(ti_id), WaylandOpcode(7), Vec::new());
+        self.send_message(&msg)
+    }
+
+    pub fn input_method_manager_get_input_method(
+        &mut self,
+        manager_id: u32,
+        seat_id: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&seat_id.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+
+    pub fn input_method_commit_string(&mut self, im_id: u32, text: &str) -> Result<()> {
+        let mut p = Vec::new();
+        crate::args::encode_string(text, &mut p);
+        let msg = WaylandMessage::new(WaylandObjectId(im_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+}

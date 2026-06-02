@@ -5,7 +5,9 @@ pub mod core;
 pub mod data_device;
 pub mod fd;
 pub mod generated;
+pub mod ime_backend;
 pub mod input;
+pub mod input_method;
 pub mod protocol;
 pub mod registry;
 pub mod server;
@@ -13,6 +15,7 @@ pub mod shm;
 pub mod signature;
 pub mod subsurface;
 pub mod surface;
+pub mod text_input;
 pub mod xdg_shell;
 
 use serde::{Deserialize, Serialize};

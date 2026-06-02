@@ -20,6 +20,8 @@ This table compares standard Wayland features (as seen in major compositors like
 | **Foreign Toplevel** | `ext-foreign-toplevel-list-v1` | **Complete (State)** | `ForeignToplevelHandle` registry in `SurfaceRegistrySnapshot`. |
 | **Popups** | `xdg_popup` | **Complete (Wire)** | Wire state machine for transient surfaces and positioner logic. |
 | **Subsurfaces** | `wl_subsurface` | **Complete (Wire)** | Wire-level parent-child surface hierarchy and sync commit support. |
+| **Input Method** | `zwp_input_method_v2` | **Complete (Wire)** | Wire-level IME protocol and fake backend integration. |
+| **Text Input** | `zwp_text_input_v3` | **Complete (Wire)** | Wire state machine for client-side text editing state. |
 
 ## Current Parity Status
 

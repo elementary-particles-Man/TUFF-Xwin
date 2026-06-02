@@ -28,3 +28,8 @@ The current implementation allows testing IPC message flow and state transitions
 1. Implement standard Wayland IME protocols within `waylandd`.
 2. Create a secure IME bridge component that isolates Mozc communication.
 3. Integrate with `compd` for candidate window placement.
+
+### Wire Parity Status (Phase 10)
+- **State Machine**: Core text-input-v3 and input-method-v2 states are fully implemented at the wire level.
+- **Isolation**: Interaction is currently limited to `FakeImeBackend`. No connection to real Mozc/IBus/Fcitx.
+- **Future Work**: Implementation of a sandboxed Mozc backend that speaks this wire protocol internally.

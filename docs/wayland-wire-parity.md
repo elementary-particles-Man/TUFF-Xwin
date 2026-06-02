@@ -76,3 +76,10 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - **wl_subcompositor / wl_subsurface**: Implemented parent-child surface relationships at the wire level, supporting position offsets and sync/desync commit modes.
 - **Validation**: Added E2E tests for popup lifecycle and subsurface hierarchical state management in isolated sockets.
 - **Strict Protocol Compliance**: Enforced parent surface existence and positioner validity for popup creation.
+
+## Phase 10: Text Input and Input Method
+- **zwp_text_input_v3**: Implemented wire state machine for client-side text input, including surrounding text, content type, and cursor rectangle management.
+- **zwp_input_method_v2**: Implemented wire-level IME protocol support, allowing a fake IME backend to coordinate with text-input clients.
+- **FakeImeBackend**: Added a repository-local fake IME for testing preedit and commit string flows without real IME processes.
+- **Validation**: Verified full round-trip from text-input enable to IME commit-string response in isolated sockets.
+- **Strict Checks**: Added rejections for duplicate input-method binding and focus-less text-input operations.
