@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="ext_image_copy_capture_v1">
+  <interface name="ext_image_copy_capture_manager_v1" version="1">
+    <request name="destroy" type="destructor"/>
+    <request name="create_session">
+      <arg name="session" type="new_id" interface="ext_image_copy_capture_session_v1"/>
+      <arg name="source" type="uint"/>
+      <arg name="source_id" type="uint"/>
+    </request>
+  </interface>
+
+  <interface name="ext_image_copy_capture_session_v1" version="1">
+    <request name="destroy" type="destructor"/>
+    <request name="create_frame">
+      <arg name="frame" type="new_id" interface="ext_image_copy_capture_frame_v1"/>
+    </request>
+  </interface>
+
+  <interface name="ext_image_copy_capture_frame_v1" version="1">
+    <event name="buffer">
+      <arg name="format" type="uint"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+      <arg name="stride" type="uint"/>
+    </event>
+    <event name="ready"/>
+    <event name="failed"/>
+    <event name="damage">
+      <arg name="x" type="uint"/>
+      <arg name="y" type="uint"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </event>
+    <request name="copy">
+      <arg name="buffer" type="object" interface="wl_buffer"/>
+    </request>
+    <request name="destroy" type="destructor"/>
+  </interface>
+</protocol>

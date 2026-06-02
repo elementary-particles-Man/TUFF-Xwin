@@ -79,3 +79,54 @@ mod tests {
         assert!(spec.interfaces.contains_key("zxdg_toplevel_decoration_v1"));
     }
 }
+const XDG_OUTPUT_XML: &str = include_str!("../../../protocols/stable/xdg-output/xdg-output.xml");
+const WLR_OUTPUT_MANAGEMENT_XML: &str = include_str!(
+    "../../../protocols/unstable/wlr-output-management/wlr-output-management-unstable-v1.xml"
+);
+const WLR_SCREENCOPY_XML: &str =
+    include_str!("../../../protocols/unstable/wlr-screencopy/wlr-screencopy-unstable-v1.xml");
+const EXT_IMAGE_COPY_CAPTURE_XML: &str =
+    include_str!("../../../protocols/staging/ext-image-copy-capture/ext-image-copy-capture-v1.xml");
+
+static P12_SPEC: OnceLock<ProtocolSpec> = OnceLock::new();
+
+pub fn p12_protocol_spec() -> &'static ProtocolSpec {
+    P12_SPEC.get_or_init(|| {
+        let mut core = core_protocol_spec().clone();
+        let xdg_out = ProtocolSpec::parse(XDG_OUTPUT_XML).expect("failed to parse xdg-output");
+        let wlr_out = ProtocolSpec::parse(WLR_OUTPUT_MANAGEMENT_XML)
+            .expect("failed to parse wlr-output-management");
+        let wlr_screen =
+            ProtocolSpec::parse(WLR_SCREENCOPY_XML).expect("failed to parse wlr-screencopy");
+        let ext_image = ProtocolSpec::parse(EXT_IMAGE_COPY_CAPTURE_XML)
+            .expect("failed to parse ext-image-copy-capture");
+
+        for (name, iface) in xdg_out.interfaces {
+            core.interfaces.insert(name, iface);
+        }
+        for (name, iface) in wlr_out.interfaces {
+            core.interfaces.insert(name, iface);
+        }
+        for (name, iface) in wlr_screen.interfaces {
+            core.interfaces.insert(name, iface);
+        }
+        for (name, iface) in ext_image.interfaces {
+            core.interfaces.insert(name, iface);
+        }
+        core
+    })
+}
+
+#[cfg(test)]
+mod p12_tests {
+    use super::*;
+
+    #[test]
+    fn test_p12_protocol_lookup() {
+        let spec = p12_protocol_spec();
+        assert!(spec.interfaces.contains_key("zxdg_output_manager_v1"));
+        assert!(spec.interfaces.contains_key("zwlr_output_manager_v1"));
+        assert!(spec.interfaces.contains_key("zwlr_screencopy_manager_v1"));
+        assert!(spec.interfaces.contains_key("ext_image_copy_capture_manager_v1"));
+    }
+}

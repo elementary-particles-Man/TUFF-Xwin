@@ -91,3 +91,10 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - **wp_presentation**: Connected `wp_presentation_feedback` to surface commits, dispatching `presented` events with fake clock timestamps, and `discarded` events on surface destruction.
 - **Validation**: Added E2E tests verifying the complete lifecycle of viewports, fractional scales, decorations, and presentation feedback over isolated sockets.
 - **Strict Protocol Compliance**: Added rejections for double viewports, invalid bounds, and operations on destroyed objects.
+
+## Phase 12: Output Management and Screencopy
+- **zxdg_output_manager_v1**: Implemented wire state machine for logical output positioning and sizing.
+- **zwlr_output_manager_v1**: Implemented output configuration modes, positioning, and transform test/apply lifecycle.
+- **zwlr_screencopy_manager_v1 / ext_image_copy_capture_v1**: Implemented frame buffer copy negotiation, region-based capture, and damage feedback via `FakeCaptureBackend`.
+- **Validation**: Added E2E tests for output configuration handshakes and screen capture frame loops over isolated sockets.
+- **Strict Protocol Compliance**: Enforced rejection for duplicate configuration heads, invalid bounds, and operations on destroyed capture frames.
