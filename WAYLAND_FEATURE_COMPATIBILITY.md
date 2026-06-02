@@ -16,9 +16,12 @@ This table compares standard Wayland features (as seen in major compositors like
 | **Relative Pointer** | `zwp_relative_pointer_v1` | **Complete (Event)** | `RelativePointerMotion` events and `InjectRelativePointerMotion` for testing. |
 | **Gamma Control** | `wlr-gamma-control-v1` | **Complete (Boundary)** | `DisplayBackend` handles gamma LUT validation. |
 | **Output Management** | `wlr-output-management-v1` | **Complete (Boundary)** | `DisplayBackend` abstracts output inventory and mode setting. |
-| **Presentation Time** | `wp_presentation` | **Complete (Logic)** | `PresentationClock` trait and feedback tracking via `FramePresented` events. |
+| **Presentation Time** | `wp_presentation` | **Complete (Wire)** | `PresentationClock` trait and feedback tracking via `FramePresented` events. |
 | **Foreign Toplevel** | `ext-foreign-toplevel-list-v1` | **Complete (State)** | `ForeignToplevelHandle` registry in `SurfaceRegistrySnapshot`. |
 | **Popups** | `xdg_popup` | **Complete (Wire)** | Wire state machine for transient surfaces and positioner logic. |
+| **Viewporter** | `wp_viewporter` | **Complete (Wire)** | Wire state machine for viewport source/destination rects. |
+| **Fractional Scale** | `wp_fractional_scale_v1` | **Complete (Wire)** | Wire state machine for 120-based preferred scaling. |
+| **Window Decoration** | `xdg_decoration` | **Complete (Wire)** | ServerSide/ClientSide decoration mode negotiation. |
 | **Subsurfaces** | `wl_subsurface` | **Complete (Wire)** | Wire-level parent-child surface hierarchy and sync commit support. |
 | **Input Method** | `zwp_input_method_v2` | **Complete (Wire)** | Wire-level IME protocol and fake backend integration. |
 | **Text Input** | `zwp_text_input_v3` | **Complete (Wire)** | Wire state machine for client-side text editing state. |

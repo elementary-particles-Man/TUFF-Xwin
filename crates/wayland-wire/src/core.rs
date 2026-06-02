@@ -1,13 +1,22 @@
 use crate::{
     data_device::DataDeviceManager,
+    fractional_scale::FractionalScaleManager,
+    image_copy_capture::ImageCopyCaptureManager,
     ime_backend::{FakeImeBackend, ImeBackend},
     input::SeatManager,
     input_method::InputMethodManager,
+    output::OutputManager,
+    output_management::OutputManagementManager,
+    presentation::{PresentationClock, PresentationManager, SystemPresentationClock},
     registry::WireObjectRegistry,
+    screencopy::ScreencopyManager,
     shm::ShmManager,
     subsurface::SubcompositorManager,
     surface::{Rect, SurfaceManager},
     text_input::TextInputManager,
+    viewport::ViewportManager,
+    xdg_decoration::XdgDecorationManager,
+    xdg_output::XdgOutputManager,
     xdg_shell::XdgShellManager,
     Result, WaylandMessage, WaylandObjectId, WaylandOpcode, WireError,
 };
@@ -30,6 +39,16 @@ pub struct HeadlessWireCore {
     pub text_input: TextInputManager,
     pub input_method: InputMethodManager,
     pub ime: Box<dyn ImeBackend>,
+    pub viewport: ViewportManager,
+    pub fractional_scale: FractionalScaleManager,
+    pub xdg_decoration: XdgDecorationManager,
+    pub presentation: PresentationManager,
+    pub output: OutputManager,
+    pub clock: Box<dyn PresentationClock>,
+    pub xdg_output: XdgOutputManager,
+    pub output_management: OutputManagementManager,
+    pub screencopy: ScreencopyManager,
+    pub image_copy_capture: ImageCopyCaptureManager,
     globals: Vec<WireGlobal>,
     events_out: Vec<WaylandMessage>,
 }
@@ -47,6 +66,16 @@ impl Default for HeadlessWireCore {
             text_input: TextInputManager::new(),
             input_method: InputMethodManager::new(),
             ime: Box::new(FakeImeBackend::new()),
+            viewport: ViewportManager::new(),
+            fractional_scale: FractionalScaleManager::new(),
+            xdg_decoration: XdgDecorationManager::new(),
+            presentation: PresentationManager::new(),
+            output: OutputManager::new(),
+            clock: Box::new(SystemPresentationClock),
+            xdg_output: XdgOutputManager::new(),
+            output_management: OutputManagementManager::new(),
+            screencopy: ScreencopyManager::new(),
+            image_copy_capture: ImageCopyCaptureManager::new(),
             globals: Vec::new(),
             events_out: Vec::new(),
         };
@@ -72,12 +101,42 @@ impl Default for HeadlessWireCore {
             interface: "zwp_input_method_manager_v2".into(),
             version: 1,
         });
+        core.globals.push(WireGlobal { name: 9, interface: "wp_viewporter".into(), version: 1 });
+        core.globals.push(WireGlobal {
+            name: 10,
+            interface: "wp_fractional_scale_manager_v1".into(),
+            version: 1,
+        });
+        core.globals.push(WireGlobal {
+            name: 11,
+            interface: "zxdg_decoration_manager_v1".into(),
+            version: 1,
+        });
+        core.globals.push(WireGlobal { name: 12, interface: "wp_presentation".into(), version: 1 });
+        core.globals.push(WireGlobal {
+            name: 13,
+            interface: "zxdg_output_manager_v1".into(),
+            version: 3,
+        });
+        core.globals.push(WireGlobal {
+            name: 14,
+            interface: "zwlr_output_manager_v1".into(),
+            version: 4,
+        });
+        core.globals.push(WireGlobal {
+            name: 15,
+            interface: "zwlr_screencopy_manager_v1".into(),
+            version: 3,
+        });
+        core.globals.push(WireGlobal {
+            name: 16,
+            interface: "ext_image_copy_capture_manager_v1".into(),
+            version: 1,
+        });
 
         core
     }
 }
-
-#[derive(Debug, Clone, Default)]
 pub struct DispatchResult {
     pub events: Vec<WaylandMessage>,
 }
@@ -93,7 +152,7 @@ impl HeadlessWireCore {
         fd_queue: &mut Vec<crate::WireOwnedFd>,
     ) -> Result<DispatchResult> {
         let obj = self.registry.get_object(message.header.object_id)?;
-        let spec = crate::generated::core_protocol_spec();
+        let spec = crate::generated::p12_protocol_spec();
         let iface_spec = spec.interfaces.get(&obj.interface).ok_or_else(|| {
             WireError::ProtocolError(format!("unknown interface: {}", obj.interface))
         })?;
@@ -120,6 +179,101 @@ impl HeadlessWireCore {
         self.events_out.clear();
 
         match (obj.interface.as_str(), message.header.opcode.0) {
+            // Viewporter
+            // Xdg Output
+            ("zxdg_output_manager_v1", 0) => self.handle_xdg_output_manager_destroy(message)?,
+            ("zxdg_output_manager_v1", 1) => self.handle_get_xdg_output(message)?,
+            ("zxdg_output_v1", 0) => self.handle_xdg_output_destroy(message)?,
+
+            // Wlr Output Management
+            ("zwlr_output_manager_v1", 0) => self.handle_create_configuration(message)?,
+            ("zwlr_output_manager_v1", 1) => self.handle_output_manager_stop(message)?,
+            ("zwlr_output_configuration_v1", 0) => self.handle_enable_head(message)?,
+            ("zwlr_output_configuration_v1", 1) => self.handle_disable_head(message)?,
+            ("zwlr_output_configuration_v1", 2) => self.handle_configuration_apply(message)?,
+            ("zwlr_output_configuration_v1", 3) => self.handle_configuration_test(message)?,
+            ("zwlr_output_configuration_v1", 4) => self.handle_configuration_destroy(message)?,
+            ("zwlr_output_configuration_head_v1", 0) => {
+                self.handle_config_head_set_mode(message)?
+            }
+            ("zwlr_output_configuration_head_v1", 1) => {
+                self.handle_config_head_set_custom_mode(message)?
+            }
+            ("zwlr_output_configuration_head_v1", 2) => {
+                self.handle_config_head_set_position(message)?
+            }
+            ("zwlr_output_configuration_head_v1", 3) => {
+                self.handle_config_head_set_transform(message)?
+            }
+            ("zwlr_output_configuration_head_v1", 4) => {
+                self.handle_config_head_set_scale(message)?
+            }
+
+            // Screencopy
+            ("zwlr_screencopy_manager_v1", 0) => self.handle_screencopy_capture_output(message)?,
+            ("zwlr_screencopy_manager_v1", 1) => {
+                self.handle_screencopy_capture_output_region(message)?
+            }
+            ("zwlr_screencopy_manager_v1", 2) => self.handle_screencopy_manager_destroy(message)?,
+            ("zwlr_screencopy_frame_v1", 0) => self.handle_screencopy_frame_copy(message)?,
+            ("zwlr_screencopy_frame_v1", 1) => self.handle_screencopy_frame_destroy(message)?,
+            ("zwlr_screencopy_frame_v1", 2) => {
+                self.handle_screencopy_frame_copy_with_damage(message)?
+            }
+
+            // Image Copy Capture
+            ("ext_image_copy_capture_manager_v1", 0) => {
+                self.handle_image_copy_capture_manager_destroy(message)?
+            }
+            ("ext_image_copy_capture_manager_v1", 1) => {
+                self.handle_image_copy_capture_create_session(message)?
+            }
+            ("ext_image_copy_capture_session_v1", 0) => {
+                self.handle_image_copy_capture_session_destroy(message)?
+            }
+            ("ext_image_copy_capture_session_v1", 1) => {
+                self.handle_image_copy_capture_create_frame(message)?
+            }
+            ("ext_image_copy_capture_frame_v1", 0) => {
+                self.handle_image_copy_capture_frame_copy(message)?
+            }
+            ("ext_image_copy_capture_frame_v1", 1) => {
+                self.handle_image_copy_capture_frame_destroy(message)?
+            }
+            ("wp_viewporter", 0) => self.handle_viewporter_destroy(message)?,
+            ("wp_viewporter", 1) => self.handle_get_viewport(message)?,
+            ("wp_viewport", 0) => self.handle_viewport_destroy(message)?,
+            ("wp_viewport", 1) => self.handle_viewport_set_source(message)?,
+            ("wp_viewport", 2) => self.handle_viewport_set_destination(message)?,
+
+            // Fractional Scale
+            ("wp_fractional_scale_manager_v1", 0) => {
+                self.handle_fractional_scale_manager_destroy(message)?
+            }
+            ("wp_fractional_scale_manager_v1", 1) => self.handle_get_fractional_scale(message)?,
+            ("wp_fractional_scale_v1", 0) => self.handle_fractional_scale_destroy(message)?,
+
+            // Xdg Decoration
+            ("zxdg_decoration_manager_v1", 0) => {
+                self.handle_xdg_decoration_manager_destroy(message)?
+            }
+            ("zxdg_decoration_manager_v1", 1) => self.handle_get_toplevel_decoration(message)?,
+            ("zxdg_toplevel_decoration_v1", 0) => {
+                self.handle_xdg_toplevel_decoration_destroy(message)?
+            }
+            ("zxdg_toplevel_decoration_v1", 1) => {
+                self.handle_xdg_toplevel_decoration_set_mode(message)?
+            }
+            ("zxdg_toplevel_decoration_v1", 2) => {
+                self.handle_xdg_toplevel_decoration_unset_mode(message)?
+            }
+
+            // Presentation
+            ("wp_presentation", 0) => self.handle_presentation_destroy(message)?,
+            ("wp_presentation", 1) => self.handle_presentation_feedback(message)?,
+            ("wp_presentation_feedback", 0) => (), // Placeholder
+
+            // Existing
             ("zwp_text_input_manager_v3", 1) => {
                 self.handle_text_input_manager_get_text_input(message)?
             }
@@ -209,7 +363,6 @@ impl HeadlessWireCore {
                 )))
             }
         }
-
         Ok(DispatchResult { events: self.events_out.clone() })
     }
 }
@@ -419,7 +572,28 @@ impl HeadlessWireCore {
     }
 
     fn handle_surface_destroy(&mut self, message: WaylandMessage) -> Result<()> {
-        self.registry.destroy_object(message.header.object_id)
+        let surface_id = message.header.object_id;
+
+        // Discard pending presentation feedbacks
+        let feedback_ids: Vec<WaylandObjectId> = self
+            .presentation
+            .feedbacks
+            .iter()
+            .filter(|(_, f)| f.surface_id == surface_id)
+            .map(|(fid, _)| *fid)
+            .collect();
+
+        for fid in feedback_ids {
+            self.events_out.push(crate::codec::encode_event(
+                fid,
+                WaylandOpcode(2), // discarded
+                &[],
+                &self.registry,
+            )?);
+            self.presentation.destroy(fid);
+        }
+
+        self.registry.destroy_object(surface_id)
     }
 
     fn handle_surface_attach(&mut self, message: WaylandMessage) -> Result<()> {
@@ -466,6 +640,7 @@ impl HeadlessWireCore {
     fn handle_surface_commit(&mut self, message: WaylandMessage) -> Result<()> {
         let id = message.header.object_id;
         self.surfaces.commit(id);
+        self.viewport.commit(id);
 
         // Handle frame callbacks
         if let Some(surface) = self.surfaces.surfaces.get_mut(&id) {
@@ -473,12 +648,41 @@ impl HeadlessWireCore {
                 let mut payload = vec![0u8; 4];
                 LittleEndian::write_u32(&mut payload[0..4], 0); // serial
                 self.events_out.push(WaylandMessage::new(callback_id, WaylandOpcode(0), payload));
-                // Callback objects are typically destroyed after use.
-                // We should also unregister them from the registry.
-                // But wait, the dispatcher will need them for unregistering.
-                // Let's at least emit the event.
             }
         }
+
+        // Handle presentation feedbacks
+        let feedback_ids: Vec<WaylandObjectId> = self
+            .presentation
+            .feedbacks
+            .iter()
+            .filter(|(_, f)| f.surface_id == id)
+            .map(|(fid, _)| *fid)
+            .collect();
+
+        for fid in feedback_ids {
+            let now = self.clock.now_nsec();
+            let sec_hi = (now >> 32) as u32;
+            let sec_lo = (now & 0xffffffff) as u32;
+            let nsec = (now % 1_000_000_000) as u32;
+
+            self.events_out.push(crate::codec::encode_event(
+                fid,
+                WaylandOpcode(1), // presented
+                &[
+                    crate::WireArg::Uint(sec_hi),
+                    crate::WireArg::Uint(sec_lo),
+                    crate::WireArg::Uint(nsec),
+                    crate::WireArg::Uint(16666666), // 60Hz refresh
+                    crate::WireArg::Uint(0),        // seq_hi
+                    crate::WireArg::Uint(0),        // seq_lo
+                    crate::WireArg::Uint(0),        // flags
+                ],
+                &self.registry,
+            )?);
+            self.presentation.destroy(fid);
+        }
+
         Ok(())
     }
 
@@ -1387,6 +1591,473 @@ impl HeadlessWireCore {
 
     fn handle_input_popup_surface_destroy(&mut self, message: WaylandMessage) -> Result<()> {
         self.input_method.popups.remove(&message.header.object_id);
+        self.registry.destroy_object(message.header.object_id)
+    }
+}
+
+impl HeadlessWireCore {
+    // Viewporter
+    fn handle_viewporter_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_get_viewport(&mut self, message: WaylandMessage) -> Result<()> {
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let surface_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        self.registry.register_client_object(id, "wp_viewport", 1)?;
+        self.viewport.get_viewport(id, surface_id)
+    }
+
+    fn handle_viewport_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.viewport.destroy(message.header.object_id);
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_viewport_set_source(&mut self, message: WaylandMessage) -> Result<()> {
+        let x = LittleEndian::read_i32(&message.payload[0..4]);
+        let y = LittleEndian::read_i32(&message.payload[4..8]);
+        let w = LittleEndian::read_i32(&message.payload[8..12]);
+        let h = LittleEndian::read_i32(&message.payload[12..16]);
+        self.viewport.set_source(message.header.object_id, x, y, w, h)
+    }
+
+    fn handle_viewport_set_destination(&mut self, message: WaylandMessage) -> Result<()> {
+        let w = LittleEndian::read_i32(&message.payload[0..4]);
+        let h = LittleEndian::read_i32(&message.payload[4..8]);
+        self.viewport.set_destination(message.header.object_id, w, h)
+    }
+
+    // Fractional Scale
+    fn handle_fractional_scale_manager_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_get_fractional_scale(&mut self, message: WaylandMessage) -> Result<()> {
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let surface_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        self.registry.register_client_object(id, "wp_fractional_scale_v1", 1)?;
+        self.fractional_scale.get_fractional_scale(id, surface_id)?;
+
+        // Send preferred_scale immediately for parity
+        self.events_out.push(crate::codec::encode_event(
+            id,
+            WaylandOpcode(0),             // preferred_scale
+            &[crate::WireArg::Uint(120)], // 1.0x
+            &self.registry,
+        )?);
+        Ok(())
+    }
+
+    fn handle_fractional_scale_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.fractional_scale.destroy(message.header.object_id);
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    // Xdg Decoration
+    fn handle_xdg_decoration_manager_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_get_toplevel_decoration(&mut self, message: WaylandMessage) -> Result<()> {
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let toplevel_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        self.registry.register_client_object(id, "zxdg_toplevel_decoration_v1", 1)?;
+        self.xdg_decoration.get_toplevel_decoration(id, toplevel_id)?;
+
+        // Initial configure: ServerSide preferred
+        self.events_out.push(crate::codec::encode_event(
+            id,
+            WaylandOpcode(0),           // configure
+            &[crate::WireArg::Uint(2)], // ServerSide
+            &self.registry,
+        )?);
+        Ok(())
+    }
+
+    fn handle_xdg_toplevel_decoration_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.xdg_decoration.destroy(message.header.object_id);
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_xdg_toplevel_decoration_set_mode(&mut self, message: WaylandMessage) -> Result<()> {
+        let mode = LittleEndian::read_u32(&message.payload[0..4]);
+        let m = self.xdg_decoration.set_mode(message.header.object_id, mode)?;
+
+        // Ack with configure
+        self.events_out.push(crate::codec::encode_event(
+            message.header.object_id,
+            WaylandOpcode(0), // configure
+            &[crate::WireArg::Uint(m as u32)],
+            &self.registry,
+        )?);
+        Ok(())
+    }
+
+    fn handle_xdg_toplevel_decoration_unset_mode(&mut self, message: WaylandMessage) -> Result<()> {
+        if let Some(d) = self.xdg_decoration.decorations.get_mut(&message.header.object_id) {
+            d.mode = None;
+        }
+        // Fallback to ServerSide
+        self.events_out.push(crate::codec::encode_event(
+            message.header.object_id,
+            WaylandOpcode(0),           // configure
+            &[crate::WireArg::Uint(2)], // ServerSide
+            &self.registry,
+        )?);
+        Ok(())
+    }
+
+    // Presentation
+    fn handle_presentation_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_presentation_feedback(&mut self, message: WaylandMessage) -> Result<()> {
+        let surface_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+
+        self.registry.register_client_object(id, "wp_presentation_feedback", 1)?;
+        self.presentation.feedback(id, surface_id);
+        Ok(())
+    }
+}
+
+impl HeadlessWireCore {
+    // Xdg Output
+    fn handle_xdg_output_manager_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_get_xdg_output(&mut self, message: WaylandMessage) -> Result<()> {
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let output_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        self.registry.register_client_object(id, "zxdg_output_v1", 3)?;
+        self.xdg_output.get_xdg_output(id, output_id)?;
+
+        let output = self
+            .output
+            .outputs
+            .get(&output_id)
+            .ok_or(WireError::InvalidObjectId(output_id.0))?
+            .clone();
+
+        self.events_out.push(crate::codec::encode_event(
+            id,
+            WaylandOpcode(0),
+            &[crate::WireArg::Int(output.x), crate::WireArg::Int(output.y)],
+            &self.registry,
+        )?);
+        self.events_out.push(crate::codec::encode_event(
+            id,
+            WaylandOpcode(1),
+            &[crate::WireArg::Int(output.width), crate::WireArg::Int(output.height)],
+            &self.registry,
+        )?);
+        self.events_out.push(crate::codec::encode_event(
+            id,
+            WaylandOpcode(3),
+            &[crate::WireArg::String(output.name.clone())],
+            &self.registry,
+        )?);
+        self.events_out.push(crate::codec::encode_event(
+            id,
+            WaylandOpcode(4),
+            &[crate::WireArg::String(format!("desc: {}", output.name))],
+            &self.registry,
+        )?);
+        self.events_out.push(crate::codec::encode_event(
+            id,
+            WaylandOpcode(2),
+            &[],
+            &self.registry,
+        )?);
+
+        Ok(())
+    }
+
+    fn handle_xdg_output_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.xdg_output.destroy(message.header.object_id);
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    // Output Management
+    fn handle_create_configuration(&mut self, message: WaylandMessage) -> Result<()> {
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let serial = LittleEndian::read_u32(&message.payload[4..8]);
+        self.registry.register_client_object(id, "zwlr_output_configuration_v1", 4)?;
+        self.output_management.create_configuration(id, serial);
+        Ok(())
+    }
+
+    fn handle_output_manager_stop(&mut self, _message: WaylandMessage) -> Result<()> {
+        Ok(())
+    }
+
+    fn handle_enable_head(&mut self, message: WaylandMessage) -> Result<()> {
+        let config_id = message.header.object_id;
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let head_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        self.registry.register_client_object(id, "zwlr_output_configuration_head_v1", 4)?;
+        self.output_management.enable_head(config_id, id, head_id)
+    }
+
+    fn handle_disable_head(&mut self, message: WaylandMessage) -> Result<()> {
+        let config_id = message.header.object_id;
+        let head_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        self.output_management.disable_head(config_id, head_id)
+    }
+
+    fn handle_configuration_apply(&mut self, message: WaylandMessage) -> Result<()> {
+        let config_id = message.header.object_id;
+        if !self.output_management.configs.contains_key(&config_id) {
+            return Err(WireError::InvalidObjectId(config_id.0));
+        }
+        // In a real impl, we'd apply to FakeOutput. Here we just ack success.
+        self.events_out.push(crate::codec::encode_event(
+            config_id,
+            WaylandOpcode(0),
+            &[],
+            &self.registry,
+        )?);
+        Ok(())
+    }
+
+    fn handle_configuration_test(&mut self, message: WaylandMessage) -> Result<()> {
+        let config_id = message.header.object_id;
+        if !self.output_management.configs.contains_key(&config_id) {
+            return Err(WireError::InvalidObjectId(config_id.0));
+        }
+        self.events_out.push(crate::codec::encode_event(
+            config_id,
+            WaylandOpcode(0),
+            &[],
+            &self.registry,
+        )?);
+        Ok(())
+    }
+
+    fn handle_configuration_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.output_management.destroy_configuration(message.header.object_id);
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_config_head_set_mode(&mut self, _message: WaylandMessage) -> Result<()> {
+        Ok(())
+    }
+    fn handle_config_head_set_custom_mode(&mut self, _message: WaylandMessage) -> Result<()> {
+        Ok(())
+    }
+    fn handle_config_head_set_position(&mut self, _message: WaylandMessage) -> Result<()> {
+        Ok(())
+    }
+    fn handle_config_head_set_transform(&mut self, _message: WaylandMessage) -> Result<()> {
+        Ok(())
+    }
+    fn handle_config_head_set_scale(&mut self, _message: WaylandMessage) -> Result<()> {
+        Ok(())
+    }
+
+    // Screencopy
+    fn handle_screencopy_capture_output(&mut self, message: WaylandMessage) -> Result<()> {
+        let frame_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let overlay = LittleEndian::read_u32(&message.payload[4..8]) != 0;
+        let output_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[8..12]));
+
+        self.registry.register_client_object(frame_id, "zwlr_screencopy_frame_v1", 3)?;
+        self.screencopy.capture_output(frame_id, Some(output_id), overlay);
+
+        self.events_out.push(crate::codec::encode_event(
+            frame_id,
+            WaylandOpcode(0),
+            &[
+                crate::WireArg::Uint(0),        // format: ARGB8888
+                crate::WireArg::Uint(1920),     // w
+                crate::WireArg::Uint(1080),     // h
+                crate::WireArg::Uint(1920 * 4), // stride
+            ],
+            &self.registry,
+        )?);
+        self.events_out.push(crate::codec::encode_event(
+            frame_id,
+            WaylandOpcode(1),
+            &[crate::WireArg::Uint(0)],
+            &self.registry,
+        )?);
+        Ok(())
+    }
+
+    fn handle_screencopy_capture_output_region(&mut self, message: WaylandMessage) -> Result<()> {
+        let frame_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let overlay = LittleEndian::read_u32(&message.payload[4..8]) != 0;
+        let output_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[8..12]));
+        let x = LittleEndian::read_i32(&message.payload[12..16]);
+        let y = LittleEndian::read_i32(&message.payload[16..20]);
+        let w = LittleEndian::read_i32(&message.payload[20..24]);
+        let h = LittleEndian::read_i32(&message.payload[24..28]);
+
+        self.registry.register_client_object(frame_id, "zwlr_screencopy_frame_v1", 3)?;
+        self.screencopy.capture_output_region(frame_id, Some(output_id), overlay, x, y, w, h)?;
+
+        self.events_out.push(crate::codec::encode_event(
+            frame_id,
+            WaylandOpcode(0),
+            &[
+                crate::WireArg::Uint(0), // format
+                crate::WireArg::Uint(w as u32),
+                crate::WireArg::Uint(h as u32),
+                crate::WireArg::Uint((w * 4) as u32),
+            ],
+            &self.registry,
+        )?);
+        self.events_out.push(crate::codec::encode_event(
+            frame_id,
+            WaylandOpcode(1),
+            &[crate::WireArg::Uint(0)],
+            &self.registry,
+        )?);
+        Ok(())
+    }
+
+    fn handle_screencopy_manager_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_screencopy_frame_copy(&mut self, message: WaylandMessage) -> Result<()> {
+        let frame_id = message.header.object_id;
+        let buffer_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+
+        let frame = self
+            .screencopy
+            .frames
+            .get_mut(&frame_id)
+            .ok_or(WireError::InvalidObjectId(frame_id.0))?;
+        frame.buffer_id = Some(buffer_id);
+        frame.copied = true;
+
+        // Simulating immediate readiness
+        let now = self.clock.now_nsec();
+        let sec_hi = (now >> 32) as u32;
+        let sec_lo = (now & 0xffffffff) as u32;
+        let nsec = (now % 1_000_000_000) as u32;
+
+        self.events_out.push(crate::codec::encode_event(
+            frame_id,
+            WaylandOpcode(2),
+            &[
+                crate::WireArg::Uint(sec_hi),
+                crate::WireArg::Uint(sec_lo),
+                crate::WireArg::Uint(nsec),
+            ],
+            &self.registry,
+        )?);
+        Ok(())
+    }
+
+    fn handle_screencopy_frame_copy_with_damage(&mut self, message: WaylandMessage) -> Result<()> {
+        let frame_id = message.header.object_id;
+        let buffer_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+
+        let frame = self
+            .screencopy
+            .frames
+            .get_mut(&frame_id)
+            .ok_or(WireError::InvalidObjectId(frame_id.0))?;
+        frame.buffer_id = Some(buffer_id);
+        frame.copied = true;
+
+        self.events_out.push(crate::codec::encode_event(
+            frame_id,
+            WaylandOpcode(4),
+            &[
+                crate::WireArg::Uint(0),
+                crate::WireArg::Uint(0),
+                crate::WireArg::Uint(1920),
+                crate::WireArg::Uint(1080),
+            ],
+            &self.registry,
+        )?);
+
+        let now = self.clock.now_nsec();
+        let sec_hi = (now >> 32) as u32;
+        let sec_lo = (now & 0xffffffff) as u32;
+        let nsec = (now % 1_000_000_000) as u32;
+
+        self.events_out.push(crate::codec::encode_event(
+            frame_id,
+            WaylandOpcode(2),
+            &[
+                crate::WireArg::Uint(sec_hi),
+                crate::WireArg::Uint(sec_lo),
+                crate::WireArg::Uint(nsec),
+            ],
+            &self.registry,
+        )?);
+        Ok(())
+    }
+
+    fn handle_screencopy_frame_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.screencopy.destroy(message.header.object_id);
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    // Image Copy Capture
+    fn handle_image_copy_capture_manager_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_image_copy_capture_create_session(&mut self, message: WaylandMessage) -> Result<()> {
+        let session_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let source_type = LittleEndian::read_u32(&message.payload[4..8]);
+        let source_id = LittleEndian::read_u32(&message.payload[8..12]);
+        self.registry.register_client_object(session_id, "ext_image_copy_capture_session_v1", 1)?;
+        self.image_copy_capture.create_session(session_id, source_type, source_id);
+        Ok(())
+    }
+
+    fn handle_image_copy_capture_session_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.image_copy_capture.destroy_session(message.header.object_id);
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_image_copy_capture_create_frame(&mut self, message: WaylandMessage) -> Result<()> {
+        let session_id = message.header.object_id;
+        let frame_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        if !self.image_copy_capture.sessions.contains_key(&session_id) {
+            return Err(WireError::InvalidObjectId(session_id.0));
+        }
+        self.registry.register_client_object(frame_id, "ext_image_copy_capture_frame_v1", 1)?;
+        self.image_copy_capture.create_frame(frame_id, session_id);
+
+        self.events_out.push(crate::codec::encode_event(
+            frame_id,
+            WaylandOpcode(0),
+            &[
+                crate::WireArg::Uint(0),
+                crate::WireArg::Uint(1920),
+                crate::WireArg::Uint(1080),
+                crate::WireArg::Uint(1920 * 4),
+            ],
+            &self.registry,
+        )?);
+        Ok(())
+    }
+
+    fn handle_image_copy_capture_frame_copy(&mut self, message: WaylandMessage) -> Result<()> {
+        let frame_id = message.header.object_id;
+        if !self.image_copy_capture.frames.contains_key(&frame_id) {
+            return Err(WireError::InvalidObjectId(frame_id.0));
+        }
+        self.events_out.push(crate::codec::encode_event(
+            frame_id,
+            WaylandOpcode(1),
+            &[],
+            &self.registry,
+        )?);
+        Ok(())
+    }
+
+    fn handle_image_copy_capture_frame_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.image_copy_capture.destroy_frame(message.header.object_id);
         self.registry.destroy_object(message.header.object_id)
     }
 }

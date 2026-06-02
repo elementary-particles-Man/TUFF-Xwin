@@ -579,3 +579,139 @@ impl WireFakeClient {
         self.send_message(&msg)
     }
 }
+impl WireFakeClient {
+    pub fn bind_wp_viewporter(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("wp_viewporter", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn wp_viewporter_get_viewport(
+        &mut self,
+        manager_id: u32,
+        new_id: u32,
+        surface_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&surface_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+
+    pub fn wp_viewport_set_destination(&mut self, viewport_id: u32, w: i32, h: i32) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&w.to_le_bytes());
+        p.extend_from_slice(&h.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(viewport_id), WaylandOpcode(2), p);
+        self.send_message(&msg)
+    }
+
+    pub fn bind_wp_fractional_scale_manager(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("wp_fractional_scale_manager_v1", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn wp_fractional_scale_manager_get_fractional_scale(
+        &mut self,
+        manager_id: u32,
+        new_id: u32,
+        surface_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&surface_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+
+    pub fn bind_zxdg_decoration_manager(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("zxdg_decoration_manager_v1", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn zxdg_decoration_manager_get_toplevel_decoration(
+        &mut self,
+        manager_id: u32,
+        new_id: u32,
+        toplevel_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&toplevel_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+
+    pub fn zxdg_toplevel_decoration_set_mode(&mut self, decor_id: u32, mode: u32) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&mode.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(decor_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+
+    pub fn bind_wp_presentation(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("wp_presentation", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p);
+        self.send_message(&msg)
+    }
+
+    pub fn wp_presentation_feedback(
+        &mut self,
+        presentation_id: u32,
+        surface_id: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&surface_id.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        let msg = WaylandMessage::new(WaylandObjectId(presentation_id), WaylandOpcode(1), p);
+        self.send_message(&msg)
+    }
+    pub fn wl_surface_destroy(&mut self, surface_id: u32) -> Result<()> {
+        let msg = WaylandMessage::new(WaylandObjectId(surface_id), WaylandOpcode(0), Vec::new());
+        self.send_message(&msg)
+    }
+}
