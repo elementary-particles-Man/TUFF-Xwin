@@ -1,7 +1,9 @@
 use crate::{
+    data_device::DataDeviceManager,
     input::SeatManager,
     registry::WireObjectRegistry,
     shm::ShmManager,
+    subsurface::SubcompositorManager,
     surface::{Rect, SurfaceManager},
     xdg_shell::XdgShellManager,
     Result, WaylandMessage, WaylandObjectId, WaylandOpcode, WireError,
@@ -20,6 +22,8 @@ pub struct HeadlessWireCore {
     pub shm: ShmManager,
     pub xdg_shell: XdgShellManager,
     pub input: SeatManager,
+    pub data_device: DataDeviceManager,
+    pub subsurface: SubcompositorManager,
     globals: Vec<WireGlobal>,
     events_out: Vec<WaylandMessage>,
 }
@@ -32,6 +36,8 @@ impl Default for HeadlessWireCore {
             shm: ShmManager::new(),
             xdg_shell: XdgShellManager::new(),
             input: SeatManager::new(),
+            data_device: DataDeviceManager::new(),
+            subsurface: SubcompositorManager::new(),
             globals: Vec::new(),
             events_out: Vec::new(),
         };
@@ -41,6 +47,12 @@ impl Default for HeadlessWireCore {
         core.globals.push(WireGlobal { name: 2, interface: "wl_shm".into(), version: 1 });
         core.globals.push(WireGlobal { name: 3, interface: "wl_seat".into(), version: 7 });
         core.globals.push(WireGlobal { name: 4, interface: "xdg_wm_base".into(), version: 6 });
+        core.globals.push(WireGlobal {
+            name: 5,
+            interface: "wl_data_device_manager".into(),
+            version: 3,
+        });
+        core.globals.push(WireGlobal { name: 6, interface: "wl_subcompositor".into(), version: 1 });
 
         core
     }
@@ -89,6 +101,39 @@ impl HeadlessWireCore {
         self.events_out.clear();
 
         match (obj.interface.as_str(), message.header.opcode.0) {
+            ("wl_subcompositor", 0) => self.handle_subcompositor_destroy(message)?,
+            ("wl_subcompositor", 1) => self.handle_get_subsurface(message)?,
+            ("wl_subsurface", 0) => self.handle_subsurface_destroy(message)?,
+            ("wl_subsurface", 1) => self.handle_subsurface_set_position(message)?,
+            ("wl_subsurface", 2) => self.handle_subsurface_place_above(message)?,
+            ("wl_subsurface", 3) => self.handle_subsurface_place_below(message)?,
+            ("wl_subsurface", 4) => self.handle_subsurface_set_sync(message)?,
+            ("wl_subsurface", 5) => self.handle_subsurface_set_desync(message)?,
+            ("xdg_positioner", 0) => self.handle_xdg_positioner_destroy(message)?,
+            ("xdg_positioner", 1) => self.handle_xdg_positioner_set_size(message)?,
+            ("xdg_positioner", 2) => self.handle_xdg_positioner_set_anchor_rect(message)?,
+            ("xdg_positioner", 3) => self.handle_xdg_positioner_set_anchor(message)?,
+            ("xdg_positioner", 4) => self.handle_xdg_positioner_set_gravity(message)?,
+            ("xdg_positioner", 5) => {
+                self.handle_xdg_positioner_set_constraint_adjustment(message)?
+            }
+            ("xdg_positioner", 6) => self.handle_xdg_positioner_set_offset(message)?,
+            ("xdg_surface", 2) => self.handle_xdg_surface_get_popup(message)?,
+            ("xdg_popup", 0) => self.handle_xdg_popup_destroy(message)?,
+            ("xdg_popup", 1) => self.handle_xdg_popup_grab(message)?,
+            ("wl_data_device_manager", 0) => self.handle_create_data_source(message)?,
+            ("wl_data_device_manager", 1) => self.handle_get_data_device(message)?,
+            ("wl_data_source", 0) => self.handle_data_source_offer(message)?,
+            ("wl_data_source", 1) => self.handle_data_source_destroy(message)?,
+            ("wl_data_source", 2) => self.handle_data_source_set_actions(message)?,
+            ("wl_data_device", 0) => self.handle_data_device_start_drag(message, fd_queue)?,
+            ("wl_data_device", 1) => self.handle_data_device_set_selection(message)?,
+            ("wl_data_device", 2) => self.handle_data_device_release(message)?,
+            ("wl_data_offer", 0) => self.handle_data_offer_accept(message)?,
+            ("wl_data_offer", 1) => self.handle_data_offer_receive(message, fd_queue)?,
+            ("wl_data_offer", 2) => self.handle_data_offer_destroy(message)?,
+            ("wl_data_offer", 3) => self.handle_data_offer_finish(message)?,
+            ("wl_data_offer", 4) => self.handle_data_offer_set_actions(message)?,
             ("wl_display", 1) => self.handle_get_registry(message)?,
             ("wl_display", 0) => self.handle_sync(message)?,
             ("wl_registry", 0) => self.handle_registry_bind(message)?,
@@ -104,25 +149,26 @@ impl HeadlessWireCore {
             ("wl_shm_pool", 0) => self.handle_shm_pool_create_buffer(message)?,
             ("xdg_wm_base", 3) => self.handle_xdg_wm_base_get_xdg_surface(message)?,
             ("xdg_wm_base", 4) => self.handle_xdg_wm_base_pong(message)?,
+            ("xdg_wm_base", 1) => self.handle_xdg_wm_base_create_positioner(message)?,
+            ("xdg_surface", 0) => self.handle_xdg_surface_destroy(message)?,
             ("xdg_surface", 1) => self.handle_xdg_surface_get_toplevel(message)?,
             ("xdg_surface", 4) => self.handle_xdg_surface_ack_configure(message)?,
+            ("xdg_toplevel", 0) => self.handle_xdg_toplevel_destroy(message)?,
+            ("xdg_toplevel", 1) => self.handle_xdg_toplevel_set_parent(message)?,
             ("xdg_toplevel", 2) => self.handle_xdg_toplevel_set_title(message, &args)?,
             ("xdg_toplevel", 3) => self.handle_xdg_toplevel_set_app_id(message, &args)?,
-            ("xdg_surface", 0) => self.handle_xdg_surface_destroy(message)?,
-            ("xdg_toplevel", 0) => self.handle_xdg_toplevel_destroy(message)?,
-            ("wl_seat", 0) => self.handle_seat_get_pointer(message)?,
-            ("wl_seat", 1) => self.handle_seat_get_keyboard(message)?,
             _ => {
-                println!(
-                    "warning: unhandled dispatch for {} (id={}) opcode={}",
-                    obj.interface, message.header.object_id.0, message.header.opcode.0
-                );
+                return Err(WireError::ProtocolError(format!(
+                    "unhandled opcode {} for {}",
+                    message.header.opcode.0, obj.interface
+                )))
             }
         }
 
-        Ok(DispatchResult { events: self.events_out.drain(..).collect() })
+        Ok(DispatchResult { events: self.events_out.clone() })
     }
-
+}
+impl HeadlessWireCore {
     fn handle_get_registry(&mut self, message: WaylandMessage) -> Result<()> {
         if message.payload.len() < 4 {
             return Err(WireError::Incomplete);
@@ -188,13 +234,15 @@ impl HeadlessWireCore {
     }
 
     fn handle_xdg_wm_base_get_xdg_surface(&mut self, message: WaylandMessage) -> Result<()> {
-        if message.payload.len() < 8 { return Err(WireError::Incomplete); }
+        if message.payload.len() < 8 {
+            return Err(WireError::Incomplete);
+        }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
         let wl_surf_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
 
         // Validation: same wl_surface cannot have multiple xdg_surfaces
         if self.xdg_shell.surfaces.values().any(|s| s.wl_surface_id == wl_surf_id) {
-             return Err(WireError::ProtocolError("wl_surface already has an xdg_surface".into()));
+            return Err(WireError::ProtocolError("wl_surface already has an xdg_surface".into()));
         }
 
         self.registry.register_client_object(id, "xdg_surface", 6)?;
@@ -205,7 +253,6 @@ impl HeadlessWireCore {
     fn handle_xdg_wm_base_pong(&mut self, _message: WaylandMessage) -> Result<()> {
         Ok(())
     }
-
 
     fn handle_xdg_surface_destroy(&mut self, message: WaylandMessage) -> Result<()> {
         self.xdg_shell.surfaces.remove(&message.header.object_id);
@@ -507,21 +554,513 @@ mod tests {
         let mut core = HeadlessWireCore::default();
         core.registry.register_client_object(WaylandObjectId(10), "wl_surface", 4).unwrap();
         core.registry.register_client_object(WaylandObjectId(11), "xdg_wm_base", 1).unwrap();
-        
+
         // 1. Get xdg_surface
         let mut p1 = vec![0u8; 8];
         LittleEndian::write_u32(&mut p1[0..4], 12); // xdg_surface id
         LittleEndian::write_u32(&mut p1[4..8], 10); // wl_surface id
         core.dispatch(WaylandMessage::new(WaylandObjectId(11), WaylandOpcode(3), p1)).unwrap();
-        
+
         // 2. Get toplevel
         let mut p2 = vec![0u8; 4];
         LittleEndian::write_u32(&mut p2, 13); // toplevel id
-        let res = core.dispatch(WaylandMessage::new(WaylandObjectId(12), WaylandOpcode(1), p2)).unwrap();
-        
+        let res =
+            core.dispatch(WaylandMessage::new(WaylandObjectId(12), WaylandOpcode(1), p2)).unwrap();
+
         // Expect 2 events: toplevel.configure (id 13) then surface.configure (id 12)
         assert_eq!(res.events.len(), 2);
         assert_eq!(res.events[0].header.object_id.0, 13);
         assert_eq!(res.events[1].header.object_id.0, 12);
+    }
+}
+
+impl HeadlessWireCore {
+    fn handle_create_data_source(&mut self, message: WaylandMessage) -> Result<()> {
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        self.registry.register_client_object(id, "wl_data_source", 3)?;
+        self.data_device.create_data_source(id);
+        Ok(())
+    }
+
+    fn handle_get_data_device(&mut self, message: WaylandMessage) -> Result<()> {
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let seat_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        self.registry.register_client_object(id, "wl_data_device", 3)?;
+        self.data_device.get_data_device(id, seat_id);
+        Ok(())
+    }
+
+    fn handle_data_source_offer(&mut self, message: WaylandMessage) -> Result<()> {
+        let source_id = message.header.object_id;
+        let mut offset = 0;
+        let mime_type = crate::args::decode_string(&message.payload, &mut offset)?;
+        if let Some(source) = self.data_device.sources.get_mut(&source_id) {
+            source.mime_types.push(mime_type);
+        }
+        Ok(())
+    }
+
+    fn handle_data_source_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        let source_id = message.header.object_id;
+        if let Some(source) = self.data_device.sources.get_mut(&source_id) {
+            source.is_destroyed = true;
+        }
+        self.registry.destroy_object(source_id)?;
+        Ok(())
+    }
+
+    fn handle_data_source_set_actions(&mut self, message: WaylandMessage) -> Result<()> {
+        let source_id = message.header.object_id;
+        let dnd_actions = LittleEndian::read_u32(&message.payload[0..4]);
+        if let Some(source) = self.data_device.sources.get_mut(&source_id) {
+            source.dnd_actions = dnd_actions;
+        }
+        Ok(())
+    }
+
+    fn handle_data_device_set_selection(&mut self, message: WaylandMessage) -> Result<()> {
+        let device_id = message.header.object_id;
+        let source_id_val = LittleEndian::read_u32(&message.payload[0..4]);
+
+        let source_id =
+            if source_id_val == 0 { None } else { Some(WaylandObjectId(source_id_val)) };
+
+        let seat_id = {
+            let device = self
+                .data_device
+                .devices
+                .get(&device_id)
+                .ok_or_else(|| WireError::ProtocolError("unknown data device".into()))?;
+            device.seat_id
+        };
+
+        self.data_device.seat_selections.insert(seat_id, source_id);
+
+        if let Some(src_id) = source_id {
+            self.emit_selection_events(seat_id, src_id)?;
+        } else {
+            self.emit_selection_events_null(seat_id)?;
+        }
+
+        Ok(())
+    }
+
+    fn emit_selection_events(
+        &mut self,
+        seat_id: WaylandObjectId,
+        source_id: WaylandObjectId,
+    ) -> Result<()> {
+        let device_ids: Vec<WaylandObjectId> = self
+            .data_device
+            .devices
+            .iter()
+            .filter(|(_, d)| d.seat_id == seat_id)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for dev_id in device_ids {
+            let offer_id = self.registry.next_server_id();
+            self.registry.register_client_object(offer_id, "wl_data_offer", 3)?;
+
+            let source = self
+                .data_device
+                .sources
+                .get(&source_id)
+                .ok_or_else(|| WireError::ProtocolError("source disappeared".into()))?
+                .clone();
+
+            self.data_device.offers.insert(
+                offer_id,
+                crate::data_device::DataOffer {
+                    source_id: Some(source_id),
+                    mime_types: source.mime_types.clone(),
+                    dnd_actions: source.dnd_actions,
+                    preferred_action: 0,
+                    is_destroyed: false,
+                },
+            );
+
+            self.events_out.push(crate::codec::encode_event(
+                dev_id,
+                WaylandOpcode(0), // data_offer
+                &[crate::WireArg::NewId(offer_id.0)],
+                &self.registry,
+            )?);
+
+            for mime in &source.mime_types {
+                self.events_out.push(crate::codec::encode_event(
+                    offer_id,
+                    WaylandOpcode(0), // offer
+                    &[crate::WireArg::String(mime.clone())],
+                    &self.registry,
+                )?);
+            }
+
+            self.events_out.push(crate::codec::encode_event(
+                dev_id,
+                WaylandOpcode(5), // selection
+                &[crate::WireArg::Object(offer_id.0)],
+                &self.registry,
+            )?);
+        }
+        Ok(())
+    }
+
+    fn emit_selection_events_null(&mut self, seat_id: WaylandObjectId) -> Result<()> {
+        let device_ids: Vec<WaylandObjectId> = self
+            .data_device
+            .devices
+            .iter()
+            .filter(|(_, d)| d.seat_id == seat_id)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for dev_id in device_ids {
+            self.events_out.push(crate::codec::encode_event(
+                dev_id,
+                WaylandOpcode(5), // selection
+                &[crate::WireArg::Object(0)],
+                &self.registry,
+            )?);
+        }
+        Ok(())
+    }
+
+    fn handle_data_device_start_drag(
+        &mut self,
+        message: WaylandMessage,
+        _fd_queue: &mut Vec<crate::WireOwnedFd>,
+    ) -> Result<()> {
+        let device_id = message.header.object_id;
+        let source_id_val = LittleEndian::read_u32(&message.payload[0..4]);
+        let origin_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        let icon_id_val = LittleEndian::read_u32(&message.payload[8..12]);
+        let _serial = LittleEndian::read_u32(&message.payload[12..16]);
+
+        let source_id =
+            if source_id_val == 0 { None } else { Some(WaylandObjectId(source_id_val)) };
+        let icon_id = if icon_id_val == 0 { None } else { Some(WaylandObjectId(icon_id_val)) };
+
+        let seat_id = {
+            let device = self
+                .data_device
+                .devices
+                .get(&device_id)
+                .ok_or_else(|| WireError::ProtocolError("unknown data device".into()))?;
+            device.seat_id
+        };
+
+        self.data_device.start_drag(seat_id, source_id, origin_id, icon_id);
+
+        let focus = self
+            .input
+            .pointers
+            .values()
+            .find(|p| p.seat_id == seat_id)
+            .and_then(|p| p.focus_surface_id);
+
+        if let Some(surface_id) = focus {
+            let offer_id = self.registry.next_server_id();
+            self.registry.register_client_object(offer_id, "wl_data_offer", 3)?;
+
+            if let Some(src_id) = source_id {
+                let source = self
+                    .data_device
+                    .sources
+                    .get(&src_id)
+                    .ok_or_else(|| WireError::ProtocolError("source disappeared".into()))?
+                    .clone();
+
+                self.data_device.offers.insert(
+                    offer_id,
+                    crate::data_device::DataOffer {
+                        source_id: Some(src_id),
+                        mime_types: source.mime_types.clone(),
+                        dnd_actions: source.dnd_actions,
+                        preferred_action: 0,
+                        is_destroyed: false,
+                    },
+                );
+
+                self.events_out.push(crate::codec::encode_event(
+                    device_id,
+                    WaylandOpcode(0), // data_offer
+                    &[crate::WireArg::NewId(offer_id.0)],
+                    &self.registry,
+                )?);
+
+                for mime in &source.mime_types {
+                    self.events_out.push(crate::codec::encode_event(
+                        offer_id,
+                        WaylandOpcode(0), // offer
+                        &[crate::WireArg::String(mime.clone())],
+                        &self.registry,
+                    )?);
+                }
+            }
+
+            self.events_out.push(crate::codec::encode_event(
+                device_id,
+                WaylandOpcode(1), // enter
+                &[
+                    crate::WireArg::Uint(self.xdg_shell.get_next_serial()),
+                    crate::WireArg::Object(surface_id.0),
+                    crate::WireArg::Fixed(0),
+                    crate::WireArg::Fixed(0),
+                    crate::WireArg::Object(offer_id.0),
+                ],
+                &self.registry,
+            )?);
+        }
+
+        Ok(())
+    }
+
+    fn handle_data_device_release(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)?;
+        Ok(())
+    }
+
+    fn handle_data_offer_accept(&mut self, message: WaylandMessage) -> Result<()> {
+        let offer_id = message.header.object_id;
+        let _serial = LittleEndian::read_u32(&message.payload[0..4]);
+        let mut offset = 4;
+        let mime_type = crate::args::decode_string(&message.payload, &mut offset)?;
+
+        if let Some(offer) = self.data_device.offers.get(&offer_id) {
+            if let Some(source_id) = offer.source_id {
+                self.events_out.push(crate::codec::encode_event(
+                    source_id,
+                    WaylandOpcode(0), // target
+                    &[crate::WireArg::String(mime_type)],
+                    &self.registry,
+                )?);
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_data_offer_receive(
+        &mut self,
+        message: WaylandMessage,
+        fd_queue: &mut Vec<crate::WireOwnedFd>,
+    ) -> Result<()> {
+        let offer_id = message.header.object_id;
+        let mut offset = 0;
+        let mime_type = crate::args::decode_string(&message.payload, &mut offset)?;
+        let _fd = fd_queue
+            .pop()
+            .ok_or_else(|| WireError::ProtocolError("missing FD for receive".into()))?;
+
+        let offer = self
+            .data_device
+            .offers
+            .get(&offer_id)
+            .ok_or_else(|| WireError::ProtocolError("unknown offer".into()))?;
+
+        if let Some(source_id) = offer.source_id {
+            self.events_out.push(crate::codec::encode_event(
+                source_id,
+                WaylandOpcode(1), // send
+                &[crate::WireArg::String(mime_type), crate::WireArg::Fd(crate::args::FakeFd(0))],
+                &self.registry,
+            )?);
+        }
+
+        Ok(())
+    }
+
+    fn handle_data_offer_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)?;
+        Ok(())
+    }
+
+    fn handle_data_offer_finish(&mut self, message: WaylandMessage) -> Result<()> {
+        let offer_id = message.header.object_id;
+        if let Some(offer) = self.data_device.offers.get(&offer_id) {
+            if let Some(source_id) = offer.source_id {
+                self.events_out.push(crate::codec::encode_event(
+                    source_id,
+                    WaylandOpcode(4), // dnd_finished
+                    &[],
+                    &self.registry,
+                )?);
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_data_offer_set_actions(&mut self, message: WaylandMessage) -> Result<()> {
+        let offer_id = message.header.object_id;
+        let dnd_actions = LittleEndian::read_u32(&message.payload[0..4]);
+        let preferred_action = LittleEndian::read_u32(&message.payload[4..8]);
+
+        if let Some(offer) = self.data_device.offers.get_mut(&offer_id) {
+            offer.dnd_actions = dnd_actions;
+            offer.preferred_action = preferred_action;
+
+            if let Some(source_id) = offer.source_id {
+                self.events_out.push(crate::codec::encode_event(
+                    source_id,
+                    WaylandOpcode(5), // action
+                    &[crate::WireArg::Uint(preferred_action)],
+                    &self.registry,
+                )?);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl HeadlessWireCore {
+    fn handle_subcompositor_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_get_subsurface(&mut self, message: WaylandMessage) -> Result<()> {
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let surface_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        let parent_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[8..12]));
+
+        self.registry.register_client_object(id, "wl_subsurface", 1)?;
+        self.subsurface.get_subsurface(id, surface_id, parent_id)
+    }
+
+    fn handle_subsurface_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.subsurface.destroy(message.header.object_id)?;
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_subsurface_set_position(&mut self, message: WaylandMessage) -> Result<()> {
+        let x = LittleEndian::read_i32(&message.payload[0..4]);
+        let y = LittleEndian::read_i32(&message.payload[4..8]);
+        self.subsurface.set_position(message.header.object_id, x, y)
+    }
+
+    fn handle_subsurface_place_above(&mut self, _message: WaylandMessage) -> Result<()> {
+        Ok(())
+    }
+
+    fn handle_subsurface_place_below(&mut self, _message: WaylandMessage) -> Result<()> {
+        Ok(())
+    }
+
+    fn handle_subsurface_set_sync(&mut self, message: WaylandMessage) -> Result<()> {
+        self.subsurface.set_sync(message.header.object_id, true)
+    }
+
+    fn handle_subsurface_set_desync(&mut self, message: WaylandMessage) -> Result<()> {
+        self.subsurface.set_sync(message.header.object_id, false)
+    }
+
+    fn handle_xdg_positioner_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.xdg_shell.positioners.remove(&message.header.object_id);
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_xdg_positioner_set_size(&mut self, message: WaylandMessage) -> Result<()> {
+        let w = LittleEndian::read_i32(&message.payload[0..4]);
+        let h = LittleEndian::read_i32(&message.payload[4..8]);
+        if let Some(p) = self.xdg_shell.positioners.get_mut(&message.header.object_id) {
+            p.width = w;
+            p.height = h;
+        }
+        Ok(())
+    }
+
+    fn handle_xdg_positioner_set_anchor_rect(&mut self, message: WaylandMessage) -> Result<()> {
+        let x = LittleEndian::read_i32(&message.payload[0..4]);
+        let y = LittleEndian::read_i32(&message.payload[4..8]);
+        let w = LittleEndian::read_i32(&message.payload[8..12]);
+        let h = LittleEndian::read_i32(&message.payload[12..16]);
+        if let Some(p) = self.xdg_shell.positioners.get_mut(&message.header.object_id) {
+            p.anchor_rect = (x, y, w, h);
+        }
+        Ok(())
+    }
+
+    fn handle_xdg_positioner_set_anchor(&mut self, message: WaylandMessage) -> Result<()> {
+        let anchor = LittleEndian::read_u32(&message.payload[0..4]);
+        if let Some(p) = self.xdg_shell.positioners.get_mut(&message.header.object_id) {
+            p.anchor = anchor;
+        }
+        Ok(())
+    }
+
+    fn handle_xdg_positioner_set_gravity(&mut self, message: WaylandMessage) -> Result<()> {
+        let gravity = LittleEndian::read_u32(&message.payload[0..4]);
+        if let Some(p) = self.xdg_shell.positioners.get_mut(&message.header.object_id) {
+            p.gravity = gravity;
+        }
+        Ok(())
+    }
+
+    fn handle_xdg_positioner_set_constraint_adjustment(
+        &mut self,
+        message: WaylandMessage,
+    ) -> Result<()> {
+        let adj = LittleEndian::read_u32(&message.payload[0..4]);
+        if let Some(p) = self.xdg_shell.positioners.get_mut(&message.header.object_id) {
+            p.constraint_adjustment = adj;
+        }
+        Ok(())
+    }
+
+    fn handle_xdg_positioner_set_offset(&mut self, message: WaylandMessage) -> Result<()> {
+        let x = LittleEndian::read_i32(&message.payload[0..4]);
+        let y = LittleEndian::read_i32(&message.payload[4..8]);
+        if let Some(p) = self.xdg_shell.positioners.get_mut(&message.header.object_id) {
+            p.offset = (x, y);
+        }
+        Ok(())
+    }
+
+    fn handle_xdg_surface_get_popup(&mut self, message: WaylandMessage) -> Result<()> {
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let parent_id_val = LittleEndian::read_u32(&message.payload[4..8]);
+        let positioner_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[8..12]));
+
+        let parent_id =
+            if parent_id_val == 0 { None } else { Some(WaylandObjectId(parent_id_val)) };
+
+        self.registry.register_client_object(id, "xdg_popup", 6)?;
+        self.xdg_shell.create_popup(id, message.header.object_id, parent_id, positioner_id)?;
+
+        // Send configure event
+        self.events_out.push(crate::codec::encode_event(
+            id,
+            WaylandOpcode(0), // configure
+            &[
+                crate::WireArg::Int(0),   // x
+                crate::WireArg::Int(0),   // y
+                crate::WireArg::Int(100), // width
+                crate::WireArg::Int(100), // height
+            ],
+            &self.registry,
+        )?);
+
+        Ok(())
+    }
+
+    fn handle_xdg_popup_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.xdg_shell.popups.remove(&message.header.object_id);
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_xdg_popup_grab(&mut self, _message: WaylandMessage) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl HeadlessWireCore {
+    fn handle_xdg_wm_base_create_positioner(&mut self, message: WaylandMessage) -> Result<()> {
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        self.registry.register_client_object(id, "xdg_positioner", 6)?;
+        self.xdg_shell.create_positioner(id);
+        Ok(())
+    }
+
+    fn handle_xdg_toplevel_set_parent(&mut self, _message: WaylandMessage) -> Result<()> {
+        Ok(())
     }
 }

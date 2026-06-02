@@ -2,6 +2,7 @@ pub mod args;
 pub mod client;
 pub mod codec;
 pub mod core;
+pub mod data_device;
 pub mod fd;
 pub mod generated;
 pub mod input;
@@ -10,6 +11,7 @@ pub mod registry;
 pub mod server;
 pub mod shm;
 pub mod signature;
+pub mod subsurface;
 pub mod surface;
 pub mod xdg_shell;
 
