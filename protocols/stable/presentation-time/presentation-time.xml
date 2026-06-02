@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="presentation_time">
+  <interface name="wp_presentation" version="1">
+    <request name="destroy" type="destructor"/>
+    <request name="feedback">
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="callback" type="new_id" interface="wp_presentation_feedback"/>
+    </request>
+    <event name="clock_id">
+      <arg name="clk_id" type="uint"/>
+    </event>
+  </interface>
+
+  <interface name="wp_presentation_feedback" version="1">
+    <event name="sync_output">
+      <arg name="output" type="object" interface="wl_output"/>
+    </event>
+    <event name="presented">
+      <arg name="tv_sec_hi" type="uint"/>
+      <arg name="tv_sec_lo" type="uint"/>
+      <arg name="tv_nsec" type="uint"/>
+      <arg name="refresh" type="uint"/>
+      <arg name="seq_hi" type="uint"/>
+      <arg name="seq_lo" type="uint"/>
+      <arg name="flags" type="uint"/>
+    </event>
+    <event name="discarded"/>
+  </interface>
+</protocol>

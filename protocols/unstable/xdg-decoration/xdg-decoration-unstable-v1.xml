@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="xdg_decoration_unstable_v1">
+  <interface name="zxdg_decoration_manager_v1" version="1">
+    <request name="destroy" type="destructor"/>
+    <request name="get_toplevel_decoration">
+      <arg name="id" type="new_id" interface="zxdg_toplevel_decoration_v1"/>
+      <arg name="toplevel" type="object" interface="xdg_toplevel"/>
+    </request>
+  </interface>
+
+  <interface name="zxdg_toplevel_decoration_v1" version="1">
+    <request name="destroy" type="destructor"/>
+    <request name="set_mode">
+      <arg name="mode" type="uint"/>
+    </request>
+    <request name="unset_mode"/>
+    <event name="configure">
+      <arg name="mode" type="uint"/>
+    </event>
+  </interface>
+</protocol>

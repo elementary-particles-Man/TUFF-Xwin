@@ -83,3 +83,11 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - **FakeImeBackend**: Added a repository-local fake IME for testing preedit and commit string flows without real IME processes.
 - **Validation**: Verified full round-trip from text-input enable to IME commit-string response in isolated sockets.
 - **Strict Checks**: Added rejections for duplicate input-method binding and focus-less text-input operations.
+
+## Phase 11: Display Scale, Viewporter, and Decoration
+- **wp_viewporter**: Implemented wire state machine for `wp_viewport` objects, mapping source rect and destination size to the surface's pending state, applied on commit.
+- **wp_fractional_scale_v1**: Implemented `preferred_scale` notification based on the output's fractional scale factor.
+- **zxdg_decoration_manager_v1**: Implemented ServerSide/ClientSide decoration mode negotiation.
+- **wp_presentation**: Connected `wp_presentation_feedback` to surface commits, dispatching `presented` events with fake clock timestamps, and `discarded` events on surface destruction.
+- **Validation**: Added E2E tests verifying the complete lifecycle of viewports, fractional scales, decorations, and presentation feedback over isolated sockets.
+- **Strict Protocol Compliance**: Added rejections for double viewports, invalid bounds, and operations on destroyed objects.

@@ -28,7 +28,7 @@ fn test_isolated_socket_surface_commit_e2e() {
     // 1. Get Registry
     client.get_registry(2).expect("get_registry");
     let mut events = Vec::new();
-    while events.len() < 5 {
+    while events.len() < 12 {
         events.append(&mut client.receive_events().unwrap());
     }
 
@@ -93,7 +93,7 @@ fn test_isolated_socket_xdg_input_e2e() {
 
     client.get_registry(2).unwrap();
     let mut events = Vec::new();
-    while events.len() < 5 {
+    while events.len() < 12 {
         // compositor, shm, seat, xdg_wm_base
         events.append(&mut client.receive_events().unwrap());
     }
@@ -294,7 +294,7 @@ fn test_isolated_socket_clipboard_e2e() {
     client.get_registry(2).unwrap();
     // 1. Receive registry globals
     let mut events = Vec::new();
-    while events.len() < 5 {
+    while events.len() < 12 {
         events.append(&mut client.receive_events().unwrap());
     }
 
@@ -607,4 +607,153 @@ fn test_reject_invalid_text_input_sequences() {
     drop(client);
     let server_res = server_handle.join();
     assert!(server_res.is_err() || server_res.unwrap().core.input_method.methods.len() == 1);
+}
+
+#[test]
+fn test_isolated_socket_viewport_scale_decoration_presentation_e2e() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-p11.sock");
+    let server_path = socket_path.clone();
+
+    let server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).expect("failed to create server");
+        server.run_once().expect("server run failed");
+        server
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = WireFakeClient::connect(&socket_path).expect("failed to connect");
+
+    client.get_registry(2).unwrap();
+    thread::sleep(std::time::Duration::from_millis(50));
+    // 12 globals now
+    while !client.receive_events().unwrap().is_empty() {}
+
+    // 1. Bind objects
+    client.bind_wl_compositor(2, 1, 4, 3).unwrap();
+    client.bind_xdg_wm_base(2, 4, 6, 4).unwrap();
+    client.bind_wp_viewporter(2, 9, 1, 5).unwrap();
+    client.bind_wp_fractional_scale_manager(2, 10, 1, 6).unwrap();
+    client.bind_zxdg_decoration_manager(2, 11, 1, 7).unwrap();
+    client.bind_wp_presentation(2, 12, 1, 8).unwrap();
+
+    // 2. Setup surface and P11 objects
+    client.wl_compositor_create_surface(3, 9).unwrap();
+    client.xdg_wm_base_get_xdg_surface(4, 10, 9).unwrap();
+    client.xdg_surface_get_toplevel(10, 11).unwrap();
+
+    // Viewport
+    client.wp_viewporter_get_viewport(5, 12, 9).unwrap();
+    client.wp_viewport_set_destination(12, 800, 600).unwrap();
+
+    // Fractional Scale
+    client.wp_fractional_scale_manager_get_fractional_scale(6, 13, 9).unwrap();
+
+    // Decoration
+    client.zxdg_decoration_manager_get_toplevel_decoration(7, 14, 11).unwrap();
+    client.zxdg_toplevel_decoration_set_mode(14, 1).unwrap(); // ClientSide
+
+    // Presentation Feedback
+    client.wp_presentation_feedback(8, 9, 15).unwrap();
+
+    // 3. Commit and receive events
+    client.wl_surface_commit(9).unwrap();
+
+    thread::sleep(std::time::Duration::from_millis(50));
+    let events = client.receive_events().unwrap();
+
+    // We expect:
+    // - preferred_scale (id 13)
+    // - decoration configure (id 14)
+    // - presentation presented (id 15)
+    assert!(events.iter().any(|e| e.header.object_id.0 == 13 && e.header.opcode.0 == 0));
+    assert!(events.iter().any(|e| e.header.object_id.0 == 14 && e.header.opcode.0 == 0));
+    assert!(events.iter().any(|e| e.header.object_id.0 == 15 && e.header.opcode.0 == 1));
+
+    drop(client);
+    let server = server_handle.join().unwrap();
+    assert!(server.core.viewport.viewports.contains_key(&wayland_wire::WaylandObjectId(12)));
+    assert!(server.core.fractional_scale.scales.contains_key(&wayland_wire::WaylandObjectId(13)));
+}
+
+#[test]
+fn test_reject_invalid_p11_sequences() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-p11-reject.sock");
+    let server_path = socket_path.clone();
+
+    let server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).expect("failed to create server");
+        server.run_once().expect("server run failed");
+        server
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = WireFakeClient::connect(&socket_path).expect("failed to connect");
+
+    client.get_registry(2).unwrap();
+    thread::sleep(std::time::Duration::from_millis(50));
+    while !client.receive_events().unwrap().is_empty() {}
+
+    client.bind_wl_compositor(2, 1, 4, 3).unwrap();
+    client.bind_xdg_wm_base(2, 4, 6, 4).unwrap();
+    client.bind_wp_viewporter(2, 9, 1, 5).unwrap();
+    client.bind_wp_fractional_scale_manager(2, 10, 1, 6).unwrap();
+    client.bind_zxdg_decoration_manager(2, 11, 1, 7).unwrap();
+    client.bind_wp_presentation(2, 12, 1, 8).unwrap();
+
+    // Setup
+    client.wl_compositor_create_surface(3, 9).unwrap();
+    client.xdg_wm_base_get_xdg_surface(4, 10, 9).unwrap();
+    client.xdg_surface_get_toplevel(10, 11).unwrap();
+
+    // 1. Double viewport (reject)
+    client.wp_viewporter_get_viewport(5, 12, 9).unwrap();
+    client.wp_viewporter_get_viewport(5, 13, 9).unwrap(); // Should fail
+
+    // We expect server to exit run_once with error.
+    thread::sleep(std::time::Duration::from_millis(50));
+    drop(client);
+    let server_res = server_handle.join();
+    assert!(server_res.is_err() || server_res.unwrap().core.viewport.viewports.len() == 1);
+}
+
+#[test]
+fn test_presentation_feedback_discard_on_surface_destroy() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-presentation-discard.sock");
+    let server_path = socket_path.clone();
+
+    let server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).expect("failed to create server");
+        // We might need to run multiple messages, so let's allow run_once to process the batch.
+        let _ = server.run_once();
+        server
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = WireFakeClient::connect(&socket_path).expect("failed to connect");
+
+    client.get_registry(2).unwrap();
+    thread::sleep(std::time::Duration::from_millis(50));
+    while !client.receive_events().unwrap().is_empty() {}
+
+    client.bind_wl_compositor(2, 1, 4, 3).unwrap();
+    client.bind_wp_presentation(2, 12, 1, 8).unwrap();
+
+    client.wl_compositor_create_surface(3, 9).unwrap();
+    client.wp_presentation_feedback(8, 9, 15).unwrap();
+
+    // Destroy surface before commit
+    client.wl_surface_destroy(9).unwrap();
+
+    thread::sleep(std::time::Duration::from_millis(50));
+    drop(client);
+    let server = server_handle.join().unwrap();
+
+    // Since surface is destroyed, presentation feedback should have been discarded/removed
+    assert!(!server.core.presentation.feedbacks.contains_key(&wayland_wire::WaylandObjectId(15)));
 }
