@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/screenshot",
     "LeyerX11/crates/layerx11-common",
     "LeyerX11/crates/x11bridge",
     "crates/compd",
