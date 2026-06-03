@@ -46,3 +46,9 @@
 - `crates/wayland-wire/tests/protocol_matrix.rs` で protocol metadata snapshot を検証する。
 - `docs/wayland-wire-parity.md` と `WAYLAND_FEATURE_COMPATIBILITY.md` に RC 前 matrix を追記する。
 - optional isolated harness は temp socket のみを使い、実 Wayland session には接続しない。
+
+## P15 最終監査
+
+- `docs/wayland-wire-final-audit-p15.md` に P15 最終監査の位置づけを固定する。
+- P15 は新機能追加ではなく、P14 到達点の最終確認と baseline freeze の準備だけを行う。
+- 実 Wayland session 非依存、temp socket 限定、fake backend 優先の方針は継続する。

@@ -38,6 +38,18 @@ P14 では、RC 前の整理として [wayland-wire-compatibility-matrix.md](doc
 
 この表は、実 Wayland session ではなく repo-local の isolated socket / fake backend を基準にしています。
 
+## P15 Final Audit
+
+P15 では新しい protocol feature を追加せず、P1-P14 の到達点を最終監査として固定します。
+
+- `Complete(Wire)`: repo-local wire 実装と isolated socket テストが揃っている状態
+- `Partial(Wire)`: wire 実装はあるが範囲が限定される状態
+- `HarnessOnly`: optional isolated harness だけで確認する状態
+- `FakeBackendOnly`: fake backend のみで検証する状態
+- `NotRealSession`: 実 Wayland session 非依存のまま維持する状態
+
+P15 の最終監査文書は [docs/wayland-wire-final-audit-p15.md](docs/wayland-wire-final-audit-p15.md) に置きます。
+
 ## Current Parity Status
 
 1. **Architectural Parity Baseline**: Complete. Core broker architecture and trait boundaries are established.

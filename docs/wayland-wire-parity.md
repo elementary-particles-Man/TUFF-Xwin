@@ -111,3 +111,9 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - **Matrix**: Added `docs/wayland-wire-compatibility-matrix.md` to separate `Complete(Wire)`, `Partial(Wire)`, `HarnessOnly`, `FakeBackendOnly`, and `NotRealSession` categories before RC.
 - **Snapshot**: Added protocol metadata snapshot tests for the P1-P13 protocol set so lookup coverage can be checked without touching a live session.
 - **Harness**: The optional `libwayland-client` isolated probe remains temp-socket only and is documented as harness-only, not real-session validation.
+
+## Phase 15: Final Audit Freeze
+- **Final Audit**: Added `docs/wayland-wire-final-audit-p15.md` to freeze the RC-prep boundary and record that P15 is audit-only.
+- **Baseline Chain**: P1 -> P12 -> P13 -> P14 -> P15 の基準連鎖を文書化し、P15 final baseline の固定準備を行う。
+- **No New Features**: P15 では新しい Wayland protocol 実装を追加せず、既存の wire parity 到達点の最終確認だけを行う。
+- **Boundary**: 実 Wayland session、実 input device、実 display/output には接続しない。

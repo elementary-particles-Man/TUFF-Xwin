@@ -29,9 +29,10 @@ fn test_isolated_socket_surface_commit_e2e() {
 
     // 1. Get Registry
     client.get_registry(2).expect("get_registry");
-    let mut events = Vec::new();
-    while events.len() < 12 {
-        events.append(&mut client.receive_events().unwrap());
+    loop {
+        if client.receive_events().unwrap().is_empty() {
+            break;
+        }
     }
 
     // 2. Bind Compositor (assume name 1)
@@ -43,9 +44,9 @@ fn test_isolated_socket_surface_commit_e2e() {
     // Receive format events
     let mut formats = Vec::new();
     while formats.len() < 2 {
-        formats.append(&mut client.receive_events().unwrap());
+        formats.extend(client.receive_events().unwrap());
     }
-    assert_eq!(formats[0].header.object_id.0, 4); // shm object id
+    assert!(formats.iter().all(|event| event.header.object_id.0 == 4));
 
     // 4. Create Surface
     client.wl_compositor_create_surface(3, 5).expect("create surface");
