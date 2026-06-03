@@ -9,8 +9,8 @@ use waybroker_common::{
     MessageKind, ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, SurfacePlacement,
     SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
     WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
-    bind_service_socket, connect_service_socket, is_recoverable_accept_error, read_json_line,
-    send_json_line,
+    accel::global_accel_policy, bind_service_socket, connect_service_socket,
+    is_recoverable_accept_error, read_json_line, send_json_line,
 };
 
 #[tokio::main]
@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
     let banner = ServiceBanner::new(ServiceRole::Compd, "scene, focus, composition policy");
     println!("{}", banner.render());
 
-    let vulkan = if config.use_vulkan {
+    let vulkan = if config.use_vulkan && global_accel_policy().prefers_vulkan() {
         let backend = VulkanBackend::new(VulkanBackendConfig::default());
         let caps = backend.initialize();
         println!(

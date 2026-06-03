@@ -12,8 +12,9 @@ use vulkan_backend::{
 };
 use waybroker_common::{
     CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputMode,
-    ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, bind_service_socket,
-    ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
+    ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, accel::global_accel_policy,
+    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line,
+    session_artifact_path,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
@@ -24,7 +25,7 @@ async fn main() -> Result<()> {
     let banner = ServiceBanner::new(ServiceRole::Displayd, "drm/kms, input, seat broker");
     println!("{}", banner.render());
 
-    let vulkan = if config.use_vulkan {
+    let vulkan = if config.use_vulkan && global_accel_policy().prefers_vulkan() {
         let backend = VulkanBackend::new(VulkanBackendConfig::default());
         let caps = backend.initialize();
         println!(

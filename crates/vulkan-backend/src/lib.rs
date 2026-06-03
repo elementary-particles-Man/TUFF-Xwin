@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::env;
 use std::ffi::{CStr, CString};
 use std::mem::size_of;
 use std::time::{Duration, Instant};
@@ -8,6 +7,7 @@ use ash::util::Align;
 use ash::{vk, Device, Entry, Instance};
 use parking_lot::Mutex;
 use tokio::time::sleep;
+use waybroker_common::accel::global_accel_policy;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -110,8 +110,9 @@ pub struct VulkanBackendConfig {
 
 impl Default for VulkanBackendConfig {
     fn default() -> Self {
+        let accel_policy = global_accel_policy();
         Self {
-            enable_vulkan: env::var("KAIRO_VULKAN_DISABLE").is_err(),
+            enable_vulkan: cfg!(feature = "accel-vulkan") && accel_policy.prefers_vulkan(),
             packet_preclassification_min_batch_bytes: DEFAULT_PACKET_MIN_BATCH_BYTES,
             submit_timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
         }

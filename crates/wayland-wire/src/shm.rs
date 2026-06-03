@@ -22,6 +22,16 @@ pub struct ShmBuffer {
     pub format: u32,
 }
 
+impl ShmBuffer {
+    pub fn byte_len(&self) -> Option<usize> {
+        if self.width < 0 || self.height < 0 || self.stride < 0 {
+            return None;
+        }
+
+        Some((self.stride as usize).saturating_mul(self.height as usize))
+    }
+}
+
 pub struct ShmManager {
     pub pools: HashMap<WaylandObjectId, ShmPool>,
     pub buffers: HashMap<WaylandObjectId, ShmBuffer>,

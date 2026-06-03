@@ -17,9 +17,9 @@ use waybroker_common::{
     DisplayCommand, DisplayEvent, FocusTarget, ImeBridgeMode, ImeCommand, ImeEvent, ImeStatus,
     IpcEnvelope, MessageKind, OutputMode, ServiceBanner, ServiceEndpoint, ServiceRole,
     ServiceStream, SurfaceRegistrySnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff,
-    WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState, bind_service_socket,
-    connect_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line,
-    session_artifact_path,
+    WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState, accel::global_accel_policy,
+    bind_service_socket, connect_service_socket, ensure_runtime_dir, now_unix_timestamp,
+    read_json_line, send_json_line, session_artifact_path,
 };
 
 fn run_wire_headless_test() -> Result<()> {
@@ -179,7 +179,7 @@ async fn main() -> Result<()> {
     );
     println!("{}", banner.render());
 
-    let vulkan = if config.use_vulkan {
+    let vulkan = if config.use_vulkan && global_accel_policy().prefers_vulkan() {
         let backend = VulkanBackend::new(VulkanBackendConfig::default());
         let caps = backend.initialize();
         println!(

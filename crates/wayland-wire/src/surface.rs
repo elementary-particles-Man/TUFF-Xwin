@@ -43,6 +43,16 @@ pub struct SurfaceState {
     pub input_region: Option<WaylandObjectId>,
 }
 
+impl SurfaceState {
+    pub fn snapshot_width_hint(&self) -> Option<u32> {
+        self.damage.iter().map(|rect| rect.width).max()
+    }
+
+    pub fn snapshot_height_hint(&self) -> Option<u32> {
+        self.damage.iter().map(|rect| rect.height).max()
+    }
+}
+
 pub struct SurfaceManager {
     pub surfaces: HashMap<WaylandObjectId, SurfaceInstance>,
     pub regions: HashMap<WaylandObjectId, RegionState>,

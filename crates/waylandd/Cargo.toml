@@ -11,5 +11,5 @@ byteorder = "1.5"
 serde_json.workspace = true
 waybroker-common.workspace = true
 wayland-wire = { path = "../wayland-wire" }
-vulkan-backend = { path = "../vulkan-backend" }
+vulkan-backend.workspace = true
 tokio = { version = "1.0", features = ["full"] }

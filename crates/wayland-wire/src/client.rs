@@ -9,12 +9,13 @@ use std::path::Path;
 
 pub struct WireFakeClient {
     stream: UnixStream,
+    recv_buffer: Vec<u8>,
 }
 
 impl WireFakeClient {
     pub fn connect<P: AsRef<Path>>(path: P) -> Result<Self> {
         let stream = UnixStream::connect(path)?;
-        Ok(Self { stream })
+        Ok(Self { stream, recv_buffer: Vec::with_capacity(4096) })
     }
 
     pub fn send_message(&mut self, message: &WaylandMessage) -> Result<()> {
@@ -24,9 +25,9 @@ impl WireFakeClient {
     }
 
     pub fn receive_events(&mut self) -> Result<Vec<WaylandMessage>> {
-        let mut buffer = vec![0u8; 4096];
+        self.recv_buffer.resize(4096, 0);
         self.stream.set_read_timeout(Some(std::time::Duration::from_millis(100)))?;
-        let n = match self.stream.read(&mut buffer) {
+        let n = match self.stream.read(&mut self.recv_buffer) {
             Ok(n) => n,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(Vec::new()),
             Err(e) => return Err(WireError::Io(e)),
@@ -36,10 +37,10 @@ impl WireFakeClient {
             return Err(WireError::ConnectionClosed);
         }
 
-        let mut events = Vec::new();
+        let mut events = Vec::with_capacity(4);
         let mut consumed = 0;
         while consumed < n {
-            match decode_message(&buffer[consumed..n]) {
+            match decode_message(&self.recv_buffer[consumed..n]) {
                 Ok(msg) => {
                     consumed += msg.header.size as usize;
                     events.push(msg);

@@ -1,7 +1,9 @@
+pub mod accel;
 mod ipc;
 mod profile;
 mod transport;
 
+pub use accel::{AccelPolicy, SimdFlavor};
 pub use ipc::{
     CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget,
     ForeignToplevelHandle, HealthState, ImeBridgeMode, ImeCommand, ImeEvent, ImeStatus,

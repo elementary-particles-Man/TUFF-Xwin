@@ -1,3 +1,4 @@
+pub mod accel;
 pub mod args;
 pub mod client;
 pub mod codec;
@@ -14,6 +15,7 @@ pub mod input_method;
 pub mod layer_shell;
 pub mod output;
 pub mod output_management;
+pub mod pixel_ops;
 pub mod pointer_constraints;
 pub mod presentation;
 pub mod protocol;

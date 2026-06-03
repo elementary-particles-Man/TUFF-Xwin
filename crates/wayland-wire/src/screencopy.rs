@@ -1,8 +1,38 @@
 use crate::{Result, WaylandObjectId, WireError};
 use std::collections::HashMap;
+use std::slice;
+
+#[derive(Debug, Clone, Default)]
+pub struct CaptureScratch {
+    pixels: Vec<u32>,
+}
+
+impl CaptureScratch {
+    pub fn prepare_pixels(&mut self, pixel_count: usize) -> &mut [u32] {
+        if self.pixels.capacity() < pixel_count {
+            self.pixels.reserve_exact(pixel_count - self.pixels.capacity());
+        }
+
+        self.pixels.resize(pixel_count, 0);
+        &mut self.pixels
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { slice::from_raw_parts(self.pixels.as_ptr() as *const u8, self.pixels.len() * 4) }
+    }
+
+    pub fn clear(&mut self) {
+        self.pixels.clear();
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.pixels.capacity()
+    }
+}
 
 pub struct ScreencopyManager {
     pub frames: HashMap<WaylandObjectId, ScreencopyFrameState>,
+    pub scratch: CaptureScratch,
 }
 
 #[derive(Debug, Clone)]
@@ -12,11 +42,12 @@ pub struct ScreencopyFrameState {
     pub region: Option<(i32, i32, i32, i32)>,
     pub buffer_id: Option<WaylandObjectId>,
     pub copied: bool,
+    pub scratch: CaptureScratch,
 }
 
 impl ScreencopyManager {
     pub fn new() -> Self {
-        Self { frames: HashMap::new() }
+        Self { frames: HashMap::new(), scratch: CaptureScratch::default() }
     }
 
     pub fn capture_output(
@@ -33,6 +64,7 @@ impl ScreencopyManager {
                 region: None,
                 buffer_id: None,
                 copied: false,
+                scratch: CaptureScratch::default(),
             },
         );
     }
@@ -58,6 +90,7 @@ impl ScreencopyManager {
                 region: Some((x, y, w, h)),
                 buffer_id: None,
                 copied: false,
+                scratch: CaptureScratch::default(),
             },
         );
         Ok(())

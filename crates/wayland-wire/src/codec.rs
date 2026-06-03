@@ -32,7 +32,7 @@ pub fn decode_arguments(
     spec: &MessageSpec,
     total_fds: Option<usize>,
 ) -> Result<Vec<WireArg>> {
-    let mut args = Vec::new();
+    let mut args = Vec::with_capacity(spec.args.len());
     let mut offset = 0;
     let mut fd_count = 0;
 
@@ -97,7 +97,8 @@ pub fn decode_arguments(
 }
 
 pub fn encode_message(message: &WaylandMessage) -> Result<Vec<u8>> {
-    let mut out = vec![0u8; 8];
+    let mut out = Vec::with_capacity(8 + message.payload.len());
+    out.resize(8, 0);
     LittleEndian::write_u32(&mut out[0..4], message.header.object_id.0);
     let word1 = ((message.header.size as u32) << 16) | (message.header.opcode.0 as u32);
     LittleEndian::write_u32(&mut out[4..8], word1);
@@ -111,7 +112,7 @@ pub fn encode_event(
     args: &[WireArg],
     _registry: &WireObjectRegistry,
 ) -> Result<WaylandMessage> {
-    let mut payload = Vec::new();
+    let mut payload = Vec::with_capacity(estimate_payload_capacity(args));
     for arg in args {
         match arg {
             WireArg::Int(v) => payload.extend_from_slice(&v.to_le_bytes()),
@@ -129,4 +130,24 @@ pub fn encode_event(
         }
     }
     Ok(WaylandMessage::new(object_id, opcode, payload))
+}
+
+fn estimate_payload_capacity(args: &[WireArg]) -> usize {
+    args.iter()
+        .map(|arg| match arg {
+            WireArg::Int(_)
+            | WireArg::Uint(_)
+            | WireArg::Fixed(_)
+            | WireArg::Object(_)
+            | WireArg::NewId(_)
+            | WireArg::Fd(_)
+            | WireArg::AncillaryFd => 4,
+            WireArg::String(s) => 4 + align4(s.len() + 1),
+            WireArg::Array(a) => 4 + align4(a.len()),
+        })
+        .sum()
+}
+
+const fn align4(value: usize) -> usize {
+    (value + 3) & !3
 }

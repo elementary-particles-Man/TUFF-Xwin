@@ -47,6 +47,11 @@ P15 は TUFF-Xwin の Wayland wire parity ラインにおける最終監査フ�
 - `cargo test --manifest-path crates/wayland-wire-harness/Cargo.toml`
 - `git diff --check`
 
+## P15 後の性能リファイン
+
+P15 の最終監査は変更済みであり、この後の性能リファインは別ブランチで進めます。
+その際も新しい Wayland protocol 機能は追加せず、portable fallback を維持します。
+
 ## 補足
 
 optional isolated harness は `libwayland-client` が存在する場合にのみ使い、`wl_display_connect(NULL)` は使いません。
