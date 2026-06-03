@@ -14,6 +14,15 @@ const FRACTIONAL_SCALE_XML: &str =
     include_str!("../../../protocols/staging/fractional-scale/fractional-scale-v1.xml");
 const XDG_DECORATION_XML: &str =
     include_str!("../../../protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml");
+const LAYER_SHELL_XML: &str =
+    include_str!("../../../protocols/unstable/wlr-layer-shell/wlr-layer-shell-unstable-v1.xml");
+const IDLE_INHIBIT_XML: &str =
+    include_str!("../../../protocols/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml");
+const RELATIVE_POINTER_XML: &str =
+    include_str!("../../../protocols/unstable/relative-pointer/relative-pointer-unstable-v1.xml");
+const POINTER_CONSTRAINTS_XML: &str = include_str!(
+    "../../../protocols/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml"
+);
 
 static CORE_SPEC: OnceLock<ProtocolSpec> = OnceLock::new();
 
@@ -117,6 +126,36 @@ pub fn p12_protocol_spec() -> &'static ProtocolSpec {
     })
 }
 
+static P13_SPEC: OnceLock<ProtocolSpec> = OnceLock::new();
+
+pub fn p13_protocol_spec() -> &'static ProtocolSpec {
+    P13_SPEC.get_or_init(|| {
+        let mut core = p12_protocol_spec().clone();
+        let layer_shell =
+            ProtocolSpec::parse(LAYER_SHELL_XML).expect("failed to parse layer-shell");
+        let idle_inhibit =
+            ProtocolSpec::parse(IDLE_INHIBIT_XML).expect("failed to parse idle-inhibit");
+        let relative_pointer =
+            ProtocolSpec::parse(RELATIVE_POINTER_XML).expect("failed to parse relative-pointer");
+        let pointer_constraints = ProtocolSpec::parse(POINTER_CONSTRAINTS_XML)
+            .expect("failed to parse pointer-constraints");
+
+        for (name, iface) in layer_shell.interfaces {
+            core.interfaces.insert(name, iface);
+        }
+        for (name, iface) in idle_inhibit.interfaces {
+            core.interfaces.insert(name, iface);
+        }
+        for (name, iface) in relative_pointer.interfaces {
+            core.interfaces.insert(name, iface);
+        }
+        for (name, iface) in pointer_constraints.interfaces {
+            core.interfaces.insert(name, iface);
+        }
+        core
+    })
+}
+
 #[cfg(test)]
 mod p12_tests {
     use super::*;
@@ -128,5 +167,14 @@ mod p12_tests {
         assert!(spec.interfaces.contains_key("zwlr_output_manager_v1"));
         assert!(spec.interfaces.contains_key("zwlr_screencopy_manager_v1"));
         assert!(spec.interfaces.contains_key("ext_image_copy_capture_manager_v1"));
+    }
+
+    #[test]
+    fn test_p13_protocol_lookup() {
+        let spec = p13_protocol_spec();
+        assert!(spec.interfaces.contains_key("zwlr_layer_shell_v1"));
+        assert!(spec.interfaces.contains_key("zwp_idle_inhibit_manager_v1"));
+        assert!(spec.interfaces.contains_key("zwp_relative_pointer_manager_v1"));
+        assert!(spec.interfaces.contains_key("zwp_pointer_constraints_v1"));
     }
 }

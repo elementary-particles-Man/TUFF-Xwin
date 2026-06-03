@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="zwp_idle_inhibit_unstable_v1">
+  <interface name="zwp_idle_inhibit_manager_v1" version="1">
+    <request name="create_inhibitor">
+      <arg name="new_id" type="new_id" interface="zwp_idle_inhibitor_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+    <request name="destroy"/>
+  </interface>
+
+  <interface name="zwp_idle_inhibitor_v1" version="1">
+    <request name="destroy"/>
+  </interface>
+</protocol>

@@ -1,5 +1,24 @@
-use crate::WaylandObjectId;
+use crate::{Result, WaylandObjectId, WireError};
 use std::collections::HashMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SurfaceRoleKind {
+    XdgSurface,
+    LayerSurface,
+    Subsurface,
+    Popup,
+}
+
+impl SurfaceRoleKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::XdgSurface => "xdg_surface",
+            Self::LayerSurface => "layer_surface",
+            Self::Subsurface => "wl_subsurface",
+            Self::Popup => "xdg_popup",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct RegionState {
@@ -27,6 +46,7 @@ pub struct SurfaceState {
 pub struct SurfaceManager {
     pub surfaces: HashMap<WaylandObjectId, SurfaceInstance>,
     pub regions: HashMap<WaylandObjectId, RegionState>,
+    pub roles: HashMap<WaylandObjectId, SurfaceRoleKind>,
 }
 
 pub struct SurfaceInstance {
@@ -37,7 +57,7 @@ pub struct SurfaceInstance {
 
 impl SurfaceManager {
     pub fn new() -> Self {
-        Self { surfaces: HashMap::new(), regions: HashMap::new() }
+        Self { surfaces: HashMap::new(), regions: HashMap::new(), roles: HashMap::new() }
     }
 
     pub fn create_surface(&mut self, id: WaylandObjectId) {
@@ -60,5 +80,27 @@ impl SurfaceManager {
             surface.current = surface.pending.clone();
             surface.pending.damage.clear();
         }
+    }
+
+    pub fn claim_role(&mut self, id: WaylandObjectId, role: SurfaceRoleKind) -> Result<()> {
+        if let Some(existing) = self.roles.get(&id) {
+            return Err(WireError::ProtocolError(format!(
+                "wl_surface {} already has role {}",
+                id.0,
+                existing.as_str()
+            )));
+        }
+
+        self.roles.insert(id, role);
+        Ok(())
+    }
+
+    pub fn release_role(&mut self, id: WaylandObjectId) {
+        self.roles.remove(&id);
+    }
+
+    pub fn destroy_surface(&mut self, id: WaylandObjectId) {
+        self.surfaces.remove(&id);
+        self.roles.remove(&id);
     }
 }

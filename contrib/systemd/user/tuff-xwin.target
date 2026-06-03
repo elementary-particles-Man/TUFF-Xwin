@@ -1,3 +1,4 @@
 [Unit]
 Description=TUFF-Xwin user session target
-Wants=tuff-xwin-displayd.service tuff-xwin-waylandd.service tuff-xwin-lockd.service tuff-xwin-watchdog.service tuff-xwin-sessiond.service
+Requires=tuff-xwin-sessiond.service
+Wants=tuff-xwin-sessiond.service

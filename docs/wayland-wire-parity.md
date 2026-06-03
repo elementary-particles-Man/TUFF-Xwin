@@ -98,3 +98,11 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - **zwlr_screencopy_manager_v1 / ext_image_copy_capture_v1**: Implemented frame buffer copy negotiation, region-based capture, and damage feedback via `FakeCaptureBackend`.
 - **Validation**: Added E2E tests for output configuration handshakes and screen capture frame loops over isolated sockets.
 - **Strict Protocol Compliance**: Enforced rejection for duplicate configuration heads, invalid bounds, and operations on destroyed capture frames.
+
+## Phase 13: Layer/Input Control Parity (Current)
+- **wlr-layer-shell-v1**: Added wire state machine for layer surfaces, configure/ack lifecycle, anchor/margin/exclusive-zone layout calculation, and role conflict rejection.
+- **idle-inhibit-v1**: Added wire state machine for idle inhibitor creation and cleanup with a fake idle backend flag only inside the repository.
+- **zwp_relative_pointer_v1**: Added wire state machine for relative motion delivery using fake input injection only inside the repository.
+- **zwp_pointer_constraints_v1**: Added wire state machine for lock/confine lifecycle, region updates, and cleanup on surface destroy or pointer release.
+- **Validation**: P13 is exercised through isolated Unix socket tests and repo-local fake input/idle backends only.
+- **Boundary**: No running OS idle settings, no real input devices, and no real Wayland session sockets are touched.

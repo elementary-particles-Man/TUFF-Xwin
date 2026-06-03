@@ -1,14 +1,18 @@
 use crate::{
     data_device::DataDeviceManager,
     fractional_scale::FractionalScaleManager,
+    idle_inhibit::IdleInhibitState,
     image_copy_capture::ImageCopyCaptureManager,
     ime_backend::{FakeImeBackend, ImeBackend},
     input::SeatManager,
     input_method::InputMethodManager,
+    layer_shell::LayerShellState,
     output::OutputManager,
     output_management::OutputManagementManager,
+    pointer_constraints::PointerConstraintsState,
     presentation::{PresentationClock, PresentationManager, SystemPresentationClock},
     registry::WireObjectRegistry,
+    relative_pointer::RelativePointerState,
     screencopy::ScreencopyManager,
     shm::ShmManager,
     subsurface::SubcompositorManager,
@@ -49,6 +53,10 @@ pub struct HeadlessWireCore {
     pub output_management: OutputManagementManager,
     pub screencopy: ScreencopyManager,
     pub image_copy_capture: ImageCopyCaptureManager,
+    pub layer_shell: LayerShellState,
+    pub idle_inhibit: IdleInhibitState,
+    pub relative_pointer: RelativePointerState,
+    pub pointer_constraints: PointerConstraintsState,
     globals: Vec<WireGlobal>,
     events_out: Vec<WaylandMessage>,
 }
@@ -76,6 +84,10 @@ impl Default for HeadlessWireCore {
             output_management: OutputManagementManager::new(),
             screencopy: ScreencopyManager::new(),
             image_copy_capture: ImageCopyCaptureManager::new(),
+            layer_shell: LayerShellState::new(),
+            idle_inhibit: IdleInhibitState::new(),
+            relative_pointer: RelativePointerState::new(),
+            pointer_constraints: PointerConstraintsState::new(),
             globals: Vec::new(),
             events_out: Vec::new(),
         };
@@ -133,6 +145,26 @@ impl Default for HeadlessWireCore {
             interface: "ext_image_copy_capture_manager_v1".into(),
             version: 1,
         });
+        core.globals.push(WireGlobal {
+            name: 17,
+            interface: "zwlr_layer_shell_v1".into(),
+            version: 4,
+        });
+        core.globals.push(WireGlobal {
+            name: 18,
+            interface: "zwp_idle_inhibit_manager_v1".into(),
+            version: 1,
+        });
+        core.globals.push(WireGlobal {
+            name: 19,
+            interface: "zwp_relative_pointer_manager_v1".into(),
+            version: 1,
+        });
+        core.globals.push(WireGlobal {
+            name: 20,
+            interface: "zwp_pointer_constraints_v1".into(),
+            version: 1,
+        });
 
         core
     }
@@ -152,7 +184,7 @@ impl HeadlessWireCore {
         fd_queue: &mut Vec<crate::WireOwnedFd>,
     ) -> Result<DispatchResult> {
         let obj = self.registry.get_object(message.header.object_id)?;
-        let spec = crate::generated::p12_protocol_spec();
+        let spec = crate::generated::p13_protocol_spec();
         let iface_spec = spec.interfaces.get(&obj.interface).ok_or_else(|| {
             WireError::ProtocolError(format!("unknown interface: {}", obj.interface))
         })?;
@@ -338,6 +370,9 @@ impl HeadlessWireCore {
             ("wl_registry", 0) => self.handle_registry_bind(message)?,
             ("wl_compositor", 0) => self.handle_create_surface(message)?,
             ("wl_compositor", 1) => self.handle_create_region(message)?,
+            ("wl_seat", 0) => self.handle_seat_get_pointer(message)?,
+            ("wl_seat", 1) => self.handle_seat_get_keyboard(message)?,
+            ("wl_pointer", 1) => self.handle_wl_pointer_release(message)?,
             ("wl_surface", 0) => self.handle_surface_destroy(message)?,
             ("wl_surface", 1) => self.handle_surface_attach(message)?,
             ("wl_surface", 2) => self.handle_surface_damage(message)?,
@@ -356,6 +391,41 @@ impl HeadlessWireCore {
             ("xdg_toplevel", 1) => self.handle_xdg_toplevel_set_parent(message)?,
             ("xdg_toplevel", 2) => self.handle_xdg_toplevel_set_title(message, &args)?,
             ("xdg_toplevel", 3) => self.handle_xdg_toplevel_set_app_id(message, &args)?,
+            ("zwlr_layer_shell_v1", 0) => self.handle_get_layer_surface(message)?,
+            ("zwlr_layer_shell_v1", 1) => self.handle_layer_shell_destroy(message)?,
+            ("zwlr_layer_surface_v1", 0) => self.handle_layer_surface_set_size(message)?,
+            ("zwlr_layer_surface_v1", 1) => self.handle_layer_surface_set_anchor(message)?,
+            ("zwlr_layer_surface_v1", 2) => {
+                self.handle_layer_surface_set_exclusive_zone(message)?
+            }
+            ("zwlr_layer_surface_v1", 3) => self.handle_layer_surface_set_margin(message)?,
+            ("zwlr_layer_surface_v1", 4) => {
+                self.handle_layer_surface_set_keyboard_interactivity(message)?
+            }
+            ("zwlr_layer_surface_v1", 5) => self.handle_layer_surface_get_popup(message)?,
+            ("zwlr_layer_surface_v1", 6) => self.handle_layer_surface_ack_configure(message)?,
+            ("zwlr_layer_surface_v1", 7) => self.handle_layer_surface_set_layer(message)?,
+            ("zwlr_layer_surface_v1", 8) => self.handle_layer_surface_destroy(message)?,
+            ("zwp_idle_inhibit_manager_v1", 0) => self.handle_idle_inhibit_create(message)?,
+            ("zwp_idle_inhibit_manager_v1", 1) => self.handle_idle_inhibit_destroy(message)?,
+            ("zwp_idle_inhibitor_v1", 0) => self.handle_idle_inhibitor_destroy(message)?,
+            ("zwp_relative_pointer_manager_v1", 0) => self.handle_relative_pointer_get(message)?,
+            ("zwp_relative_pointer_manager_v1", 1) => {
+                self.handle_relative_pointer_manager_destroy(message)?
+            }
+            ("zwp_relative_pointer_v1", 0) => self.handle_relative_pointer_destroy(message)?,
+            ("zwp_pointer_constraints_v1", 0) => self.handle_lock_pointer(message)?,
+            ("zwp_pointer_constraints_v1", 1) => self.handle_confine_pointer(message)?,
+            ("zwp_pointer_constraints_v1", 2) => {
+                self.handle_pointer_constraints_destroy(message)?
+            }
+            ("zwp_locked_pointer_v1", 0) => {
+                self.handle_locked_pointer_set_cursor_position_hint(message)?
+            }
+            ("zwp_locked_pointer_v1", 1) => self.handle_locked_pointer_set_region(message)?,
+            ("zwp_locked_pointer_v1", 2) => self.handle_locked_pointer_destroy(message)?,
+            ("zwp_confined_pointer_v1", 0) => self.handle_confined_pointer_set_region(message)?,
+            ("zwp_confined_pointer_v1", 1) => self.handle_confined_pointer_destroy(message)?,
             _ => {
                 return Err(WireError::ProtocolError(format!(
                     "unhandled opcode {} for {}",
@@ -418,6 +488,7 @@ impl HeadlessWireCore {
         if global.interface == "wl_shm" {
             self.send_shm_formats(new_id);
         } else if global.interface == "wl_seat" {
+            self.input.create_seat(new_id, "seat0");
             self.send_seat_capabilities(new_id);
         } else if global.interface == "xdg_wm_base" {
             self.send_xdg_ping(new_id);
@@ -444,6 +515,8 @@ impl HeadlessWireCore {
         }
 
         self.registry.register_client_object(id, "xdg_surface", 6)?;
+        self.registry.get_object(wl_surf_id)?;
+        self.surfaces.claim_role(wl_surf_id, crate::surface::SurfaceRoleKind::XdgSurface)?;
         self.xdg_shell.create_xdg_surface(id, wl_surf_id);
         Ok(())
     }
@@ -453,7 +526,9 @@ impl HeadlessWireCore {
     }
 
     fn handle_xdg_surface_destroy(&mut self, message: WaylandMessage) -> Result<()> {
-        self.xdg_shell.surfaces.remove(&message.header.object_id);
+        if let Some(state) = self.xdg_shell.surfaces.remove(&message.header.object_id) {
+            self.surfaces.release_role(state.wl_surface_id);
+        }
         self.registry.destroy_object(message.header.object_id)
     }
 
@@ -533,7 +608,11 @@ impl HeadlessWireCore {
         }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
         self.registry.register_client_object(id, "wl_pointer", 7)?;
-        self.input.get_pointer(message.header.object_id, id)
+        self.input.get_pointer(message.header.object_id, id)?;
+        if let Some(surface_id) = self.surfaces.surfaces.keys().copied().max() {
+            let _ = self.input.set_pointer_focus(id, Some(surface_id), 0.0, 0.0);
+        }
+        Ok(())
     }
 
     fn handle_seat_get_keyboard(&mut self, message: WaylandMessage) -> Result<()> {
@@ -593,6 +672,16 @@ impl HeadlessWireCore {
             self.presentation.destroy(fid);
         }
 
+        for event in self.layer_shell.surface_destroyed(surface_id) {
+            self.events_out.push(event);
+        }
+        for inhibitor_id in self.idle_inhibit.surface_destroyed(surface_id) {
+            self.registry.destroy_object(inhibitor_id)?;
+        }
+        for event in self.pointer_constraints.surface_destroyed(surface_id) {
+            self.events_out.push(event);
+        }
+        self.surfaces.destroy_surface(surface_id);
         self.registry.destroy_object(surface_id)
     }
 
@@ -2059,5 +2148,306 @@ impl HeadlessWireCore {
     fn handle_image_copy_capture_frame_destroy(&mut self, message: WaylandMessage) -> Result<()> {
         self.image_copy_capture.destroy_frame(message.header.object_id);
         self.registry.destroy_object(message.header.object_id)
+    }
+}
+
+impl HeadlessWireCore {
+    fn handle_wl_pointer_release(&mut self, message: WaylandMessage) -> Result<()> {
+        let pointer_id = message.header.object_id;
+        let _ = self.relative_pointer.pointer_released(pointer_id);
+        for event in self.pointer_constraints.pointer_released(pointer_id) {
+            self.events_out.push(event);
+        }
+        self.input.release_pointer(pointer_id)?;
+        self.registry.destroy_object(pointer_id)
+    }
+
+    fn handle_get_layer_surface(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 20 {
+            return Err(WireError::Incomplete);
+        }
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let surface_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        let output_id_raw = LittleEndian::read_u32(&message.payload[8..12]);
+        let layer = LittleEndian::read_u32(&message.payload[12..16]);
+        let mut offset = 16;
+        let namespace = crate::args::decode_string(&message.payload, &mut offset)?;
+        let output_id =
+            if output_id_raw == 0 { None } else { Some(WaylandObjectId(output_id_raw)) };
+
+        self.registry.register_client_object(id, "zwlr_layer_surface_v1", 4)?;
+        self.registry.get_object(surface_id)?;
+        let event = self.layer_shell.create_layer_surface(
+            id,
+            surface_id,
+            output_id,
+            layer,
+            namespace,
+            &mut self.surfaces,
+            &self.output,
+        )?;
+        self.events_out.push(event);
+        Ok(())
+    }
+
+    fn handle_layer_shell_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.layer_shell.destroy(message.header.object_id, &mut self.surfaces)?;
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_layer_surface_set_size(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 8 {
+            return Err(WireError::Incomplete);
+        }
+        let width = LittleEndian::read_u32(&message.payload[0..4]);
+        let height = LittleEndian::read_u32(&message.payload[4..8]);
+        self.layer_shell.set_size(message.header.object_id, width, height, &self.output)
+    }
+
+    fn handle_layer_surface_set_anchor(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
+        let anchor = LittleEndian::read_u32(&message.payload[0..4]);
+        self.layer_shell.set_anchor(message.header.object_id, anchor, &self.output)
+    }
+
+    fn handle_layer_surface_set_exclusive_zone(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
+        let zone = LittleEndian::read_i32(&message.payload[0..4]);
+        self.layer_shell.set_exclusive_zone(message.header.object_id, zone, &self.output)
+    }
+
+    fn handle_layer_surface_set_margin(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 16 {
+            return Err(WireError::Incomplete);
+        }
+        let top = LittleEndian::read_i32(&message.payload[0..4]);
+        let right = LittleEndian::read_i32(&message.payload[4..8]);
+        let bottom = LittleEndian::read_i32(&message.payload[8..12]);
+        let left = LittleEndian::read_i32(&message.payload[12..16]);
+        self.layer_shell.set_margin(
+            message.header.object_id,
+            top,
+            right,
+            bottom,
+            left,
+            &self.output,
+        )
+    }
+
+    fn handle_layer_surface_set_keyboard_interactivity(
+        &mut self,
+        message: WaylandMessage,
+    ) -> Result<()> {
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
+        let value = LittleEndian::read_u32(&message.payload[0..4]);
+        self.layer_shell.set_keyboard_interactivity(message.header.object_id, value)
+    }
+
+    fn handle_layer_surface_get_popup(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 8 {
+            return Err(WireError::Incomplete);
+        }
+        let new_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let positioner_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        self.registry.register_client_object(new_id, "xdg_popup", 6)?;
+        self.registry.get_object(positioner_id)?;
+        self.layer_shell.get_popup(new_id, message.header.object_id, positioner_id)
+    }
+
+    fn handle_layer_surface_ack_configure(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
+        let serial = LittleEndian::read_u32(&message.payload[0..4]);
+        self.layer_shell.ack_configure(message.header.object_id, serial)
+    }
+
+    fn handle_layer_surface_set_layer(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
+        let layer = LittleEndian::read_u32(&message.payload[0..4]);
+        self.layer_shell.set_layer(message.header.object_id, layer)
+    }
+
+    fn handle_layer_surface_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.layer_shell.destroy(message.header.object_id, &mut self.surfaces)?;
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_idle_inhibit_create(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 8 {
+            return Err(WireError::Incomplete);
+        }
+        let new_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let surface_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        self.registry.register_client_object(new_id, "zwp_idle_inhibitor_v1", 1)?;
+        self.registry.get_object(surface_id)?;
+        self.idle_inhibit.create_inhibitor(new_id, surface_id);
+        Ok(())
+    }
+
+    fn handle_idle_inhibit_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_idle_inhibitor_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.idle_inhibit.destroy_inhibitor(message.header.object_id)?;
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_relative_pointer_get(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 8 {
+            return Err(WireError::Incomplete);
+        }
+        let new_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let pointer_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        self.registry.register_client_object(new_id, "zwp_relative_pointer_v1", 1)?;
+        self.registry.get_object(pointer_id)?;
+        self.relative_pointer.create_relative_pointer(new_id, pointer_id)
+    }
+
+    fn handle_relative_pointer_manager_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_relative_pointer_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.relative_pointer.destroy(message.header.object_id)?;
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_lock_pointer(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 20 {
+            return Err(WireError::Incomplete);
+        }
+        let new_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let surface_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        let pointer_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[8..12]));
+        let region_raw = LittleEndian::read_u32(&message.payload[12..16]);
+        let lifetime = crate::pointer_constraints::PointerConstraintLifetime::from_raw(
+            LittleEndian::read_u32(&message.payload[16..20]),
+        )?;
+        self.registry.register_client_object(new_id, "zwp_locked_pointer_v1", 1)?;
+        self.registry.get_object(surface_id)?;
+        self.registry.get_object(pointer_id)?;
+        if let Some(pointer) = self.input.pointers.get(&pointer_id) {
+            if pointer.focus_surface_id != Some(surface_id) {
+                return Err(WireError::ProtocolError(
+                    "pointer focus is required for pointer lock".into(),
+                ));
+            }
+        }
+        let region_id = if region_raw == 0 { None } else { Some(WaylandObjectId(region_raw)) };
+        if let Some(region_id) = region_id {
+            self.registry.get_object(region_id)?;
+        }
+        let event = self
+            .pointer_constraints
+            .create_locked(new_id, surface_id, pointer_id, region_id, lifetime)?;
+        self.events_out.push(event);
+        Ok(())
+    }
+
+    fn handle_confine_pointer(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 20 {
+            return Err(WireError::Incomplete);
+        }
+        let new_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let surface_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[4..8]));
+        let pointer_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[8..12]));
+        let region_raw = LittleEndian::read_u32(&message.payload[12..16]);
+        let lifetime = crate::pointer_constraints::PointerConstraintLifetime::from_raw(
+            LittleEndian::read_u32(&message.payload[16..20]),
+        )?;
+        self.registry.register_client_object(new_id, "zwp_confined_pointer_v1", 1)?;
+        self.registry.get_object(surface_id)?;
+        self.registry.get_object(pointer_id)?;
+        if let Some(pointer) = self.input.pointers.get(&pointer_id) {
+            if pointer.focus_surface_id != Some(surface_id) {
+                return Err(WireError::ProtocolError(
+                    "pointer focus is required for pointer confinement".into(),
+                ));
+            }
+        }
+        let region_id = if region_raw == 0 { None } else { Some(WaylandObjectId(region_raw)) };
+        if let Some(region_id) = region_id {
+            self.registry.get_object(region_id)?;
+        }
+        let event = self
+            .pointer_constraints
+            .create_confined(new_id, surface_id, pointer_id, region_id, lifetime)?;
+        self.events_out.push(event);
+        Ok(())
+    }
+
+    fn handle_pointer_constraints_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_locked_pointer_set_cursor_position_hint(
+        &mut self,
+        message: WaylandMessage,
+    ) -> Result<()> {
+        if message.payload.len() < 8 {
+            return Err(WireError::Incomplete);
+        }
+        let x = LittleEndian::read_i32(&message.payload[0..4]);
+        let y = LittleEndian::read_i32(&message.payload[4..8]);
+        self.pointer_constraints.set_cursor_position_hint(message.header.object_id, x, y)
+    }
+
+    fn handle_locked_pointer_set_region(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
+        let region_raw = LittleEndian::read_u32(&message.payload[0..4]);
+        let region = if region_raw == 0 { None } else { Some(WaylandObjectId(region_raw)) };
+        if let Some(region_id) = region {
+            self.registry.get_object(region_id)?;
+        }
+        self.pointer_constraints.set_region(message.header.object_id, region)
+    }
+
+    fn handle_locked_pointer_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        let event = self.pointer_constraints.destroy_locked(message.header.object_id)?;
+        self.events_out.push(event);
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_confined_pointer_set_region(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
+        let region_raw = LittleEndian::read_u32(&message.payload[0..4]);
+        let region = if region_raw == 0 { None } else { Some(WaylandObjectId(region_raw)) };
+        if let Some(region_id) = region {
+            self.registry.get_object(region_id)?;
+        }
+        self.pointer_constraints.set_region(message.header.object_id, region)
+    }
+
+    fn handle_confined_pointer_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        let event = self.pointer_constraints.destroy_confined(message.header.object_id)?;
+        self.events_out.push(event);
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    pub fn inject_relative_pointer_motion(
+        &mut self,
+        pointer_id: WaylandObjectId,
+        time_usec: u64,
+        dx: f64,
+        dy: f64,
+        dx_unaccel: f64,
+        dy_unaccel: f64,
+    ) -> Vec<WaylandMessage> {
+        self.relative_pointer
+            .inject_relative_motion(pointer_id, time_usec, dx, dy, dx_unaccel, dy_unaccel)
     }
 }

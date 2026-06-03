@@ -1,4 +1,4 @@
-use crate::WaylandObjectId;
+use crate::{surface::Rect, WaylandObjectId};
 use std::collections::HashMap;
 
 pub struct OutputManager {
@@ -36,5 +36,14 @@ impl OutputManager {
                 refresh_nsec: 16666666, // 60Hz
             },
         );
+    }
+
+    pub fn geometry_rect(&self, id: WaylandObjectId) -> Option<Rect> {
+        self.outputs.get(&id).map(|output| Rect {
+            x: output.x,
+            y: output.y,
+            width: output.width.max(0) as u32,
+            height: output.height.max(0) as u32,
+        })
     }
 }

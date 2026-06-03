@@ -62,6 +62,29 @@ impl SeatManager {
         self.keyboards.insert(new_id, KeyboardState { seat_id, focus_surface_id: None });
         Ok(())
     }
+
+    pub fn release_pointer(&mut self, pointer_id: WaylandObjectId) -> Result<()> {
+        if self.pointers.remove(&pointer_id).is_some() {
+            Ok(())
+        } else {
+            Err(WireError::InvalidObjectId(pointer_id.0))
+        }
+    }
+
+    pub fn set_pointer_focus(
+        &mut self,
+        pointer_id: WaylandObjectId,
+        surface_id: Option<WaylandObjectId>,
+        x: f64,
+        y: f64,
+    ) -> Result<()> {
+        let pointer =
+            self.pointers.get_mut(&pointer_id).ok_or(WireError::InvalidObjectId(pointer_id.0))?;
+        pointer.focus_surface_id = surface_id;
+        pointer.x = x;
+        pointer.y = y;
+        Ok(())
+    }
 }
 
 pub enum FakeInputEvent {

@@ -868,3 +868,341 @@ impl WireFakeClient {
         self.send_message(&msg)
     }
 }
+
+impl WireFakeClient {
+    pub fn bind_layer_shell(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("zwlr_layer_shell_v1", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        self.send_message(&WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p))
+    }
+
+    pub fn bind_idle_inhibit_manager(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("zwp_idle_inhibit_manager_v1", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        self.send_message(&WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p))
+    }
+
+    pub fn bind_relative_pointer_manager(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("zwp_relative_pointer_manager_v1", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        self.send_message(&WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p))
+    }
+
+    pub fn bind_pointer_constraints(
+        &mut self,
+        registry_id: u32,
+        name: u32,
+        version: u32,
+        new_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string("zwp_pointer_constraints_v1", &mut p);
+        p.extend_from_slice(&version.to_le_bytes());
+        p.extend_from_slice(&new_id.to_le_bytes());
+        self.send_message(&WaylandMessage::new(WaylandObjectId(registry_id), WaylandOpcode(0), p))
+    }
+
+    pub fn layer_shell_get_layer_surface(
+        &mut self,
+        layer_shell_id: u32,
+        new_id: u32,
+        surface_id: u32,
+        output_id: Option<u32>,
+        layer: u32,
+        namespace: &str,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&surface_id.to_le_bytes());
+        p.extend_from_slice(&output_id.unwrap_or(0).to_le_bytes());
+        p.extend_from_slice(&layer.to_le_bytes());
+        crate::args::encode_string(namespace, &mut p);
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(layer_shell_id),
+            WaylandOpcode(0),
+            p,
+        ))
+    }
+
+    pub fn layer_surface_set_size(
+        &mut self,
+        layer_surface_id: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&width.to_le_bytes());
+        p.extend_from_slice(&height.to_le_bytes());
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(layer_surface_id),
+            WaylandOpcode(0),
+            p,
+        ))
+    }
+
+    pub fn layer_surface_set_anchor(&mut self, layer_surface_id: u32, anchor: u32) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&anchor.to_le_bytes());
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(layer_surface_id),
+            WaylandOpcode(1),
+            p,
+        ))
+    }
+
+    pub fn layer_surface_set_exclusive_zone(
+        &mut self,
+        layer_surface_id: u32,
+        zone: i32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&zone.to_le_bytes());
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(layer_surface_id),
+            WaylandOpcode(2),
+            p,
+        ))
+    }
+
+    pub fn layer_surface_set_margin(
+        &mut self,
+        layer_surface_id: u32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        left: i32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&top.to_le_bytes());
+        p.extend_from_slice(&right.to_le_bytes());
+        p.extend_from_slice(&bottom.to_le_bytes());
+        p.extend_from_slice(&left.to_le_bytes());
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(layer_surface_id),
+            WaylandOpcode(3),
+            p,
+        ))
+    }
+
+    pub fn layer_surface_set_keyboard_interactivity(
+        &mut self,
+        layer_surface_id: u32,
+        value: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&value.to_le_bytes());
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(layer_surface_id),
+            WaylandOpcode(4),
+            p,
+        ))
+    }
+
+    pub fn layer_surface_get_popup(
+        &mut self,
+        layer_surface_id: u32,
+        new_id: u32,
+        positioner_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&positioner_id.to_le_bytes());
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(layer_surface_id),
+            WaylandOpcode(5),
+            p,
+        ))
+    }
+
+    pub fn layer_surface_ack_configure(
+        &mut self,
+        layer_surface_id: u32,
+        serial: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&serial.to_le_bytes());
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(layer_surface_id),
+            WaylandOpcode(6),
+            p,
+        ))
+    }
+
+    pub fn layer_surface_set_layer(&mut self, layer_surface_id: u32, layer: u32) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&layer.to_le_bytes());
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(layer_surface_id),
+            WaylandOpcode(7),
+            p,
+        ))
+    }
+
+    pub fn layer_surface_destroy(&mut self, layer_surface_id: u32) -> Result<()> {
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(layer_surface_id),
+            WaylandOpcode(8),
+            Vec::new(),
+        ))
+    }
+
+    pub fn idle_inhibit_create_inhibitor(
+        &mut self,
+        manager_id: u32,
+        new_id: u32,
+        surface_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&surface_id.to_le_bytes());
+        self.send_message(&WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(0), p))
+    }
+
+    pub fn idle_inhibitor_destroy(&mut self, inhibitor_id: u32) -> Result<()> {
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(inhibitor_id),
+            WaylandOpcode(0),
+            Vec::new(),
+        ))
+    }
+
+    pub fn relative_pointer_manager_get_relative_pointer(
+        &mut self,
+        manager_id: u32,
+        new_id: u32,
+        pointer_id: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&pointer_id.to_le_bytes());
+        self.send_message(&WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(0), p))
+    }
+
+    pub fn relative_pointer_destroy(&mut self, relative_id: u32) -> Result<()> {
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(relative_id),
+            WaylandOpcode(0),
+            Vec::new(),
+        ))
+    }
+
+    pub fn pointer_constraints_lock_pointer(
+        &mut self,
+        manager_id: u32,
+        new_id: u32,
+        surface_id: u32,
+        pointer_id: u32,
+        region_id: Option<u32>,
+        lifetime: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&surface_id.to_le_bytes());
+        p.extend_from_slice(&pointer_id.to_le_bytes());
+        p.extend_from_slice(&region_id.unwrap_or(0).to_le_bytes());
+        p.extend_from_slice(&lifetime.to_le_bytes());
+        self.send_message(&WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(0), p))
+    }
+
+    pub fn pointer_constraints_confine_pointer(
+        &mut self,
+        manager_id: u32,
+        new_id: u32,
+        surface_id: u32,
+        pointer_id: u32,
+        region_id: Option<u32>,
+        lifetime: u32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&new_id.to_le_bytes());
+        p.extend_from_slice(&surface_id.to_le_bytes());
+        p.extend_from_slice(&pointer_id.to_le_bytes());
+        p.extend_from_slice(&region_id.unwrap_or(0).to_le_bytes());
+        p.extend_from_slice(&lifetime.to_le_bytes());
+        self.send_message(&WaylandMessage::new(WaylandObjectId(manager_id), WaylandOpcode(1), p))
+    }
+
+    pub fn locked_pointer_set_cursor_position_hint(
+        &mut self,
+        locked_id: u32,
+        x: i32,
+        y: i32,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&x.to_le_bytes());
+        p.extend_from_slice(&y.to_le_bytes());
+        self.send_message(&WaylandMessage::new(WaylandObjectId(locked_id), WaylandOpcode(0), p))
+    }
+
+    pub fn locked_pointer_set_region(
+        &mut self,
+        locked_id: u32,
+        region_id: Option<u32>,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&region_id.unwrap_or(0).to_le_bytes());
+        self.send_message(&WaylandMessage::new(WaylandObjectId(locked_id), WaylandOpcode(1), p))
+    }
+
+    pub fn locked_pointer_destroy(&mut self, locked_id: u32) -> Result<()> {
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(locked_id),
+            WaylandOpcode(2),
+            Vec::new(),
+        ))
+    }
+
+    pub fn confined_pointer_set_region(
+        &mut self,
+        confined_id: u32,
+        region_id: Option<u32>,
+    ) -> Result<()> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&region_id.unwrap_or(0).to_le_bytes());
+        self.send_message(&WaylandMessage::new(WaylandObjectId(confined_id), WaylandOpcode(0), p))
+    }
+
+    pub fn confined_pointer_destroy(&mut self, confined_id: u32) -> Result<()> {
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(confined_id),
+            WaylandOpcode(1),
+            Vec::new(),
+        ))
+    }
+
+    pub fn wl_pointer_release(&mut self, pointer_id: u32) -> Result<()> {
+        self.send_message(&WaylandMessage::new(
+            WaylandObjectId(pointer_id),
+            WaylandOpcode(1),
+            Vec::new(),
+        ))
+    }
+}

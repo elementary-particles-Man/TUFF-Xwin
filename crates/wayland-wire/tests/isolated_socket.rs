@@ -4,7 +4,9 @@ use std::thread;
 use tempfile::tempdir;
 use wayland_wire::{
     client::WireFakeClient,
+    core::HeadlessWireCore,
     server::{WireServer, WireServerConfig},
+    WaylandMessage, WaylandObjectId, WaylandOpcode,
 };
 
 #[test]
@@ -357,6 +359,226 @@ fn test_isolated_socket_clipboard_e2e() {
         .seat_selections
         .get(&wayland_wire::WaylandObjectId(5))
         .is_some());
+}
+
+fn make_message(object_id: u32, opcode: u16, payload: Vec<u8>) -> WaylandMessage {
+    WaylandMessage::new(WaylandObjectId(object_id), WaylandOpcode(opcode), payload)
+}
+
+#[test]
+fn test_isolated_socket_layer_idle_pointer_constraints_e2e() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-p13.sock");
+    let server_path = socket_path.clone();
+
+    let server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).expect("failed to create server");
+        server.run_once().expect("server run failed");
+        server
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut client = WireFakeClient::connect(&socket_path).expect("failed to connect");
+
+    client.get_registry(2).unwrap();
+    let mut events = Vec::new();
+    while events.len() < 20 {
+        events.append(&mut client.receive_events().unwrap());
+    }
+
+    client.bind_wl_compositor(2, 1, 4, 3).unwrap();
+    client.bind_wl_seat(2, 3, 7, 5).unwrap();
+    client.bind_layer_shell(2, 17, 4, 6).unwrap();
+    client.bind_idle_inhibit_manager(2, 18, 1, 7).unwrap();
+    client.bind_relative_pointer_manager(2, 19, 1, 8).unwrap();
+    client.bind_pointer_constraints(2, 20, 1, 9).unwrap();
+
+    client.wl_compositor_create_surface(3, 10).unwrap();
+    client.wl_seat_get_pointer(5, 11).unwrap();
+
+    client.layer_shell_get_layer_surface(6, 12, 10, None, 1, "panel").unwrap();
+    let mut layer_events = Vec::new();
+    let serial = loop {
+        layer_events.append(&mut client.receive_events().unwrap());
+        if let Some(event) = layer_events
+            .iter()
+            .find(|event| event.header.object_id.0 == 12 && event.header.opcode.0 == 0)
+        {
+            break byteorder::LittleEndian::read_u32(&event.payload[0..4]);
+        }
+    };
+
+    client.layer_surface_set_anchor(12, 0x0f).unwrap();
+    client.layer_surface_set_margin(12, 4, 8, 4, 8).unwrap();
+    client.layer_surface_set_size(12, 800, 36).unwrap();
+    client.layer_surface_ack_configure(12, serial).unwrap();
+    client.wl_surface_commit(10).unwrap();
+
+    client.idle_inhibit_create_inhibitor(7, 13, 10).unwrap();
+    client.pointer_constraints_lock_pointer(9, 14, 10, 11, None, 1).unwrap();
+    client.relative_pointer_manager_get_relative_pointer(8, 16, 11).unwrap();
+
+    client.locked_pointer_set_cursor_position_hint(14, 12, 24).unwrap();
+    client.locked_pointer_set_region(14, None).unwrap();
+    let mut constraint_events = Vec::new();
+    while constraint_events.is_empty() {
+        constraint_events.append(&mut client.receive_events().unwrap());
+    }
+    assert_eq!(constraint_events[0].header.object_id.0, 14);
+
+    client.locked_pointer_destroy(14).unwrap();
+    let mut unlock_events = Vec::new();
+    while unlock_events.is_empty() {
+        unlock_events.append(&mut client.receive_events().unwrap());
+    }
+    assert_eq!(unlock_events[0].header.object_id.0, 14);
+
+    client.pointer_constraints_confine_pointer(9, 15, 10, 11, None, 1).unwrap();
+    let mut confined_events = Vec::new();
+    while confined_events.is_empty() {
+        confined_events.append(&mut client.receive_events().unwrap());
+    }
+    assert_eq!(confined_events[0].header.object_id.0, 15);
+    client.confined_pointer_set_region(15, None).unwrap();
+    client.confined_pointer_destroy(15).unwrap();
+    let mut unconfined_events = Vec::new();
+    while unconfined_events.is_empty() {
+        unconfined_events.append(&mut client.receive_events().unwrap());
+    }
+    assert_eq!(unconfined_events[0].header.object_id.0, 15);
+
+    client.relative_pointer_destroy(16).unwrap();
+    client.idle_inhibitor_destroy(13).unwrap();
+    client.layer_surface_destroy(12).unwrap();
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    drop(client);
+    let server = server_handle.join().unwrap();
+
+    assert!(!server.core.idle_inhibit.is_inhibited());
+    assert!(server.core.layer_shell.surfaces.is_empty());
+    assert!(server.core.pointer_constraints.locked.is_empty());
+    assert!(server.core.pointer_constraints.confined.is_empty());
+}
+
+#[test]
+fn test_relative_pointer_motion_lifecycle() {
+    let mut core = HeadlessWireCore::default();
+    core.registry.register_client_object(WaylandObjectId(5), "wl_seat", 7).unwrap();
+    core.input.create_seat(WaylandObjectId(5), "seat0");
+    core.registry.register_client_object(WaylandObjectId(7), "wl_surface", 4).unwrap();
+    core.surfaces.create_surface(WaylandObjectId(7));
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&11u32.to_le_bytes());
+    core.dispatch(make_message(5, 0, payload)).unwrap();
+
+    core.registry
+        .register_client_object(WaylandObjectId(19), "zwp_relative_pointer_manager_v1", 1)
+        .unwrap();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&16u32.to_le_bytes());
+    payload.extend_from_slice(&11u32.to_le_bytes());
+    core.dispatch(make_message(19, 0, payload)).unwrap();
+
+    let events = core.inject_relative_pointer_motion(WaylandObjectId(11), 42, 1.5, -2.0, 1.0, -1.0);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].header.object_id.0, 16);
+    assert_eq!(events[0].header.opcode.0, 0);
+
+    core.dispatch(make_message(11, 1, Vec::new())).unwrap();
+    let events_after_release =
+        core.inject_relative_pointer_motion(WaylandObjectId(11), 43, 1.0, 1.0, 1.0, 1.0);
+    assert!(events_after_release.is_empty());
+}
+
+#[test]
+fn test_reject_invalid_p13_sequences() {
+    // Duplicate layer role
+    let mut core = HeadlessWireCore::default();
+    core.registry.register_client_object(WaylandObjectId(7), "wl_surface", 4).unwrap();
+    core.surfaces.create_surface(WaylandObjectId(7));
+    core.registry.register_client_object(WaylandObjectId(6), "zwlr_layer_shell_v1", 4).unwrap();
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&12u32.to_le_bytes());
+    payload.extend_from_slice(&7u32.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    wayland_wire::args::encode_string("panel", &mut payload);
+    core.dispatch(make_message(6, 0, payload)).unwrap();
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&13u32.to_le_bytes());
+    payload.extend_from_slice(&7u32.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    wayland_wire::args::encode_string("panel-dup", &mut payload);
+    assert!(core.dispatch(make_message(6, 0, payload)).is_err());
+    core.dispatch(make_message(12, 8, Vec::new())).unwrap();
+
+    // Invalid size / ack after destroy
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&14u32.to_le_bytes());
+    payload.extend_from_slice(&7u32.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    wayland_wire::args::encode_string("panel-2", &mut payload);
+    let layer_event = core.dispatch(make_message(6, 0, payload)).unwrap().events[0].clone();
+    let layer_id = layer_event.header.object_id.0;
+    let mut invalid_size = Vec::new();
+    invalid_size.extend_from_slice(&0u32.to_le_bytes());
+    invalid_size.extend_from_slice(&0u32.to_le_bytes());
+    assert!(core.dispatch(make_message(layer_id, 0, invalid_size)).is_err());
+    core.dispatch(make_message(layer_id, 8, Vec::new())).unwrap();
+    let mut ack = Vec::new();
+    ack.extend_from_slice(&1u32.to_le_bytes());
+    assert!(core.dispatch(make_message(layer_id, 6, ack)).is_err());
+
+    // Focusless lock rejection
+    let mut core = HeadlessWireCore::default();
+    core.registry.register_client_object(WaylandObjectId(5), "wl_seat", 7).unwrap();
+    core.input.create_seat(WaylandObjectId(5), "seat0");
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&11u32.to_le_bytes());
+    core.dispatch(make_message(5, 0, payload)).unwrap();
+    core.registry.register_client_object(WaylandObjectId(7), "wl_surface", 4).unwrap();
+    core.surfaces.create_surface(WaylandObjectId(7));
+    core.registry
+        .register_client_object(WaylandObjectId(9), "zwp_pointer_constraints_v1", 1)
+        .unwrap();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&12u32.to_le_bytes());
+    payload.extend_from_slice(&7u32.to_le_bytes());
+    payload.extend_from_slice(&11u32.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    assert!(core.dispatch(make_message(9, 0, payload)).is_err());
+
+    // Destroyed constraint set_region rejection
+    let mut core = HeadlessWireCore::default();
+    core.registry.register_client_object(WaylandObjectId(7), "wl_surface", 4).unwrap();
+    core.surfaces.create_surface(WaylandObjectId(7));
+    core.registry.register_client_object(WaylandObjectId(5), "wl_seat", 7).unwrap();
+    core.input.create_seat(WaylandObjectId(5), "seat0");
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&11u32.to_le_bytes());
+    core.dispatch(make_message(5, 0, payload)).unwrap();
+    core.registry
+        .register_client_object(WaylandObjectId(9), "zwp_pointer_constraints_v1", 1)
+        .unwrap();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&12u32.to_le_bytes());
+    payload.extend_from_slice(&7u32.to_le_bytes());
+    payload.extend_from_slice(&11u32.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    core.dispatch(make_message(9, 0, payload)).unwrap();
+    core.dispatch(make_message(12, 2, Vec::new())).unwrap();
+    let mut region = Vec::new();
+    region.extend_from_slice(&0u32.to_le_bytes());
+    assert!(core.dispatch(make_message(12, 1, region)).is_err());
 }
 
 #[test]

@@ -225,4 +225,60 @@ mod tests {
         assert!(wm_base.requests.iter().any(|r| r.name == "get_xdg_surface"));
         assert!(wm_base.events.iter().any(|e| e.name == "ping"));
     }
+
+    #[test]
+    fn test_parse_layer_shell_xml() {
+        let xml = include_str!(
+            "../../../protocols/unstable/wlr-layer-shell/wlr-layer-shell-unstable-v1.xml"
+        );
+        let spec = ProtocolSpec::parse(xml).expect("parse failed");
+        let iface = spec.interfaces.get("zwlr_layer_shell_v1").expect("layer shell exists");
+        assert_eq!(iface.version, 4);
+        assert!(iface.requests.iter().any(|r| r.name == "get_layer_surface"));
+        let layer_surface =
+            spec.interfaces.get("zwlr_layer_surface_v1").expect("layer surface exists");
+        assert!(layer_surface.events.iter().any(|e| e.name == "configure"));
+        assert!(layer_surface.requests.iter().any(|r| r.name == "ack_configure"));
+    }
+
+    #[test]
+    fn test_parse_idle_inhibit_xml() {
+        let xml =
+            include_str!("../../../protocols/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml");
+        let spec = ProtocolSpec::parse(xml).expect("parse failed");
+        let iface = spec
+            .interfaces
+            .get("zwp_idle_inhibit_manager_v1")
+            .expect("idle inhibit manager exists");
+        assert!(iface.requests.iter().any(|r| r.name == "create_inhibitor"));
+        assert!(spec.interfaces.contains_key("zwp_idle_inhibitor_v1"));
+    }
+
+    #[test]
+    fn test_parse_relative_pointer_xml() {
+        let xml = include_str!(
+            "../../../protocols/unstable/relative-pointer/relative-pointer-unstable-v1.xml"
+        );
+        let spec = ProtocolSpec::parse(xml).expect("parse failed");
+        let iface = spec
+            .interfaces
+            .get("zwp_relative_pointer_manager_v1")
+            .expect("relative pointer manager exists");
+        assert!(iface.requests.iter().any(|r| r.name == "get_relative_pointer"));
+        let rel = spec.interfaces.get("zwp_relative_pointer_v1").expect("relative pointer exists");
+        assert!(rel.events.iter().any(|e| e.name == "relative_motion"));
+    }
+
+    #[test]
+    fn test_parse_pointer_constraints_xml() {
+        let xml = include_str!(
+            "../../../protocols/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml"
+        );
+        let spec = ProtocolSpec::parse(xml).expect("parse failed");
+        let iface =
+            spec.interfaces.get("zwp_pointer_constraints_v1").expect("pointer constraints exists");
+        assert!(iface.requests.iter().any(|r| r.name == "lock_pointer"));
+        assert!(spec.interfaces.contains_key("zwp_locked_pointer_v1"));
+        assert!(spec.interfaces.contains_key("zwp_confined_pointer_v1"));
+    }
 }

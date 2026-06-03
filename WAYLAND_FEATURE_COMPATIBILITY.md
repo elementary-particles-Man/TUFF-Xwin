@@ -9,11 +9,11 @@ This table compares standard Wayland features (as seen in major compositors like
 | **Clipboard** | `wl_data_device` | **Complete (Wire)**  | `DataPayloadRegistry` implemented. Support for `WriteData` / `ReadData` and offer lifecycle. |
 | **Primary Selection** | `zwp_primary_selection_v1` | **Complete (State)** | Similar to clipboard. Tracks offers and owners across handoffs. |
 | **Drag and Drop** | `wl_data_device` | **Complete (Wire)**  | `DnDState` machine tracks enter/motion/drop/leave/cancel. |
-| **Layer Shell** | `wlr-layer-shell-v1` | **Complete (Logic)** | Role-based layout using real `OutputMode` geometry. Supports anchor, margins, and exclusive zone. |
-| **Idle Inhibition** | `idle-inhibit-v1` | **Complete (IPC)** | `InhibitIdle` / `ReleaseIdle` tracking in `sessiond`. |
+| **Layer Shell** | `wlr-layer-shell-v1` | **Complete (Wire)** | Repository-local wire state machine with configure/ack lifecycle, role validation, and placement calculation over fake output geometry. |
+| **Idle Inhibition** | `idle-inhibit-v1` | **Complete (Wire)** | Repository-local wire state machine with fake idle backend bookkeeping only; no host idle settings are touched. |
 | **Input Method / IME** | `text-input-v3`, `input-method-v2` | **Complete (State)** | `ImeRuntimeState` tracks focus, preedit, commit, and cursor rect. `ImeBackend` boundary defined. |
-| **Pointer Constraints** | `wp_pointer_constraints_v1` | **Complete (State)** | `DisplayState` tracks locked/confined regions per output. |
-| **Relative Pointer** | `zwp_relative_pointer_v1` | **Complete (Event)** | `RelativePointerMotion` events and `InjectRelativePointerMotion` for testing. |
+| **Pointer Constraints** | `wp_pointer_constraints_v1` | **Complete (Wire)** | Repository-local wire state machine tracks lock/confine, region updates, and cleanup on destroy/release. |
+| **Relative Pointer** | `zwp_relative_pointer_v1` | **Complete (Wire)** | Repository-local wire state machine emits relative motion events from fake input injection only. |
 | **Gamma Control** | `wlr-gamma-control-v1` | **Complete (Boundary)** | `DisplayBackend` handles gamma LUT validation. |
 | **Output Management** | `wlr-output-management-v1`, `xdg-output` | **Complete (Wire)** | `DisplayBackend` abstracts output inventory and mode setting. |
 | **Presentation Time** | `wp_presentation` | **Complete (Wire)** | `PresentationClock` trait and feedback tracking via `FramePresented` events. |
@@ -39,6 +39,7 @@ This table compares standard Wayland features (as seen in major compositors like
    - P5b: SCM_RIGHTS (FD passing) and SHM pool/buffer lifecycle verified with real C client over isolated socket.
    - P6: XDG Shell and Seat/Input state machines verified over isolated wire (handshake -> configure -> ack -> input events).
    - P7: Full XDG Shell lifecycle verified with real C libwayland-client using repository-local C stubs (avoiding external wayland-scanner).
+   - P13: Layer shell, idle-inhibit, relative-pointer, and pointer-constraints wire state machines added with isolated-socket-only fake backends.
 
 ## Implementation Progress (2026-05-27)
 
