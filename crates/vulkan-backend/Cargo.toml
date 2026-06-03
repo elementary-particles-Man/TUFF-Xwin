@@ -14,4 +14,4 @@ parking_lot = "0.12"
 log = "0.4"
 tokio = { version = "1.0", features = ["full"] }
 zeroize = "1.6"
-waybroker-common = { path = "../waybroker-common" }
+waybroker-common.workspace = true
