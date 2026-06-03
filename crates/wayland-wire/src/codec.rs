@@ -6,6 +6,8 @@ use crate::{
 };
 use byteorder::{ByteOrder, LittleEndian};
 
+pub const MAX_WIRE_MESSAGE_BYTES: usize = 64 * 1024;
+
 pub fn decode_header(bytes: &[u8]) -> Result<WaylandHeader> {
     if bytes.len() < 8 {
         return Err(WireError::Incomplete);
@@ -20,6 +22,10 @@ pub fn decode_header(bytes: &[u8]) -> Result<WaylandHeader> {
 
 pub fn decode_message(bytes: &[u8]) -> Result<WaylandMessage> {
     let header = decode_header(bytes)?;
+    if header.size < 8 || header.size as usize > MAX_WIRE_MESSAGE_BYTES {
+        return Err(WireError::InvalidSize(header.size as u32));
+    }
+
     if bytes.len() < header.size as usize {
         return Err(WireError::Incomplete);
     }
@@ -150,4 +156,19 @@ fn estimate_payload_capacity(args: &[WireArg]) -> usize {
 
 const fn align4(value: usize) -> usize {
     (value + 3) & !3
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_message;
+    use crate::WireError;
+    use byteorder::{ByteOrder, LittleEndian};
+
+    #[test]
+    fn rejects_invalid_message_size() {
+        let mut bytes = vec![0u8; 8];
+        LittleEndian::write_u32(&mut bytes[0..4], 1);
+        LittleEndian::write_u32(&mut bytes[4..8], (4u32 << 16) | 0);
+        assert!(matches!(decode_message(&bytes), Err(WireError::InvalidSize(4))));
+    }
 }

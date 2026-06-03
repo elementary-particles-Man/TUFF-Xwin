@@ -2,7 +2,7 @@ use std::{
     env, fmt, fs,
     io::{BufRead, Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
@@ -191,6 +191,51 @@ pub fn ensure_runtime_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+pub const MAX_IPC_JSON_LINE_BYTES: usize = 64 * 1024;
+pub const MAX_ARTIFACT_FILENAME_BYTES: usize = 128;
+
+pub fn validate_runtime_socket_path(path: &Path) -> bool {
+    if path.as_os_str().is_empty() {
+        return false;
+    }
+    let rendered = path.to_string_lossy();
+    if rendered.contains("/run/user/") {
+        return false;
+    }
+    !path.components().any(|component| {
+        matches!(component, std::path::Component::ParentDir | std::path::Component::Prefix(_))
+    })
+}
+
+pub fn validate_artifact_filename(name: &str) -> bool {
+    if name.is_empty() || name.len() > MAX_ARTIFACT_FILENAME_BYTES {
+        return false;
+    }
+    if name == "." || name == ".." {
+        return false;
+    }
+    !name.contains('/') && !name.contains('\\') && !name.contains('\0') && !name.starts_with('.')
+}
+
+pub fn sanitize_artifact_filename(name: &str) -> String {
+    let mut sanitized: String =
+        name.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '_' }
+            })
+            .collect();
+    if sanitized.is_empty() {
+        sanitized = "artifact".to_string();
+    }
+    if sanitized == "." || sanitized == ".." {
+        sanitized = format!("_{}", sanitized);
+    }
+    if sanitized.len() > MAX_ARTIFACT_FILENAME_BYTES {
+        sanitized.truncate(MAX_ARTIFACT_FILENAME_BYTES);
+    }
+    sanitized
+}
+
 pub fn service_socket_path(role: ServiceRole) -> PathBuf {
     runtime_dir().join(format!("{}.sock", role.as_str()))
 }
@@ -266,7 +311,8 @@ fn service_endpoint(role: ServiceRole) -> ServiceEndpoint {
 
 pub fn session_artifact_path(session_instance_id: &str, artifact_name: &str) -> PathBuf {
     let safe_id = sanitize_session_instance_id(session_instance_id);
-    runtime_dir().join(format!("session-{}-{}.json", safe_id, artifact_name))
+    let safe_artifact_name = sanitize_artifact_filename(artifact_name);
+    runtime_dir().join(format!("session-{}-{}.json", safe_id, safe_artifact_name))
 }
 
 pub fn validate_session_instance_id(id: &str) -> bool {
@@ -346,14 +392,21 @@ pub fn send_json_line<T: Serialize>(writer: &mut impl Write, message: &T) -> Res
 }
 
 pub fn read_json_line<T: DeserializeOwned>(reader: &mut impl BufRead) -> Result<T> {
-    let mut line = String::new();
-    let bytes = reader.read_line(&mut line).context("failed to read IPC message")?;
+    let mut line = Vec::new();
+    let bytes = reader.read_until(b'\n', &mut line).context("failed to read IPC message")?;
 
     if bytes == 0 {
         bail!("unexpected EOF while reading IPC message");
     }
 
-    serde_json::from_str(line.trim_end()).context("failed to decode IPC message")
+    if bytes > MAX_IPC_JSON_LINE_BYTES || line.len() > MAX_IPC_JSON_LINE_BYTES + 1 {
+        bail!("IPC message exceeds {} bytes", MAX_IPC_JSON_LINE_BYTES);
+    }
+    if line.last() == Some(&b'\n') {
+        line.pop();
+    }
+    let line = std::str::from_utf8(&line).context("IPC message is not valid UTF-8")?;
+    serde_json::from_str(line).context("failed to decode IPC message")
 }
 
 #[cfg(test)]
@@ -390,6 +443,25 @@ mod tests {
     }
 
     #[test]
+    fn validates_runtime_socket_path_and_artifact_filename() {
+        use super::{
+            sanitize_artifact_filename, validate_artifact_filename, validate_runtime_socket_path,
+        };
+        use std::{env, path::PathBuf};
+
+        assert!(validate_runtime_socket_path(&env::temp_dir().join("waybroker/test.sock")));
+        assert!(!validate_runtime_socket_path(&PathBuf::from(
+            "/run/user/1000/waybroker/test.sock"
+        )));
+        assert_eq!(sanitize_artifact_filename("../evil.png"), ".._evil.png");
+        assert_eq!(sanitize_artifact_filename(""), "artifact");
+        assert_eq!(sanitize_artifact_filename("a/b\\c"), "a_b_c");
+        assert!(validate_artifact_filename("screenshot-1.png"));
+        assert!(!validate_artifact_filename("../evil.png"));
+        assert!(!validate_artifact_filename("/abs/path.png"));
+    }
+
+    #[test]
     fn session_artifact_path_stays_within_runtime_dir() {
         use super::{runtime_dir, session_artifact_path};
         let runtime = runtime_dir();
@@ -398,6 +470,17 @@ mod tests {
         // Verify no directory traversal
         assert!(!path.to_string_lossy().contains("/evil"));
         assert!(path.to_string_lossy().contains(".._evil_path"));
+    }
+
+    #[test]
+    fn rejects_oversized_json_line() {
+        use super::{MAX_IPC_JSON_LINE_BYTES, read_json_line};
+        use std::io::Cursor;
+
+        let payload = format!("{{\"message\":\"{}\"}}\n", "a".repeat(MAX_IPC_JSON_LINE_BYTES + 1));
+        let mut reader = Cursor::new(payload.into_bytes());
+        let parsed = read_json_line::<serde_json::Value>(&mut reader);
+        assert!(parsed.is_err());
     }
 
     #[test]

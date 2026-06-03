@@ -13,8 +13,8 @@ use vulkan_backend::{
 use waybroker_common::{
     CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputMode,
     ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, accel::global_accel_policy,
-    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line,
-    session_artifact_path,
+    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
+    sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
@@ -504,6 +504,7 @@ async fn handle_capture_output(
     println!("service=displayd op=capture_output event=begin output={output}");
 
     let (width, height, mut pixels) = backend.capture(output)?;
+    validate_rgba_buffer_size(width, height, pixels.len())?;
 
     if let Some(vulkan) = vulkan {
         // Use Vulkan for "Simulation" workload (as requested in handoff)
@@ -533,7 +534,9 @@ async fn handle_capture_output(
         }
     }
 
-    let artifact_name = format!("screenshot-{}-{}.raw", output, now_unix_timestamp());
+    let sanitized_output = sanitize_artifact_filename(output);
+    debug_assert!(validate_artifact_filename(&sanitized_output));
+    let artifact_name = format!("screenshot-{}-{}.raw", sanitized_output, now_unix_timestamp());
     let artifact_path = session_artifact_path(&config.session_instance_id, &artifact_name);
 
     fs::write(&artifact_path, unsafe {
@@ -617,6 +620,22 @@ async fn handle_stop_record(
     })
 }
 
+fn validate_rgba_buffer_size(width: u32, height: u32, pixel_len: usize) -> Result<()> {
+    let expected_pixels =
+        width.checked_mul(height).ok_or_else(|| anyhow::anyhow!("capture dimensions overflow"))?
+            as usize;
+    if pixel_len != expected_pixels {
+        bail!(
+            "capture buffer size mismatch: got {} pixels, expected {} for {}x{}",
+            pixel_len,
+            expected_pixels,
+            width,
+            height
+        );
+    }
+    Ok(())
+}
+
 fn generate_mock_pixels(width: u32, height: u32) -> Vec<u32> {
     let mut pixels = Vec::with_capacity((width * height) as usize);
     for y in 0..height {
@@ -694,18 +713,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_capture_output() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", temp_dir.path());
-        }
-
-        let session_id = "test-session";
-        let config = Config { session_instance_id: session_id.into(), ..Default::default() };
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
 
         let mut state = DisplayState {
             last_scene: None,
             next_commit_id: 1,
-            snapshot_path: temp_dir.path().join("scene-snapshot"),
+            snapshot_path: std::env::temp_dir().join("scene-snapshot"),
             active_recordings: HashMap::new(),
             pointer_constraints: HashMap::new(),
             presentation_feedbacks: HashMap::new(),
@@ -713,8 +726,6 @@ mod tests {
 
         // Ensure runtime dir exists
         ensure_runtime_dir().unwrap();
-        let session_runtime_dir = temp_dir.path().join("waybroker").join(session_id);
-        std::fs::create_dir_all(&session_runtime_dir).unwrap();
 
         let mut clock = FakePresentationClock::default();
         let capture_backend = FakeCaptureBackend;
@@ -796,5 +807,49 @@ mod tests {
         } else {
             panic!("Expected SceneCommitted");
         }
+    }
+
+    #[test]
+    fn test_validate_rgba_buffer_size_rejects_mismatch() {
+        assert!(validate_rgba_buffer_size(2, 2, 3).is_err());
+        assert!(validate_rgba_buffer_size(0, 0, 0).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_capture_output_propagates_backend_error() {
+        struct FailingCaptureBackend;
+
+        impl CaptureBackend for FailingCaptureBackend {
+            fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+                Err(anyhow::anyhow!("capture failed"))
+            }
+        }
+
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
+        let mut state = DisplayState {
+            last_scene: None,
+            next_commit_id: 1,
+            snapshot_path: std::env::temp_dir().join("scene-snapshot"),
+            active_recordings: HashMap::new(),
+            pointer_constraints: HashMap::new(),
+            presentation_feedbacks: HashMap::new(),
+        };
+        let mut clock = FakePresentationClock::default();
+        let mut record_backend = FakeRecordBackend;
+        let mut display_backend = FakeDisplayBackend;
+        let err = handle_display_command(
+            DisplayCommand::CaptureOutput { output: "eDP-1".into() },
+            ServiceRole::Sessiond,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &FailingCaptureBackend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .expect_err("capture backend failure must propagate");
+        assert!(err.to_string().contains("capture failed"));
     }
 }
