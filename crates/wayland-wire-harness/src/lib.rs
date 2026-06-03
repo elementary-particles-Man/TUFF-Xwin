@@ -1,6 +1,8 @@
-use std::os::unix::io::AsRawFd;
-use std::os::unix::net::UnixStream;
+pub mod matrix;
+
 use std::path::Path;
+
+pub use matrix::{coverage_matrix, CoverageRow, CoverageStatus};
 
 #[cfg(has_libwayland_client)]
 extern "C" {

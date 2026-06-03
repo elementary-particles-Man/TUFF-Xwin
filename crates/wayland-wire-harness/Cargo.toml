@@ -18,3 +18,5 @@ tokio = { version = "1.0", features = ["full"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(has_libwayland_client)'] }
+
+[workspace]

@@ -1,7 +1,24 @@
 use std::thread;
 use tempfile::tempdir;
 use wayland_wire::server::{WireServer, WireServerConfig};
-use wayland_wire_harness::{has_libwayland_client, probe_libwayland_client};
+use wayland_wire_harness::{
+    coverage_matrix, has_libwayland_client, probe_libwayland_client, CoverageStatus,
+};
+
+#[test]
+fn test_libwayland_client_matrix_report() {
+    let rows = coverage_matrix();
+    assert_eq!(rows.len(), 3);
+
+    assert_eq!(rows[0].area, "Core / SHM / Surface");
+    assert_eq!(rows[0].status, CoverageStatus::HarnessOnly);
+
+    assert_eq!(rows[1].area, "XDG Shell");
+    assert_eq!(rows[1].status, CoverageStatus::HarnessOnly);
+
+    assert_eq!(rows[2].area, "Seat / Data Device / Viewporter / Presentation / Layer Shell");
+    assert_eq!(rows[2].status, CoverageStatus::NotRealSession);
+}
 
 #[test]
 fn test_libwayland_client_harness_skips_without_dependency() {

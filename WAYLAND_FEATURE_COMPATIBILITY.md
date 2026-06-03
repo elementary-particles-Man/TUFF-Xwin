@@ -26,6 +26,18 @@ This table compares standard Wayland features (as seen in major compositors like
 | **Input Method** | `zwp_input_method_v2` | **Complete (Wire)** | Wire-level IME protocol and fake backend integration. |
 | **Text Input** | `zwp_text_input_v3` | **Complete (Wire)** | Wire state machine for client-side text editing state. |
 
+## RC 前 Compatibility Matrix
+
+P14 では、RC 前の整理として [wayland-wire-compatibility-matrix.md](docs/wayland-wire-compatibility-matrix.md) を追加し、次の軸で区分します。
+
+- `Complete(Wire)`
+- `Partial(Wire)`
+- `HarnessOnly`
+- `FakeBackendOnly`
+- `NotRealSession`
+
+この表は、実 Wayland session ではなく repo-local の isolated socket / fake backend を基準にしています。
+
 ## Current Parity Status
 
 1. **Architectural Parity Baseline**: Complete. Core broker architecture and trait boundaries are established.
@@ -40,6 +52,7 @@ This table compares standard Wayland features (as seen in major compositors like
    - P6: XDG Shell and Seat/Input state machines verified over isolated wire (handshake -> configure -> ack -> input events).
    - P7: Full XDG Shell lifecycle verified with real C libwayland-client using repository-local C stubs (avoiding external wayland-scanner).
    - P13: Layer shell, idle-inhibit, relative-pointer, and pointer-constraints wire state machines added with isolated-socket-only fake backends.
+   - P14: RC 前 matrix と optional isolated harness の整理を進め、real-session 非依存のまま protocol coverage を明示化。
 
 ## Implementation Progress (2026-05-27)
 

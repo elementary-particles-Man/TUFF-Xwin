@@ -106,3 +106,8 @@ The implementation is strictly limited to the TUFF-Xwin repository.
 - **zwp_pointer_constraints_v1**: Added wire state machine for lock/confine lifecycle, region updates, and cleanup on surface destroy or pointer release.
 - **Validation**: P13 is exercised through isolated Unix socket tests and repo-local fake input/idle backends only.
 - **Boundary**: No running OS idle settings, no real input devices, and no real Wayland session sockets are touched.
+
+## Phase 14: Compatibility Matrix and Isolated Harness
+- **Matrix**: Added `docs/wayland-wire-compatibility-matrix.md` to separate `Complete(Wire)`, `Partial(Wire)`, `HarnessOnly`, `FakeBackendOnly`, and `NotRealSession` categories before RC.
+- **Snapshot**: Added protocol metadata snapshot tests for the P1-P13 protocol set so lookup coverage can be checked without touching a live session.
+- **Harness**: The optional `libwayland-client` isolated probe remains temp-socket only and is documented as harness-only, not real-session validation.
