@@ -3,6 +3,8 @@
 TUFF-Xwin は KDE 級の完全なデスクトップ環境を目標にしない。
 最終目的は、GUI 側の panic や broker 側の失敗が kernel panic や実セッション障害へ連動しないように封じ込めることにある。
 
+browser-as-hostile-client 境界の詳細は [browser-security-boundary.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/browser-security-boundary.md) に分離している。
+
 ## 方針
 
 - 実 Wayland session には接続しない。
@@ -10,6 +12,8 @@ TUFF-Xwin は KDE 級の完全なデスクトップ環境を目標にしない�
 - IPC は repo 内の tempdir / isolated socket / fake backend で検証する。
 - screenshot app は hardening 後に実装する。
 - 小型 Xwin アプリは broker 境界検証を兼ねる実用品として扱う。
+- browser client は hostile とみなし、clipboard / file picker / drag-and-drop / screen capture / IME / GPU / compositor 境界は明示 grant でのみ跨がせる。
+- browser exploit の検出や web page 内容の監視は Xwin の責務にしない。
 
 ## 入力境界
 
@@ -23,4 +27,3 @@ TUFF-Xwin は KDE 級の完全なデスクトップ環境を目標にしない�
 - capture backend failure は panic にしない。
 - artifact 保存前に buffer サイズと寸法の整合性を検証する。
 - watchdog / session instance id の不一致は拒否する。
-

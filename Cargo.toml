@@ -8,6 +8,7 @@ members = [
     "crates/lockd",
     "crates/vulkan-backend",
     "crates/sessiond",
+    "crates/xwin-sec",
     "crates/watchdog",
     "crates/waybroker-common",
     "crates/wayland-wire",
@@ -31,3 +32,4 @@ tokio = { version = "1.0", features = ["full"] }
 waybroker-common = { path = "crates/waybroker-common" }
 wayland-wire = { path = "crates/wayland-wire" }
 vulkan-backend = { path = "crates/vulkan-backend" }
+xwin-sec = { path = "crates/xwin-sec" }

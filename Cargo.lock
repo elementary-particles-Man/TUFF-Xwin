@@ -849,6 +849,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "xwin-sec"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
