@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow, bail};
+use std::path::PathBuf;
 
 use crate::config::CaptureTarget;
 
@@ -7,6 +8,42 @@ pub struct CapturedFrame {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplaydCaptureArtifact {
+    pub output: String,
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+    pub artifact_path: PathBuf,
+}
+
+impl DisplaydCaptureArtifact {
+    pub fn new(
+        output: impl Into<String>,
+        width: u32,
+        height: u32,
+        format: impl Into<String>,
+        artifact_path: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let output = output.into();
+        if output.trim().is_empty() {
+            bail!("displayd capture artifact output must not be empty");
+        }
+        if width == 0 || height == 0 {
+            bail!("displayd capture artifact dimensions must be non-zero");
+        }
+        let format = format.into();
+        if format.trim().is_empty() {
+            bail!("displayd capture artifact format must not be empty");
+        }
+        let artifact_path = artifact_path.into();
+        if artifact_path.as_os_str().is_empty() {
+            bail!("displayd capture artifact path must not be empty");
+        }
+        Ok(Self { output, width, height, format, artifact_path })
+    }
 }
 
 impl CapturedFrame {

@@ -40,3 +40,9 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - 保存前に RGBA buffer のサイズ整合性を検証する。
 - traversal、absolute filename、空 filename は拒否する。
 
+## Phase 2
+
+- `displayd` への境界は `DisplayCommand::CaptureOutput` と `DisplayEvent::OutputCaptured` までの protocol-backed fake transport へ進めた。
+- 実 `displayd.sock` にはまだ接続しない。
+- 実 artifact 読み込み、実 raw 変換、実 global hotkey、実 tray は後続 phase に回す。
+- screen capture は `xwin-sec` の policy hook を通して判定する。

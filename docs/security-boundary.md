@@ -15,6 +15,13 @@ browser-as-hostile-client 境界の詳細は [browser-security-boundary.md](/mnt
 - browser client は hostile とみなし、clipboard / file picker / drag-and-drop / screen capture / IME / GPU / compositor 境界は明示 grant でのみ跨がせる。
 - browser exploit の検出や web page 内容の監視は Xwin の責務にしない。
 
+## Screenshot Phase 2
+
+- `xwin-screenshot` は `DisplayCommand::CaptureOutput` / `DisplayEvent::OutputCaptured` までの protocol-backed fake transport 境界を持つ。
+- 実 `displayd.sock` にはまだ接続しない。
+- 実 artifact 読み込み、実 raw 変換、実 global hotkey、実 tray は後続 phase に分ける。
+- screen capture 要求は `xwin-sec` の policy hook で事前判定する。
+
 ## 入力境界
 
 - IPC の JSON line と wire payload は明示的な上限で制限する。

@@ -846,6 +846,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "waybroker-common",
+ "xwin-sec",
 ]
 
 [[package]]
