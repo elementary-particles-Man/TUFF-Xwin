@@ -71,6 +71,7 @@
 - 検証は復旧可能な環境で行う
 - CUI/SSH/recovery pathを先に確保する
 - 実displayd.sock接続はこの段階以降で検討する
+- 詳細計画は [docs/status/XWIN_SCREENSHOT_ISOLATED_VM_PLAN.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_PLAN.md) に分離する
 
 ## Phase2-E Production Hotkey/Tray Deferred
 
