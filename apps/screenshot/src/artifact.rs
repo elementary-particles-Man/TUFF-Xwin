@@ -128,13 +128,17 @@ where
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::os::unix::net::UnixListener;
+    use std::thread;
     use tempfile::tempdir;
     use waybroker_common::{DisplayEvent, IpcEnvelope, MessageKind, ServiceRole};
     use xwin_sec::BrowserSecurityPolicy;
 
     use crate::{
         config::{CaptureTarget, ScreenshotConfig, ScreenshotFormat},
-        displayd_ipc::{FakeDisplaydTransport, screenshot_user_policy_context},
+        displayd_ipc::{
+            DisplaydUnixSocketTransport, FakeDisplaydTransport, screenshot_user_policy_context,
+        },
         ui::ScreenshotApp,
     };
 
@@ -159,6 +163,30 @@ mod tests {
                 artifact_path: path.into(),
             }),
         )
+    }
+
+    fn spawn_loopback_displayd_server(
+        socket_path: PathBuf,
+        response: IpcEnvelope,
+    ) -> (thread::JoinHandle<Result<()>>, std::sync::mpsc::Receiver<()>) {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            if let Some(parent) = socket_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let listener = UnixListener::bind(&socket_path)?;
+            ready_tx.send(()).ok();
+            let (mut stream, _) = listener.accept()?;
+            let mut reader = std::io::BufReader::new(stream.try_clone()?);
+            let request: IpcEnvelope = waybroker_common::read_json_line(&mut reader)?;
+            assert!(matches!(
+                request.kind,
+                MessageKind::DisplayCommand(waybroker_common::DisplayCommand::CaptureOutput { .. })
+            ));
+            waybroker_common::send_json_line(&mut stream, &response)?;
+            Ok(())
+        });
+        (handle, ready_rx)
     }
 
     #[test]
@@ -457,6 +485,113 @@ mod tests {
         let saved = app.handle_command(crate::ui::ScreenshotUiCommand::Capture).unwrap().unwrap();
         assert_eq!(saved.extension().and_then(|s| s.to_str()), Some("jpg"));
         assert!(saved.exists());
+    }
+
+    #[test]
+    fn artifact_pipeline_reads_loopback_output_captured_rgba8888() {
+        let artifact_dir = tempdir().unwrap();
+        let socket_dir = tempdir().unwrap();
+        let artifact_path = artifact_dir.path().join("frame.rgba");
+        write_rgba(&artifact_path, 2, 2).unwrap();
+        let response = success_response(artifact_path.to_string_lossy().to_string(), 2, 2);
+        let socket_path = socket_dir.path().join("displayd.sock");
+        let (server, ready) = spawn_loopback_displayd_server(socket_path.clone(), response);
+        ready.recv().unwrap();
+        let transport = DisplaydUnixSocketTransport::new(&socket_path).unwrap();
+        let ipc = DisplaydIpcCaptureClient::new(
+            transport,
+            BrowserSecurityPolicy,
+            screenshot_user_policy_context(),
+        );
+        let client = DisplaydArtifactCaptureClient::new(
+            ipc,
+            FileCaptureArtifactReader::new(artifact_dir.path()).unwrap(),
+        );
+
+        let frame = client.capture(CaptureTarget::Fullscreen).unwrap();
+        assert_eq!(frame.width, 2);
+        assert_eq!(frame.height, 2);
+        assert_eq!(frame.rgba.len(), 16);
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn artifact_pipeline_png_encode_writes_file_from_loopback_capture() {
+        let artifact_dir = tempdir().unwrap();
+        let socket_dir = tempdir().unwrap();
+        let save_dir = tempdir().unwrap();
+        let artifact_path = artifact_dir.path().join("frame.rgba");
+        write_rgba(&artifact_path, 2, 2).unwrap();
+        let response = success_response(artifact_path.to_string_lossy().to_string(), 2, 2);
+        let socket_path = socket_dir.path().join("displayd.sock");
+        let (server, ready) = spawn_loopback_displayd_server(socket_path.clone(), response);
+        ready.recv().unwrap();
+        let transport = DisplaydUnixSocketTransport::new(&socket_path).unwrap();
+        let ipc = DisplaydIpcCaptureClient::new(
+            transport,
+            BrowserSecurityPolicy,
+            screenshot_user_policy_context(),
+        );
+        let client = DisplaydArtifactCaptureClient::new(
+            ipc,
+            FileCaptureArtifactReader::new(artifact_dir.path()).unwrap(),
+        );
+        let config = ScreenshotConfig {
+            save_dir: save_dir.path().to_path_buf(),
+            ..ScreenshotConfig::default()
+        };
+        let mut app = ScreenshotApp::new(
+            config,
+            client,
+            crate::tray::FakeTrayController::default(),
+            crate::hotkey::FakeHotkeyController::default(),
+        )
+        .unwrap();
+
+        let saved = app.handle_command(crate::ui::ScreenshotUiCommand::Capture).unwrap().unwrap();
+        assert_eq!(saved.extension().and_then(|s| s.to_str()), Some("png"));
+        assert!(saved.exists());
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn artifact_pipeline_jpeg_encode_writes_file_from_loopback_capture() {
+        let artifact_dir = tempdir().unwrap();
+        let socket_dir = tempdir().unwrap();
+        let save_dir = tempdir().unwrap();
+        let artifact_path = artifact_dir.path().join("frame.rgba");
+        write_rgba(&artifact_path, 2, 2).unwrap();
+        let response = success_response(artifact_path.to_string_lossy().to_string(), 2, 2);
+        let socket_path = socket_dir.path().join("displayd.sock");
+        let (server, ready) = spawn_loopback_displayd_server(socket_path.clone(), response);
+        ready.recv().unwrap();
+        let transport = DisplaydUnixSocketTransport::new(&socket_path).unwrap();
+        let ipc = DisplaydIpcCaptureClient::new(
+            transport,
+            BrowserSecurityPolicy,
+            screenshot_user_policy_context(),
+        );
+        let client = DisplaydArtifactCaptureClient::new(
+            ipc,
+            FileCaptureArtifactReader::new(artifact_dir.path()).unwrap(),
+        );
+        let config = ScreenshotConfig {
+            save_dir: save_dir.path().to_path_buf(),
+            format: ScreenshotFormat::Jpeg,
+            ..ScreenshotConfig::default()
+        };
+        let mut app = ScreenshotApp::new(
+            config,
+            client,
+            crate::tray::FakeTrayController::default(),
+            crate::hotkey::FakeHotkeyController::default(),
+        )
+        .unwrap();
+
+        let saved = app.handle_command(crate::ui::ScreenshotUiCommand::Capture).unwrap().unwrap();
+        assert_eq!(saved.extension().and_then(|s| s.to_str()), Some("jpg"));
+        assert!(saved.exists());
+        server.join().unwrap().unwrap();
     }
 
     #[test]

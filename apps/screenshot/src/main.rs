@@ -8,11 +8,13 @@ mod tray;
 mod ui;
 
 use anyhow::Result;
+use std::path::PathBuf;
 
 use capture::FakeCaptureClient;
 use config::ScreenshotConfig;
 use displayd_ipc::{
-    DisplaydIpcCaptureClient, FakeDisplaydTransport, screenshot_user_policy_context,
+    DisplaydIpcCaptureClient, DisplaydUnixSocketTransport, FakeDisplaydTransport,
+    screenshot_user_policy_context,
 };
 use hotkey::FakeHotkeyController;
 use tray::FakeTrayController;
@@ -26,11 +28,21 @@ fn main() -> Result<()> {
     let tray = FakeTrayController::default();
     let hotkey = FakeHotkeyController::default();
     let _app = ScreenshotApp::new(config, capture_client, tray, hotkey)?;
-    let _displayd_ipc = DisplaydIpcCaptureClient::new(
-        FakeDisplaydTransport::default(),
-        BrowserSecurityPolicy,
-        screenshot_user_policy_context(),
-    );
+    let displayd_socket_path =
+        std::env::args().skip_while(|arg| arg != "--displayd-socket").nth(1).map(PathBuf::from);
+    if let Some(socket_path) = displayd_socket_path {
+        let _displayd_ipc = DisplaydIpcCaptureClient::new(
+            DisplaydUnixSocketTransport::new(socket_path)?,
+            BrowserSecurityPolicy,
+            screenshot_user_policy_context(),
+        );
+    } else {
+        let _displayd_ipc = DisplaydIpcCaptureClient::new(
+            FakeDisplaydTransport::default(),
+            BrowserSecurityPolicy,
+            screenshot_user_policy_context(),
+        );
+    }
     println!("xwin-screenshot scaffold ready");
     Ok(())
 }

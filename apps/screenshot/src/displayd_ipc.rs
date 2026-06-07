@@ -1,6 +1,11 @@
-use std::{cell::RefCell, path::PathBuf};
+use std::{
+    cell::RefCell,
+    io::BufReader,
+    os::unix::net::UnixStream,
+    path::{Component, Path, PathBuf},
+};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use waybroker_common::{DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, ServiceRole};
 use xwin_sec::{
     BrowserSecurityPolicy, CapabilityGrant, ClientProfile, GrantLifetime, GrantScope,
@@ -14,6 +19,33 @@ use crate::{
 
 pub trait DisplaydIpcTransport {
     fn send_capture_request(&self, envelope: IpcEnvelope) -> Result<IpcEnvelope>;
+}
+
+#[derive(Debug, Clone)]
+pub struct DisplaydUnixSocketTransport {
+    socket_path: PathBuf,
+}
+
+impl DisplaydUnixSocketTransport {
+    pub fn new(socket_path: impl Into<PathBuf>) -> Result<Self> {
+        let socket_path = socket_path.into();
+        validate_explicit_socket_path(&socket_path)?;
+        Ok(Self { socket_path })
+    }
+
+    fn connect(&self) -> Result<UnixStream> {
+        UnixStream::connect(&self.socket_path)
+            .with_context(|| format!("failed to connect to {}", self.socket_path.display()))
+    }
+}
+
+impl DisplaydIpcTransport for DisplaydUnixSocketTransport {
+    fn send_capture_request(&self, envelope: IpcEnvelope) -> Result<IpcEnvelope> {
+        let mut stream = self.connect()?;
+        waybroker_common::send_json_line(&mut stream, &envelope)?;
+        let mut reader = BufReader::new(stream);
+        waybroker_common::read_json_line(&mut reader)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -190,12 +222,62 @@ fn default_success_response() -> IpcEnvelope {
     )
 }
 
+fn validate_explicit_socket_path(socket_path: &Path) -> Result<()> {
+    if socket_path.as_os_str().is_empty() {
+        bail!("displayd socket path must not be empty");
+    }
+    if !socket_path.is_absolute() {
+        bail!("displayd socket path must be absolute");
+    }
+    if socket_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        bail!("displayd socket path must not contain traversal segments");
+    }
+    if socket_path.to_string_lossy().contains("/run/user/") {
+        bail!("displayd socket path must not point into /run/user");
+    }
+    if socket_path.exists() && socket_path.is_dir() {
+        bail!("displayd socket path must be a socket file, not a directory");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
+    use std::{io::BufReader, os::unix::net::UnixListener, sync::mpsc, thread};
     use waybroker_common::{DisplayEvent, MessageKind, ServiceRole};
     use xwin_sec::{DecisionReason, SecurityDecision, browser_hostile_client};
+
+    fn spawn_loopback_displayd_server(
+        socket_path: PathBuf,
+        response: IpcEnvelope,
+    ) -> (thread::JoinHandle<Result<()>>, mpsc::Receiver<()>) {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            if let Some(parent) = socket_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let listener = UnixListener::bind(&socket_path)?;
+            ready_tx.send(()).ok();
+            let (mut stream, _) = listener.accept()?;
+            let mut reader = BufReader::new(stream.try_clone()?);
+            let request: IpcEnvelope = waybroker_common::read_json_line(&mut reader)?;
+            match request.kind {
+                MessageKind::DisplayCommand(DisplayCommand::CaptureOutput { output }) => {
+                    assert!(!output.is_empty());
+                }
+                other => panic!("unexpected request kind: {other:?}"),
+            }
+            waybroker_common::send_json_line(&mut stream, &response)?;
+            Ok(())
+        });
+        (handle, ready_rx)
+    }
 
     fn success_response(output: &str) -> IpcEnvelope {
         IpcEnvelope::new(
@@ -384,5 +466,155 @@ mod tests {
         );
         let _ = client.request_capture(CaptureTarget::Fullscreen).unwrap();
         assert_eq!(client.transport.recorded_envelopes().len(), 1);
+    }
+
+    #[test]
+    fn displayd_unix_socket_transport_rejects_empty_path() {
+        assert!(DisplaydUnixSocketTransport::new("").is_err());
+    }
+
+    #[test]
+    fn displayd_unix_socket_transport_rejects_run_user_path() {
+        let err = DisplaydUnixSocketTransport::new("/run/user/1000/displayd.sock").unwrap_err();
+        assert!(format!("{err:#}").contains("/run/user"));
+    }
+
+    #[test]
+    fn displayd_unix_socket_transport_rejects_directory_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = DisplaydUnixSocketTransport::new(dir.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("directory"));
+    }
+
+    #[test]
+    fn displayd_unix_socket_transport_connect_error_is_result_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("displayd.sock");
+        let transport = DisplaydUnixSocketTransport::new(&socket_path).unwrap();
+        let err = transport
+            .send_capture_request(IpcEnvelope::new(
+                ServiceRole::Sessiond,
+                ServiceRole::Displayd,
+                MessageKind::DisplayCommand(DisplayCommand::CaptureOutput {
+                    output: "fullscreen".into(),
+                }),
+            ))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("failed to connect"));
+    }
+
+    #[test]
+    fn loopback_displayd_transport_sends_capture_output_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("displayd.sock");
+        let response = success_response("fullscreen");
+        let (server, ready) = spawn_loopback_displayd_server(socket_path.clone(), response);
+        ready.recv().unwrap();
+        let transport = DisplaydUnixSocketTransport::new(&socket_path).unwrap();
+
+        let response = transport
+            .send_capture_request(IpcEnvelope::new(
+                ServiceRole::Sessiond,
+                ServiceRole::Displayd,
+                MessageKind::DisplayCommand(DisplayCommand::CaptureOutput {
+                    output: "fullscreen".into(),
+                }),
+            ))
+            .unwrap();
+        match response.kind {
+            MessageKind::DisplayEvent(DisplayEvent::OutputCaptured { output, .. }) => {
+                assert_eq!(output, "fullscreen");
+            }
+            other => panic!("unexpected response kind: {other:?}"),
+        }
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn loopback_displayd_transport_receives_output_captured() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("displayd.sock");
+        let response = success_response("active-window");
+        let (server, ready) = spawn_loopback_displayd_server(socket_path.clone(), response);
+        ready.recv().unwrap();
+        let transport = DisplaydUnixSocketTransport::new(&socket_path).unwrap();
+        let response = transport
+            .send_capture_request(IpcEnvelope::new(
+                ServiceRole::Sessiond,
+                ServiceRole::Displayd,
+                MessageKind::DisplayCommand(DisplayCommand::CaptureOutput {
+                    output: "active-window".into(),
+                }),
+            ))
+            .unwrap();
+        assert!(matches!(
+            response.kind,
+            MessageKind::DisplayEvent(DisplayEvent::OutputCaptured { .. })
+        ));
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn loopback_displayd_transport_receives_rejected_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("displayd.sock");
+        let response = IpcEnvelope::new(
+            ServiceRole::Displayd,
+            ServiceRole::Sessiond,
+            MessageKind::DisplayEvent(DisplayEvent::Rejected { reason: "denied".into() }),
+        );
+        let (server, ready) = spawn_loopback_displayd_server(socket_path.clone(), response);
+        ready.recv().unwrap();
+        let transport = DisplaydUnixSocketTransport::new(&socket_path).unwrap();
+        let response = transport
+            .send_capture_request(IpcEnvelope::new(
+                ServiceRole::Sessiond,
+                ServiceRole::Displayd,
+                MessageKind::DisplayCommand(DisplayCommand::CaptureOutput {
+                    output: "fullscreen".into(),
+                }),
+            ))
+            .unwrap();
+        assert!(matches!(
+            response.kind,
+            MessageKind::DisplayEvent(DisplayEvent::Rejected { reason }) if reason == "denied"
+        ));
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn policy_deny_prevents_transport_call() {
+        struct DenyPolicy;
+
+        impl SecurityPolicy for DenyPolicy {
+            fn decide(
+                &self,
+                _context: &PolicyContext,
+                _capability: XwinCapability,
+            ) -> SecurityDecision {
+                SecurityDecision::Deny { reason: DecisionReason::GlobalInputDenied }
+            }
+        }
+
+        let transport = FakeDisplaydTransport::with_response(success_response("fullscreen"));
+        let client =
+            DisplaydIpcCaptureClient::new(transport, DenyPolicy, screenshot_user_policy_context());
+
+        assert!(client.request_capture(CaptureTarget::Fullscreen).is_err());
+        assert!(client.transport.recorded_envelopes().is_empty());
+    }
+
+    #[test]
+    fn browser_hostile_without_visible_grant_still_denied() {
+        let policy = BrowserSecurityPolicy;
+        let ctx = PolicyContext::new(browser_hostile_client("renderer-1", "org.example.browser"));
+        let decision = policy.decide(&ctx, XwinCapability::RequestScreenCapture);
+        assert!(matches!(
+            decision,
+            SecurityDecision::RequireUserGrant {
+                reason: DecisionReason::ScreenCaptureRequiresVisibleGrant,
+                ..
+            }
+        ));
     }
 }
