@@ -26,7 +26,8 @@ browser-as-hostile-client 境界の詳細は [browser-security-boundary.md](/mnt
 
 - `DisplaydCaptureArtifact` は `allowed_root` 配下の artifact path のみ ingest する。
 - `displayd` の `OutputCaptured` は `width` / `height` / `format` / `artifact_path` を返し、現時点の format 契約は `RGBA8888` とする。
-- artifact 本体は PNG/JPEG ではなく raw bytes として扱う。
+- `displayd` 側 writer は native `u32` dump ではなく明示的な RGBA8888 byte stream を書く。
+- artifact 本体は PNG/JPEG ではなく raw RGBA8888 bytes として扱う。
 - raw RGBA artifact は `width * height * 4` の整合性を通してから `CapturedFrame` 化する。
 - `DisplaydArtifactCaptureClient` は `DisplaydIpcCaptureClient` の返却物を encode 経路へ渡す。
 - 実 `displayd.sock` にはまだ接続しない。

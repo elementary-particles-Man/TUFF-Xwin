@@ -52,7 +52,8 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - `DisplaydCaptureArtifact` を安全に ingest して `CapturedFrame` へ変換する。
 - artifact path は明示した `allowed_root` 配下に限定する。
 - `displayd` の `OutputCaptured` は `width` / `height` / `format` / `artifact_path` を返し、現在の `format` 契約は `RGBA8888` である。
-- artifact 本体は PNG/JPEG ではなく raw bytes として扱う。
+- artifact 本体は PNG/JPEG ではなく raw RGBA8888 bytes として扱う。
+- `displayd` 側 writer は native `u32` dump ではなく明示的な RGBA8888 byte stream を書く。
 - raw RGBA artifact は `width * height * 4` と一致した場合のみ受理する。
 - `DisplaydArtifactCaptureClient` により `DisplaydIpcCaptureClient` の返却物を encode 経路へ接続する。
 - 実 `displayd.sock` にはまだ接続しない。

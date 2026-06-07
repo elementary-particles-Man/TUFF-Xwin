@@ -504,13 +504,17 @@ async fn handle_capture_output(
     println!("service=displayd op=capture_output event=begin output={output}");
 
     let (width, height, mut pixels) = backend.capture(output)?;
-    validate_rgba_buffer_size(width, height, pixels.len())?;
+    validate_capture_pixel_count(width, height, pixels.len())?;
+    let payload_len = pixels
+        .len()
+        .checked_mul(4)
+        .ok_or_else(|| anyhow::anyhow!("capture artifact byte size overflow"))?;
 
     if let Some(vulkan) = vulkan {
         // Use Vulkan for "Simulation" workload (as requested in handoff)
         let handle = vulkan.submit_batch(VulkanBatchSubmission {
             workload: VulkanWorkloadClass::ScreenshotRefine,
-            payload_len: pixels.len() * 4,
+            payload_len,
             surface_words: None,
             timeout: Duration::from_millis(100),
             requires_zeroize: false,
@@ -534,14 +538,14 @@ async fn handle_capture_output(
         }
     }
 
+    let artifact_bytes = encode_rgba8888_artifact_bytes(width, height, &pixels)?;
+
     let sanitized_output = sanitize_artifact_filename(output);
     debug_assert!(validate_artifact_filename(&sanitized_output));
     let artifact_name = format!("screenshot-{}-{}.raw", sanitized_output, now_unix_timestamp());
     let artifact_path = session_artifact_path(&config.session_instance_id, &artifact_name);
 
-    fs::write(&artifact_path, unsafe {
-        std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
-    })?;
+    fs::write(&artifact_path, &artifact_bytes)?;
 
     println!(
         "service=displayd op=capture_output event=success output={} width={} height={} path={}",
@@ -620,7 +624,7 @@ async fn handle_stop_record(
     })
 }
 
-fn validate_rgba_buffer_size(width: u32, height: u32, pixel_len: usize) -> Result<()> {
+fn validate_capture_pixel_count(width: u32, height: u32, pixel_len: usize) -> Result<()> {
     let expected_pixels =
         width.checked_mul(height).ok_or_else(|| anyhow::anyhow!("capture dimensions overflow"))?
             as usize;
@@ -636,6 +640,27 @@ fn validate_rgba_buffer_size(width: u32, height: u32, pixel_len: usize) -> Resul
     Ok(())
 }
 
+fn u32_to_rgba8888(pixel: u32) -> [u8; 4] {
+    let r = ((pixel >> 16) & 0xFF) as u8;
+    let g = ((pixel >> 8) & 0xFF) as u8;
+    let b = (pixel & 0xFF) as u8;
+    let a = ((pixel >> 24) & 0xFF) as u8;
+    [r, g, b, a]
+}
+
+fn encode_rgba8888_artifact_bytes(width: u32, height: u32, pixels: &[u32]) -> Result<Vec<u8>> {
+    validate_capture_pixel_count(width, height, pixels.len())?;
+    let expected_bytes = pixels
+        .len()
+        .checked_mul(4)
+        .ok_or_else(|| anyhow::anyhow!("capture artifact byte size overflow"))?;
+    let mut bytes = Vec::with_capacity(expected_bytes);
+    for &pixel in pixels {
+        bytes.extend_from_slice(&u32_to_rgba8888(pixel));
+    }
+    Ok(bytes)
+}
+
 fn generate_mock_pixels(width: u32, height: u32) -> Vec<u32> {
     let mut pixels = Vec::with_capacity((width * height) as usize);
     for y in 0..height {
@@ -644,7 +669,7 @@ fn generate_mock_pixels(width: u32, height: u32) -> Vec<u32> {
             let g = (y % 256) as u32;
             let b = 128u32;
             let a = 255u32;
-            // BGRA
+            // Encoded as 0xAARRGGBB; bytes are emitted explicitly as RGBA8888 later.
             pixels.push((a << 24) | (r << 16) | (g << 8) | b);
         }
     }
@@ -809,10 +834,78 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn output_captured_format_remains_rgba8888() {
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
+        let mut state = DisplayState {
+            last_scene: None,
+            next_commit_id: 1,
+            snapshot_path: std::env::temp_dir().join("scene-snapshot"),
+            active_recordings: HashMap::new(),
+            pointer_constraints: HashMap::new(),
+            presentation_feedbacks: HashMap::new(),
+        };
+        let mut clock = FakePresentationClock::default();
+        let capture_backend = FakeCaptureBackend;
+        let mut record_backend = FakeRecordBackend;
+        let mut display_backend = FakeDisplayBackend;
+
+        let result = handle_display_command(
+            DisplayCommand::CaptureOutput { output: "eDP-1".into() },
+            ServiceRole::Sessiond,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .expect("handle capture");
+
+        match result {
+            DisplayEvent::OutputCaptured { format, .. } => assert_eq!(format, "RGBA8888"),
+            other => panic!("Unexpected event: {:?}", other),
+        }
+    }
+
     #[test]
     fn test_validate_rgba_buffer_size_rejects_mismatch() {
-        assert!(validate_rgba_buffer_size(2, 2, 3).is_err());
-        assert!(validate_rgba_buffer_size(0, 0, 0).is_ok());
+        assert!(validate_capture_pixel_count(2, 2, 3).is_err());
+        assert!(validate_capture_pixel_count(0, 0, 0).is_ok());
+    }
+
+    #[test]
+    fn displayd_rgba8888_writer_rejects_pixel_count_mismatch() {
+        let err = encode_rgba8888_artifact_bytes(2, 2, &[0xAA112233, 0xAA112233, 0xAA112233])
+            .unwrap_err();
+        assert!(err.to_string().contains("mismatch"));
+    }
+
+    #[test]
+    fn displayd_rgba8888_writer_rejects_dimension_overflow() {
+        let err = encode_rgba8888_artifact_bytes(u32::MAX, 2, &[]).unwrap_err();
+        assert!(err.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn u32_to_rgba8888_is_endianness_independent() {
+        let expected = [0x11, 0x22, 0x33, 0xAA];
+        assert_eq!(u32_to_rgba8888(0xAA112233), expected);
+        assert_eq!(u32_to_rgba8888(u32::from_be_bytes([0xAA, 0x11, 0x22, 0x33])), expected);
+        assert_eq!(u32_to_rgba8888(u32::from_le_bytes([0x33, 0x22, 0x11, 0xAA])), expected);
+    }
+
+    #[test]
+    fn displayd_writes_expected_rgba8888_bytes_for_known_pixels() {
+        let bytes = encode_rgba8888_artifact_bytes(
+            1,
+            1,
+            &[((0xAAu32) << 24) | ((0x11u32) << 16) | ((0x22u32) << 8) | 0x33],
+        )
+        .unwrap();
+        assert_eq!(bytes, vec![0x11, 0x22, 0x33, 0xAA]);
     }
 
     #[tokio::test]
@@ -851,5 +944,74 @@ mod tests {
         .await
         .expect_err("capture backend failure must propagate");
         assert!(err.to_string().contains("capture failed"));
+    }
+
+    #[tokio::test]
+    async fn capture_backend_failure_still_returns_result_error() {
+        struct FailingCaptureBackend;
+
+        impl CaptureBackend for FailingCaptureBackend {
+            fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+                Err(anyhow::anyhow!("capture failed"))
+            }
+        }
+
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
+        let mut state = DisplayState {
+            last_scene: None,
+            next_commit_id: 1,
+            snapshot_path: std::env::temp_dir().join("scene-snapshot"),
+            active_recordings: HashMap::new(),
+            pointer_constraints: HashMap::new(),
+            presentation_feedbacks: HashMap::new(),
+        };
+        let mut clock = FakePresentationClock::default();
+        let mut record_backend = FakeRecordBackend;
+        let mut display_backend = FakeDisplayBackend;
+        let err = handle_display_command(
+            DisplayCommand::CaptureOutput { output: "eDP-1".into() },
+            ServiceRole::Sessiond,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &FailingCaptureBackend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .expect_err("capture backend failure must propagate");
+        assert!(err.to_string().contains("capture failed"));
+    }
+
+    #[tokio::test]
+    async fn existing_displayd_capture_tests_still_pass() {
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
+        let mut state = DisplayState {
+            last_scene: None,
+            next_commit_id: 1,
+            snapshot_path: std::env::temp_dir().join("scene-snapshot"),
+            active_recordings: HashMap::new(),
+            pointer_constraints: HashMap::new(),
+            presentation_feedbacks: HashMap::new(),
+        };
+        let mut clock = FakePresentationClock::default();
+        let capture_backend = FakeCaptureBackend;
+        let mut record_backend = FakeRecordBackend;
+        let mut display_backend = FakeDisplayBackend;
+        let result = handle_display_command(
+            DisplayCommand::CaptureOutput { output: "eDP-1".into() },
+            ServiceRole::Sessiond,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .expect("handle capture");
+        assert!(matches!(result, DisplayEvent::OutputCaptured { .. }));
     }
 }
