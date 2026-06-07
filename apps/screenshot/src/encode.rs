@@ -11,7 +11,7 @@ pub fn save_captured_frame(
     sequence: u64,
 ) -> Result<PathBuf> {
     config.validate()?;
-    validate_rgba_buffer_size(frame.width, frame.height, frame.rgba.len())?;
+    validate_captured_frame(frame)?;
     fs::create_dir_all(&config.save_dir)
         .with_context(|| format!("failed to create save dir {}", config.save_dir.display()))?;
     let output_path = config.artifact_path(sequence)?;
@@ -24,8 +24,12 @@ pub fn save_captured_frame(
     Ok(output_path)
 }
 
+pub fn validate_captured_frame(frame: &CapturedFrame) -> Result<()> {
+    validate_rgba_buffer_size(frame.width, frame.height, frame.rgba.len())
+}
+
 pub fn encode_rgba_png(path: &Path, frame: &CapturedFrame, compression_level: u8) -> Result<()> {
-    validate_rgba_buffer_size(frame.width, frame.height, frame.rgba.len())?;
+    validate_captured_frame(frame)?;
     let file = File::create(path)
         .with_context(|| format!("failed to create png file {}", path.display()))?;
     let mut encoder = png::Encoder::new(file, frame.width, frame.height);
@@ -38,7 +42,7 @@ pub fn encode_rgba_png(path: &Path, frame: &CapturedFrame, compression_level: u8
 }
 
 pub fn encode_rgba_jpeg(path: &Path, frame: &CapturedFrame, quality: u8) -> Result<()> {
-    validate_rgba_buffer_size(frame.width, frame.height, frame.rgba.len())?;
+    validate_captured_frame(frame)?;
     let file = File::create(path)
         .with_context(|| format!("failed to create jpeg file {}", path.display()))?;
     let rgb = rgba_to_rgb(&frame.rgba)?;

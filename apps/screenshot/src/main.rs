@@ -1,3 +1,4 @@
+mod artifact;
 mod capture;
 mod config;
 mod displayd_ipc;

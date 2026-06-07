@@ -46,3 +46,12 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - 実 `displayd.sock` にはまだ接続しない。
 - 実 artifact 読み込み、実 raw 変換、実 global hotkey、実 tray は後続 phase に回す。
 - screen capture は `xwin-sec` の policy hook を通して判定する。
+
+## Phase 3
+
+- `DisplaydCaptureArtifact` を安全に ingest して `CapturedFrame` へ変換する。
+- artifact path は明示した `allowed_root` 配下に限定する。
+- raw RGBA artifact は `width * height * 4` と一致した場合のみ受理する。
+- `DisplaydArtifactCaptureClient` により `DisplaydIpcCaptureClient` の返却物を encode 経路へ接続する。
+- 実 `displayd.sock` にはまだ接続しない。
+- symlink / TOCTOU / 実 runtime artifact は後続 phase の扱いとする。

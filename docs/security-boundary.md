@@ -22,6 +22,14 @@ browser-as-hostile-client 境界の詳細は [browser-security-boundary.md](/mnt
 - 実 artifact 読み込み、実 raw 変換、実 global hotkey、実 tray は後続 phase に分ける。
 - screen capture 要求は `xwin-sec` の policy hook で事前判定する。
 
+## Screenshot Phase 3
+
+- `DisplaydCaptureArtifact` は `allowed_root` 配下の artifact path のみ ingest する。
+- raw RGBA artifact は `width * height * 4` の整合性を通してから `CapturedFrame` 化する。
+- `DisplaydArtifactCaptureClient` は `DisplaydIpcCaptureClient` の返却物を encode 経路へ渡す。
+- 実 `displayd.sock` にはまだ接続しない。
+- symlink / TOCTOU / 実 runtime artifact は後続 phase として残す。
+
 ## 入力境界
 
 - IPC の JSON line と wire payload は明示的な上限で制限する。
