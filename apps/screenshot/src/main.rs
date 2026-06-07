@@ -2,6 +2,7 @@ mod artifact;
 mod capture;
 mod cli;
 mod config;
+mod config_file;
 mod displayd_ipc;
 mod encode;
 #[cfg(test)]

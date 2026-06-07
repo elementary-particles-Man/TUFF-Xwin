@@ -53,10 +53,20 @@ browser-as-hostile-client 境界の詳細は [browser-security-boundary.md](/mnt
 ## Screenshot CLI backend selection
 
 - `xwin-screenshot` は `fake` と `isolated-displayd` を明示選択できる。
+- `--config PATH` で明示 config file を読む。
 - `isolated-displayd` は `--displayd-socket` と `--artifact-root` を必須とする。
 - 実 `displayd.sock` の自動探索は行わない。
 - `/run/user`、`XDG_RUNTIME_DIR`、実 Wayland session は読まない。
 - CLI backend selection でも policy hook は transport より前に走る。
+
+## Screenshot Phase2-C
+
+- config file は自動探索しない。
+- `XDG_CONFIG_HOME` / `HOME` / `XDG_RUNTIME_DIR` / `WAYLAND_DISPLAY` / `DISPLAY` は読まない。
+- 設定確定順は default -> config file -> CLI override である。
+- isolated-displayd backend では `displayd_socket` と `artifact_root` が必須である。
+- 実 `displayd.sock` には接続しない。
+- 実 OS 統合はまだ行わない。
 
 ## 入力境界
 

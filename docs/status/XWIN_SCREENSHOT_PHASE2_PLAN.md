@@ -54,11 +54,14 @@
 ## Phase2-C Config File Support
 
 - 目的: CLI指定を設定ファイルへ移せるようにする
+- `--config PATH` を追加する
 - backend / save_dir / format / compression / quality / artifact_root / isolated socket path を設定可能にする
 - 設定ファイルでも runtime自動探索は禁止
 - 設定ファイルで `/run/user` socket を指定した場合は拒否
 - 設定ファイルは明示pathのみ読む
 - 環境変数からの暗黙設定は行わない
+- 設定確定順は default -> config file -> CLI explicit override とする
+- isolated-displayd backend では `displayd_socket` と `artifact_root` を必須にする
 
 ## Phase2-D Isolated VM or Test Machine Plan
 

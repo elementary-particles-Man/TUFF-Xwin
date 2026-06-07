@@ -5,6 +5,7 @@ use crate::{
     artifact::{DisplaydArtifactCaptureClient, FileCaptureArtifactReader},
     capture::{CaptureClient, FakeCaptureClient},
     config::{CaptureTarget, JpegOptions, PngOptions, ScreenshotConfig, ScreenshotFormat},
+    config_file::ScreenshotConfigFile,
     displayd_ipc::{
         DisplaydIpcCaptureClient, DisplaydUnixSocketTransport, screenshot_user_policy_context,
     },
@@ -38,6 +39,7 @@ impl CaptureBackendKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliOptions {
+    pub config_path: Option<PathBuf>,
     pub backend: CaptureBackendKind,
     pub displayd_socket: Option<PathBuf>,
     pub artifact_root: Option<PathBuf>,
@@ -52,6 +54,7 @@ pub struct CliOptions {
 impl Default for CliOptions {
     fn default() -> Self {
         Self {
+            config_path: None,
             backend: CaptureBackendKind::Fake,
             displayd_socket: None,
             artifact_root: None,
@@ -63,6 +66,20 @@ impl Default for CliOptions {
             help: false,
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct CliOverrides {
+    config_path: Option<PathBuf>,
+    backend: Option<CaptureBackendKind>,
+    displayd_socket: Option<PathBuf>,
+    artifact_root: Option<PathBuf>,
+    target: Option<CaptureTarget>,
+    format: Option<ScreenshotFormat>,
+    save_dir: Option<PathBuf>,
+    png_compression: Option<u8>,
+    jpeg_quality: Option<u8>,
+    help: bool,
 }
 
 #[derive(Debug)]
@@ -95,62 +112,27 @@ impl CliOptions {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let mut options = Self::default();
-        let mut iter = args.into_iter();
-        let _program = iter.next();
-        while let Some(arg) = iter.next() {
-            let arg = arg.as_ref().to_owned();
-            match arg.as_str() {
-                "--help" | "-h" => {
-                    options.help = true;
-                }
-                "--backend" => {
-                    let value = next_value(&mut iter, "--backend")?;
-                    options.backend = CaptureBackendKind::parse(&value)?;
-                }
-                "--displayd-socket" => {
-                    let value = next_value(&mut iter, "--displayd-socket")?;
-                    options.displayd_socket = Some(PathBuf::from(value));
-                }
-                "--artifact-root" => {
-                    let value = next_value(&mut iter, "--artifact-root")?;
-                    options.artifact_root = Some(PathBuf::from(value));
-                }
-                "--target" => {
-                    let value = next_value(&mut iter, "--target")?;
-                    options.target = parse_target(&value)?;
-                }
-                "--format" => {
-                    let value = next_value(&mut iter, "--format")?;
-                    options.format = parse_format(&value)?;
-                }
-                "--save-dir" => {
-                    let value = next_value(&mut iter, "--save-dir")?;
-                    options.save_dir = PathBuf::from(value);
-                }
-                "--png-compression" => {
-                    let value = next_value(&mut iter, "--png-compression")?;
-                    options.png_compression =
-                        parse_u8_in_range(&value, 0..=9, "--png-compression")?;
-                }
-                "--jpeg-quality" => {
-                    let value = next_value(&mut iter, "--jpeg-quality")?;
-                    options.jpeg_quality = parse_u8_in_range(&value, 1..=100, "--jpeg-quality")?;
-                }
-                other if other.starts_with('-') => {
-                    bail!("unknown option: {other}");
-                }
-                other => {
-                    bail!("unexpected positional argument: {other}");
-                }
-            }
+        let raw = CliOverrides::parse_from(args)?;
+        if raw.help {
+            let mut options = Self::default();
+            options.help = true;
+            options.config_path = raw.config_path;
+            return Ok(options);
         }
+
+        let mut options = Self::default();
+        if let Some(config_path) = &raw.config_path {
+            let config_file = ScreenshotConfigFile::load(config_path)?;
+            config_file.apply_to(&mut options)?;
+        }
+        raw.apply_to(&mut options);
+        options.config_path = raw.config_path.clone();
         options.validate()?;
         Ok(options)
     }
 
     pub fn usage() -> &'static str {
-        "Usage: xwin-screenshot [--backend fake|isolated-displayd] [--displayd-socket PATH] [--artifact-root PATH] [--target fullscreen|active-window] [--format png|jpeg] [--save-dir PATH] [--png-compression 0..9] [--jpeg-quality 1..100] [--help]"
+        "Usage: xwin-screenshot [--config PATH] [--backend fake|isolated-displayd] [--displayd-socket PATH] [--artifact-root PATH] [--target fullscreen|active-window] [--format png|jpeg] [--save-dir PATH] [--png-compression 0..9] [--jpeg-quality 1..100] [--help]"
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -242,6 +224,102 @@ impl CliOptions {
     }
 }
 
+impl CliOverrides {
+    fn parse_from<I, S>(args: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut options = Self::default();
+        let mut iter = args.into_iter();
+        let _program = iter.next();
+        while let Some(arg) = iter.next() {
+            let arg = arg.as_ref().to_owned();
+            match arg.as_str() {
+                "--help" | "-h" => {
+                    options.help = true;
+                }
+                "--config" => {
+                    let value = next_value(&mut iter, "--config")?;
+                    options.config_path = Some(PathBuf::from(value));
+                }
+                "--backend" => {
+                    let value = next_value(&mut iter, "--backend")?;
+                    options.backend = Some(CaptureBackendKind::parse(&value)?);
+                }
+                "--displayd-socket" => {
+                    let value = next_value(&mut iter, "--displayd-socket")?;
+                    options.displayd_socket = Some(PathBuf::from(value));
+                }
+                "--artifact-root" => {
+                    let value = next_value(&mut iter, "--artifact-root")?;
+                    options.artifact_root = Some(PathBuf::from(value));
+                }
+                "--target" => {
+                    let value = next_value(&mut iter, "--target")?;
+                    options.target = Some(parse_target(&value)?);
+                }
+                "--format" => {
+                    let value = next_value(&mut iter, "--format")?;
+                    options.format = Some(parse_format(&value)?);
+                }
+                "--save-dir" => {
+                    let value = next_value(&mut iter, "--save-dir")?;
+                    options.save_dir = Some(PathBuf::from(value));
+                }
+                "--png-compression" => {
+                    let value = next_value(&mut iter, "--png-compression")?;
+                    options.png_compression =
+                        Some(parse_u8_in_range(&value, 0..=9, "--png-compression")?);
+                }
+                "--jpeg-quality" => {
+                    let value = next_value(&mut iter, "--jpeg-quality")?;
+                    options.jpeg_quality =
+                        Some(parse_u8_in_range(&value, 1..=100, "--jpeg-quality")?);
+                }
+                other if other.starts_with('-') => {
+                    bail!("unknown option: {other}");
+                }
+                other => {
+                    bail!("unexpected positional argument: {other}");
+                }
+            }
+        }
+        Ok(options)
+    }
+
+    fn apply_to(&self, options: &mut CliOptions) {
+        if let Some(backend) = self.backend {
+            if matches!(backend, CaptureBackendKind::Fake) {
+                options.displayd_socket = None;
+                options.artifact_root = None;
+            }
+            options.backend = backend;
+        }
+        if let Some(displayd_socket) = &self.displayd_socket {
+            options.displayd_socket = Some(displayd_socket.clone());
+        }
+        if let Some(artifact_root) = &self.artifact_root {
+            options.artifact_root = Some(artifact_root.clone());
+        }
+        if let Some(target) = self.target {
+            options.target = target;
+        }
+        if let Some(format) = self.format {
+            options.format = format;
+        }
+        if let Some(save_dir) = &self.save_dir {
+            options.save_dir = save_dir.clone();
+        }
+        if let Some(png_compression) = self.png_compression {
+            options.png_compression = png_compression;
+        }
+        if let Some(jpeg_quality) = self.jpeg_quality {
+            options.jpeg_quality = jpeg_quality;
+        }
+    }
+}
+
 pub fn run_from_env() -> Result<()> {
     let options = CliOptions::parse()?;
     if options.help {
@@ -253,7 +331,7 @@ pub fn run_from_env() -> Result<()> {
     Ok(())
 }
 
-fn parse_target(value: &str) -> Result<CaptureTarget> {
+pub(crate) fn parse_target(value: &str) -> Result<CaptureTarget> {
     match value {
         "fullscreen" => Ok(CaptureTarget::Fullscreen),
         "active-window" => Ok(CaptureTarget::ActiveWindow),
@@ -261,7 +339,7 @@ fn parse_target(value: &str) -> Result<CaptureTarget> {
     }
 }
 
-fn parse_format(value: &str) -> Result<ScreenshotFormat> {
+pub(crate) fn parse_format(value: &str) -> Result<ScreenshotFormat> {
     match value {
         "png" => Ok(ScreenshotFormat::Png),
         "jpeg" | "jpg" => Ok(ScreenshotFormat::Jpeg),
@@ -269,7 +347,11 @@ fn parse_format(value: &str) -> Result<ScreenshotFormat> {
     }
 }
 
-fn parse_u8_in_range(value: &str, range: std::ops::RangeInclusive<u8>, name: &str) -> Result<u8> {
+pub(crate) fn parse_u8_in_range(
+    value: &str,
+    range: std::ops::RangeInclusive<u8>,
+    name: &str,
+) -> Result<u8> {
     let parsed: u8 = value.parse().map_err(|_| anyhow!("{name} must be a number"))?;
     if !range.contains(&parsed) {
         bail!("{name} must be in {range:?}");
@@ -328,6 +410,69 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(opts.backend, CaptureBackendKind::IsolatedDisplayd));
+    }
+
+    fn write_config_file(contents: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("screenshot.toml");
+        fs::write(&path, contents).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn cli_accepts_config_path() {
+        let (_dir, config_path) = write_config_file(
+            r#"
+backend = "fake"
+format = "png"
+save_dir = "shots"
+"#,
+        );
+        let opts =
+            CliOptions::parse_from(["xwin-screenshot", "--config", config_path.to_str().unwrap()])
+                .unwrap();
+        assert_eq!(opts.config_path.as_deref(), Some(config_path.as_path()));
+        assert!(matches!(opts.backend, CaptureBackendKind::Fake));
+    }
+
+    #[test]
+    fn cli_rejects_config_directory() {
+        let dir = tempdir().unwrap();
+        let err =
+            CliOptions::parse_from(["xwin-screenshot", "--config", dir.path().to_str().unwrap()])
+                .unwrap_err();
+        assert!(format!("{err:#}").contains("directory"));
+    }
+
+    #[test]
+    fn cli_overrides_config_backend_or_format_when_explicit() {
+        let socket_dir = tempdir().unwrap();
+        let artifact_dir = tempdir().unwrap();
+        let (_config_dir, config_path) = write_config_file(&format!(
+            r#"
+backend = "isolated-displayd"
+displayd_socket = "{}"
+artifact_root = "{}"
+format = "png"
+save_dir = "shots"
+"#,
+            socket_dir.path().join("displayd.sock").display(),
+            artifact_dir.path().display(),
+        ));
+        let opts = CliOptions::parse_from([
+            "xwin-screenshot",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--backend",
+            "fake",
+            "--format",
+            "jpeg",
+        ])
+        .unwrap();
+        assert!(matches!(opts.backend, CaptureBackendKind::Fake));
+        assert_eq!(opts.format, ScreenshotFormat::Jpeg);
+        assert!(opts.displayd_socket.is_none());
+        assert!(opts.artifact_root.is_none());
     }
 
     #[test]
@@ -462,6 +607,44 @@ mod tests {
         assert!(saved.exists());
     }
 
+    #[test]
+    fn fake_backend_config_capture_writes_png() {
+        let save_dir = tempdir().unwrap();
+        let (_config_dir, config_path) = write_config_file(&format!(
+            r#"
+backend = "fake"
+save_dir = "{}"
+format = "png"
+"#,
+            save_dir.path().display(),
+        ));
+        let opts =
+            CliOptions::parse_from(["xwin-screenshot", "--config", config_path.to_str().unwrap()])
+                .unwrap();
+        let saved = opts.run().unwrap();
+        assert_eq!(saved.extension().and_then(|s| s.to_str()), Some("png"));
+        assert!(saved.exists());
+    }
+
+    #[test]
+    fn fake_backend_config_capture_writes_jpeg() {
+        let save_dir = tempdir().unwrap();
+        let (_config_dir, config_path) = write_config_file(&format!(
+            r#"
+backend = "fake"
+save_dir = "{}"
+format = "jpeg"
+"#,
+            save_dir.path().display(),
+        ));
+        let opts =
+            CliOptions::parse_from(["xwin-screenshot", "--config", config_path.to_str().unwrap()])
+                .unwrap();
+        let saved = opts.run().unwrap();
+        assert_eq!(saved.extension().and_then(|s| s.to_str()), Some("jpg"));
+        assert!(saved.exists());
+    }
+
     fn write_rgba(path: &Path, width: u32, height: u32) -> Result<()> {
         let pixels =
             width.checked_mul(height).and_then(|value| value.checked_mul(4)).expect("valid size")
@@ -525,6 +708,74 @@ mod tests {
     }
 
     #[test]
+    fn isolated_displayd_config_capture_writes_png_from_harness() {
+        let socket_dir = tempdir().unwrap();
+        let artifact_dir = tempdir().unwrap();
+        let save_dir = tempdir().unwrap();
+        let socket_path = socket_dir.path().join("displayd.sock");
+        let response = HarnessDisplaydResponse::output_captured("fullscreen", "frame.rgba", 2, 2);
+        let server = HarnessDisplayd::spawn(
+            socket_path.clone(),
+            artifact_dir.path().to_path_buf(),
+            response,
+        )
+        .unwrap();
+        let (_config_dir, config_path) = write_config_file(&format!(
+            r#"
+backend = "isolated-displayd"
+displayd_socket = "{}"
+artifact_root = "{}"
+save_dir = "{}"
+format = "png"
+"#,
+            socket_path.display(),
+            artifact_dir.path().display(),
+            save_dir.path().display(),
+        ));
+        let opts =
+            CliOptions::parse_from(["xwin-screenshot", "--config", config_path.to_str().unwrap()])
+                .unwrap();
+        let saved = opts.run().unwrap();
+        assert_eq!(saved.extension().and_then(|s| s.to_str()), Some("png"));
+        assert!(saved.exists());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn isolated_displayd_config_capture_writes_jpeg_from_harness() {
+        let socket_dir = tempdir().unwrap();
+        let artifact_dir = tempdir().unwrap();
+        let save_dir = tempdir().unwrap();
+        let socket_path = socket_dir.path().join("displayd.sock");
+        let response = HarnessDisplaydResponse::output_captured("fullscreen", "frame.rgba", 2, 2);
+        let server = HarnessDisplayd::spawn(
+            socket_path.clone(),
+            artifact_dir.path().to_path_buf(),
+            response,
+        )
+        .unwrap();
+        let (_config_dir, config_path) = write_config_file(&format!(
+            r#"
+backend = "isolated-displayd"
+displayd_socket = "{}"
+artifact_root = "{}"
+save_dir = "{}"
+format = "jpeg"
+"#,
+            socket_path.display(),
+            artifact_dir.path().display(),
+            save_dir.path().display(),
+        ));
+        let opts =
+            CliOptions::parse_from(["xwin-screenshot", "--config", config_path.to_str().unwrap()])
+                .unwrap();
+        let saved = opts.run().unwrap();
+        assert_eq!(saved.extension().and_then(|s| s.to_str()), Some("jpg"));
+        assert!(saved.exists());
+        server.join().unwrap();
+    }
+
+    #[test]
     fn policy_deny_prevents_socket_transport_from_cli_flow() {
         struct DenyPolicy;
 
@@ -549,6 +800,47 @@ mod tests {
             save_dir: save_dir.path().to_path_buf(),
             ..CliOptions::default()
         };
+        let err = opts
+            .run_with_policy(
+                DenyPolicy,
+                PolicyContext::new(browser_hostile_client("renderer-1", "org.example.browser")),
+            )
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("screen capture denied by policy"));
+    }
+
+    #[test]
+    fn policy_deny_prevents_transport_from_config_flow() {
+        struct DenyPolicy;
+
+        impl SecurityPolicy for DenyPolicy {
+            fn decide(
+                &self,
+                _context: &PolicyContext,
+                _capability: xwin_sec::XwinCapability,
+            ) -> SecurityDecision {
+                SecurityDecision::Deny { reason: DecisionReason::GlobalInputDenied }
+            }
+        }
+
+        let socket_dir = tempdir().unwrap();
+        let artifact_dir = tempdir().unwrap();
+        let save_dir = tempdir().unwrap();
+        let socket_path = socket_dir.path().join("displayd.sock");
+        let (_config_dir, config_path) = write_config_file(&format!(
+            r#"
+backend = "isolated-displayd"
+displayd_socket = "{}"
+artifact_root = "{}"
+save_dir = "{}"
+"#,
+            socket_path.display(),
+            artifact_dir.path().display(),
+            save_dir.path().display(),
+        ));
+        let opts =
+            CliOptions::parse_from(["xwin-screenshot", "--config", config_path.to_str().unwrap()])
+                .unwrap();
         let err = opts
             .run_with_policy(
                 DenyPolicy,

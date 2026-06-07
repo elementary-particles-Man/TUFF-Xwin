@@ -80,8 +80,20 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 ## CLI backend selection
 
 - `xwin-screenshot` は CLI から backend を明示選択できる。
+- `--config PATH` で明示 config file を読める。
 - `--backend fake` は fake capture backend を使う。
 - `--backend isolated-displayd` は tempdir などの明示 socket path を使う isolated Unix socket transport を使う。
 - `isolated-displayd` は `--displayd-socket` と `--artifact-root` を必須とする。
+- `--config` の設定は default -> config file -> CLI explicit override の順で確定する。
 - 実 `displayd.sock` の自動探索は行わない。
 - `/run/user`、`XDG_RUNTIME_DIR`、実 Wayland session は読まない。
+
+## Phase 2-C
+
+- `--config` は明示 path のみを読む。
+- config file は自動探索しない。
+- `XDG_CONFIG_HOME` / `HOME` / `XDG_RUNTIME_DIR` / `WAYLAND_DISPLAY` / `DISPLAY` は読まない。
+- config file でも fake / isolated-displayd backend、target、format、compression、quality、save_dir、displayd_socket、artifact_root を扱える。
+- isolated-displayd backend では `displayd_socket` と `artifact_root` が必須である。
+- 実 `displayd.sock` には接続しない。
+- 実 OS 統合はまだ行わない。
