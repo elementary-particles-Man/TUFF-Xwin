@@ -33,6 +33,14 @@ browser-as-hostile-client 境界の詳細は [browser-security-boundary.md](/mnt
 - 実 `displayd.sock` にはまだ接続しない。
 - symlink / TOCTOU / 実 runtime artifact は後続 phase として残す。
 
+## Screenshot CLI backend selection
+
+- `xwin-screenshot` は `fake` と `isolated-displayd` を明示選択できる。
+- `isolated-displayd` は `--displayd-socket` と `--artifact-root` を必須とする。
+- 実 `displayd.sock` の自動探索は行わない。
+- `/run/user`、`XDG_RUNTIME_DIR`、実 Wayland session は読まない。
+- CLI backend selection でも policy hook は transport より前に走る。
+
 ## 入力境界
 
 - IPC の JSON line と wire payload は明示的な上限で制限する。

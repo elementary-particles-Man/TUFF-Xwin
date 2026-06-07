@@ -58,3 +58,12 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - `DisplaydArtifactCaptureClient` により `DisplaydIpcCaptureClient` の返却物を encode 経路へ接続する。
 - 実 `displayd.sock` にはまだ接続しない。
 - symlink / TOCTOU / 実 runtime artifact は後続 phase の扱いとする。
+
+## CLI backend selection
+
+- `xwin-screenshot` は CLI から backend を明示選択できる。
+- `--backend fake` は fake capture backend を使う。
+- `--backend isolated-displayd` は tempdir などの明示 socket path を使う isolated Unix socket transport を使う。
+- `isolated-displayd` は `--displayd-socket` と `--artifact-root` を必須とする。
+- 実 `displayd.sock` の自動探索は行わない。
+- `/run/user`、`XDG_RUNTIME_DIR`、実 Wayland session は読まない。
