@@ -4,6 +4,11 @@
 - The user reads Japanese only.
 - Write all explanations, handoff notes, and design summaries in Japanese unless explicitly asked otherwise.
 
+## Shared agentic operating principles
+- 共通の開発原則は `agentic-operating-principles` skill を参照する。
+- planning / routing / tool use / recovery / guardrails / evaluation / resource awareness の一般論は skill 側に寄せる。
+- この `AGENTS.md` には repo 固有の path、禁止事項、検証コマンドだけを残す。
+
 ## First files to read
 1. `/media/flux/THPDOC/Develop/TUFF-Xwin/HANDOFF.md`
 2. `/media/flux/THPDOC/Develop/TUFF-Xwin/docs/README.md`
