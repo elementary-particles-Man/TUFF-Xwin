@@ -6,7 +6,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    capture::{CaptureClient, CapturedFrame, DisplaydCaptureArtifact, validate_rgba_buffer_size},
+    capture::{
+        CaptureClient, CapturedFrame, DisplaydCaptureArtifact, validate_displayd_artifact_format,
+        validate_rgba_buffer_size,
+    },
     config::CaptureTarget,
     displayd_ipc::{DisplaydIpcCaptureClient, DisplaydIpcTransport},
 };
@@ -75,6 +78,7 @@ impl FileCaptureArtifactReader {
 
 impl CaptureArtifactReader for FileCaptureArtifactReader {
     fn read_frame(&self, artifact: &DisplaydCaptureArtifact) -> Result<CapturedFrame> {
+        validate_displayd_artifact_format(&artifact.format)?;
         if artifact.width == 0 || artifact.height == 0 {
             bail!("displayd artifact dimensions must be non-zero");
         }
@@ -172,6 +176,20 @@ mod tests {
     }
 
     #[test]
+    fn artifact_reader_accepts_rgba8888_contract() {
+        let dir = tempdir().unwrap();
+        let artifact_path = dir.path().join("frame.rgba");
+        write_rgba(&artifact_path, 1, 1).unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact =
+            DisplaydCaptureArtifact::new("fullscreen", 1, 1, "RGBA8888", &artifact_path).unwrap();
+        let frame = reader.read_frame(&artifact).unwrap();
+        assert_eq!(frame.width, 1);
+        assert_eq!(frame.height, 1);
+        assert_eq!(frame.rgba.len(), 4);
+    }
+
+    #[test]
     fn artifact_reader_rejects_path_traversal() {
         let dir = tempdir().unwrap();
         let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
@@ -179,9 +197,24 @@ mod tests {
             output: "fullscreen".into(),
             width: 2,
             height: 2,
-            format: "RGBA8888".into(),
+            format: "PNG".into(),
             artifact_path: PathBuf::from("../evil.rgba"),
         };
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[test]
+    fn artifact_reader_rejects_allowed_root_escape() {
+        let dir = tempdir().unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact = DisplaydCaptureArtifact::new(
+            "fullscreen",
+            2,
+            2,
+            "RGBA8888",
+            PathBuf::from("/tmp/xwin-artifact-outside.rgba"),
+        )
+        .unwrap();
         assert!(reader.read_frame(&artifact).is_err());
     }
 
@@ -207,6 +240,17 @@ mod tests {
     }
 
     #[test]
+    fn artifact_reader_rejects_byte_length_mismatch() {
+        let dir = tempdir().unwrap();
+        let artifact_path = dir.path().join("frame.rgba");
+        fs::write(&artifact_path, vec![0x55; 12]).unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact =
+            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", &artifact_path).unwrap();
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[test]
     fn artifact_reader_rejects_zero_dimensions() {
         let dir = tempdir().unwrap();
         let artifact_path = dir.path().join("frame.rgba");
@@ -217,6 +261,22 @@ mod tests {
             width: 0,
             height: 2,
             format: "RGBA8888".into(),
+            artifact_path,
+        };
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[test]
+    fn artifact_reader_rejects_unknown_format() {
+        let dir = tempdir().unwrap();
+        let artifact_path = dir.path().join("frame.rgba");
+        write_rgba(&artifact_path, 2, 2).unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact = DisplaydCaptureArtifact {
+            output: "fullscreen".into(),
+            width: 2,
+            height: 2,
+            format: "PNG".into(),
             artifact_path,
         };
         assert!(reader.read_frame(&artifact).is_err());
@@ -277,6 +337,55 @@ mod tests {
                 BrowserSecurityPolicy,
                 screenshot_user_policy_context(),
             ),
+            FileCaptureArtifactReader::new(dir.path()).unwrap(),
+        );
+
+        assert!(client.capture(CaptureTarget::Fullscreen).is_err());
+    }
+
+    #[test]
+    fn displayd_ipc_rejected_event_maps_to_error() {
+        let response = IpcEnvelope::new(
+            ServiceRole::Displayd,
+            ServiceRole::Sessiond,
+            MessageKind::DisplayEvent(DisplayEvent::Rejected { reason: "no capture".into() }),
+        );
+        let dir = tempdir().unwrap();
+        let client = DisplaydArtifactCaptureClient::new(
+            DisplaydIpcCaptureClient::new(
+                FakeDisplaydTransport::with_response(response),
+                BrowserSecurityPolicy,
+                screenshot_user_policy_context(),
+            ),
+            FileCaptureArtifactReader::new(dir.path()).unwrap(),
+        );
+
+        assert!(client.capture(CaptureTarget::Fullscreen).is_err());
+    }
+
+    #[test]
+    fn displayd_artifact_capture_client_rejects_unknown_format() {
+        let dir = tempdir().unwrap();
+        let artifact_path = dir.path().join("frame.rgba");
+        write_rgba(&artifact_path, 2, 2).unwrap();
+        let response = IpcEnvelope::new(
+            ServiceRole::Displayd,
+            ServiceRole::Sessiond,
+            MessageKind::DisplayEvent(DisplayEvent::OutputCaptured {
+                output: "fullscreen".into(),
+                width: 2,
+                height: 2,
+                format: "PNG".into(),
+                artifact_path: artifact_path.to_string_lossy().to_string(),
+            }),
+        );
+        let ipc = DisplaydIpcCaptureClient::new(
+            FakeDisplaydTransport::with_response(response),
+            BrowserSecurityPolicy,
+            screenshot_user_policy_context(),
+        );
+        let client = DisplaydArtifactCaptureClient::new(
+            ipc,
             FileCaptureArtifactReader::new(dir.path()).unwrap(),
         );
 
@@ -355,5 +464,17 @@ mod tests {
         let client = crate::capture::FakeCaptureClient::default();
         let frame = client.capture(CaptureTarget::Fullscreen).unwrap();
         assert_eq!(frame.rgba.len(), 16);
+    }
+
+    #[test]
+    fn existing_artifact_ingest_tests_still_pass() {
+        let dir = tempdir().unwrap();
+        let artifact_path = dir.path().join("frame.rgba");
+        write_rgba(&artifact_path, 1, 1).unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact =
+            DisplaydCaptureArtifact::new("fullscreen", 1, 1, "RGBA8888", &artifact_path).unwrap();
+        let frame = reader.read_frame(&artifact).unwrap();
+        assert_eq!(frame.rgba.len(), 4);
     }
 }

@@ -3,6 +3,30 @@ use std::path::PathBuf;
 
 use crate::config::CaptureTarget;
 
+pub const DISPLAYD_SCREENSHOT_FORMAT_RGBA8888: &str = "RGBA8888";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplaydRawArtifactEncoding {
+    Rgba8888,
+}
+
+impl DisplaydRawArtifactEncoding {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rgba8888 => DISPLAYD_SCREENSHOT_FORMAT_RGBA8888,
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            DISPLAYD_SCREENSHOT_FORMAT_RGBA8888 => Ok(Self::Rgba8888),
+            other => bail!(
+                "displayd screenshot artifact format must be {DISPLAYD_SCREENSHOT_FORMAT_RGBA8888}, got {other}"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedFrame {
     pub width: u32,
@@ -35,9 +59,7 @@ impl DisplaydCaptureArtifact {
             bail!("displayd capture artifact dimensions must be non-zero");
         }
         let format = format.into();
-        if format.trim().is_empty() {
-            bail!("displayd capture artifact format must not be empty");
-        }
+        validate_displayd_artifact_format(&format)?;
         let artifact_path = artifact_path.into();
         if artifact_path.as_os_str().is_empty() {
             bail!("displayd capture artifact path must not be empty");
@@ -76,6 +98,13 @@ pub fn validate_rgba_buffer_size(width: u32, height: u32, byte_len: usize) -> Re
         bail!("rgba buffer size mismatch: expected {expected}, got {byte_len}");
     }
     Ok(())
+}
+
+pub fn validate_displayd_artifact_format(format: &str) -> Result<DisplaydRawArtifactEncoding> {
+    if format.trim().is_empty() {
+        bail!("displayd capture artifact format must not be empty");
+    }
+    DisplaydRawArtifactEncoding::parse(format)
 }
 
 pub trait CaptureClient {
@@ -135,5 +164,29 @@ mod tests {
     fn fake_capture_backend_failure_returns_error() {
         let client = FakeCaptureClient::with_failure(CaptureTarget::Fullscreen);
         assert!(client.capture(CaptureTarget::Fullscreen).is_err());
+    }
+
+    #[test]
+    fn output_captured_requires_rgba8888_format() {
+        let artifact = DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", "/tmp/a.rgba");
+        assert!(artifact.is_ok());
+    }
+
+    #[test]
+    fn output_captured_rejects_unknown_format() {
+        let artifact = DisplaydCaptureArtifact::new("fullscreen", 2, 2, "PNG", "/tmp/a.rgba");
+        assert!(artifact.is_err());
+    }
+
+    #[test]
+    fn output_captured_rejects_empty_artifact_path() {
+        let artifact = DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", "");
+        assert!(artifact.is_err());
+    }
+
+    #[test]
+    fn output_captured_rejects_zero_dimensions() {
+        let artifact = DisplaydCaptureArtifact::new("fullscreen", 0, 2, "RGBA8888", "/tmp/a.rgba");
+        assert!(artifact.is_err());
     }
 }

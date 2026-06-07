@@ -113,4 +113,24 @@ mod tests {
         assert_eq!(path.extension().and_then(|s| s.to_str()), Some("jpg"));
         assert!(path.exists());
     }
+
+    #[test]
+    fn existing_png_jpeg_encode_tests_still_pass() {
+        let dir = tempdir().unwrap();
+        let png_config =
+            ScreenshotConfig { save_dir: dir.path().to_path_buf(), ..ScreenshotConfig::default() };
+        let jpeg_config = ScreenshotConfig {
+            save_dir: dir.path().to_path_buf(),
+            format: ScreenshotFormat::Jpeg,
+            ..ScreenshotConfig::default()
+        };
+        let client = FakeCaptureClient::default();
+        let frame = client.capture(CaptureTarget::Fullscreen).unwrap();
+        let png = save_captured_frame(&png_config, &frame, 1).unwrap();
+        let jpeg = save_captured_frame(&jpeg_config, &frame, 2).unwrap();
+        assert_eq!(png.extension().and_then(|s| s.to_str()), Some("png"));
+        assert_eq!(jpeg.extension().and_then(|s| s.to_str()), Some("jpg"));
+        assert!(png.exists());
+        assert!(jpeg.exists());
+    }
 }

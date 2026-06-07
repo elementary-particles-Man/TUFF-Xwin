@@ -7,7 +7,10 @@ use xwin_sec::{
     PolicyContext, SecurityDecision, SecurityPolicy, SurfaceId, XwinCapability,
 };
 
-use crate::{capture::DisplaydCaptureArtifact, config::CaptureTarget};
+use crate::{
+    capture::{DISPLAYD_SCREENSHOT_FORMAT_RGBA8888, DisplaydCaptureArtifact},
+    config::CaptureTarget,
+};
 
 pub trait DisplaydIpcTransport {
     fn send_capture_request(&self, envelope: IpcEnvelope) -> Result<IpcEnvelope>;
@@ -181,7 +184,7 @@ fn default_success_response() -> IpcEnvelope {
             output: "fullscreen".into(),
             width: 1920,
             height: 1080,
-            format: "RGBA8888".into(),
+            format: DISPLAYD_SCREENSHOT_FORMAT_RGBA8888.into(),
             artifact_path: "/tmp/xwin-screenshot-placeholder.png".into(),
         }),
     )
@@ -202,7 +205,7 @@ mod tests {
                 output: output.to_owned(),
                 width: 1280,
                 height: 720,
-                format: "RGBA8888".into(),
+                format: DISPLAYD_SCREENSHOT_FORMAT_RGBA8888.into(),
                 artifact_path: format!("/tmp/{output}.png"),
             }),
         )
@@ -222,7 +225,7 @@ mod tests {
         assert_eq!(artifact.artifact_path, PathBuf::from("/tmp/fullscreen.png"));
         assert_eq!(artifact.width, 1280);
         assert_eq!(artifact.height, 720);
-        assert_eq!(artifact.format, "RGBA8888");
+        assert_eq!(artifact.format, DISPLAYD_SCREENSHOT_FORMAT_RGBA8888);
 
         let sent = client.transport.recorded_envelopes();
         assert_eq!(sent.len(), 1);
@@ -285,7 +288,7 @@ mod tests {
         let artifact = client.request_capture(CaptureTarget::Fullscreen).unwrap();
         assert_eq!(artifact.width, 1280);
         assert_eq!(artifact.height, 720);
-        assert_eq!(artifact.format, "RGBA8888");
+        assert_eq!(artifact.format, DISPLAYD_SCREENSHOT_FORMAT_RGBA8888);
     }
 
     #[test]
@@ -322,6 +325,30 @@ mod tests {
 
         let err = client.request_capture(CaptureTarget::Fullscreen).unwrap_err();
         assert!(format!("{err:#}").contains("displayd rejected capture request"));
+    }
+
+    #[test]
+    fn displayd_ipc_client_rejects_unknown_format() {
+        let response = IpcEnvelope::new(
+            ServiceRole::Displayd,
+            ServiceRole::Sessiond,
+            MessageKind::DisplayEvent(DisplayEvent::OutputCaptured {
+                output: "fullscreen".into(),
+                width: 2,
+                height: 2,
+                format: "PNG".into(),
+                artifact_path: "/tmp/fullscreen.png".into(),
+            }),
+        );
+        let transport = FakeDisplaydTransport::with_response(response);
+        let client = DisplaydIpcCaptureClient::new(
+            transport,
+            BrowserSecurityPolicy,
+            screenshot_user_policy_context(),
+        );
+
+        let err = client.request_capture(CaptureTarget::Fullscreen).unwrap_err();
+        assert!(format!("{err:#}").contains("RGBA8888"));
     }
 
     #[test]
