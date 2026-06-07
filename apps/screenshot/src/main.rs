@@ -4,6 +4,8 @@ mod cli;
 mod config;
 mod displayd_ipc;
 mod encode;
+#[cfg(test)]
+mod harness_displayd;
 mod hotkey;
 mod tray;
 mod ui;

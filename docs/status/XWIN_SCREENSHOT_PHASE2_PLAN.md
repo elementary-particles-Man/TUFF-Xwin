@@ -48,6 +48,8 @@
 - tempdir socket と tempdir artifact root だけを使う
 - 実displayd.sockには接続しない
 - 実displayd processは起動しない
+- Phase2-B の実装対象は `apps/screenshot/src/harness_displayd.rs` のような test-only ハーネスである
+- negative mode として unknown format / empty artifact path / absolute artifact path / path traversal / byte length mismatch を検証する
 
 ## Phase2-C Config File Support
 

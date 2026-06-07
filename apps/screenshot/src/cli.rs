@@ -292,11 +292,12 @@ mod tests {
     use super::*;
     use crate::artifact::CaptureArtifactReader;
     use crate::capture::{CaptureClient, DisplaydCaptureArtifact};
+    use crate::harness_displayd::{HarnessDisplayd, HarnessDisplaydResponse};
     use crate::{
         artifact::{DisplaydArtifactCaptureClient, FileCaptureArtifactReader},
         displayd_ipc::{DisplaydIpcCaptureClient, FakeDisplaydTransport},
     };
-    use std::{fs, io::BufReader, os::unix::net::UnixListener, path::Path, sync::mpsc, thread};
+    use std::{fs, path::Path};
     use tempfile::tempdir;
     use waybroker_common::{DisplayEvent, IpcEnvelope, MessageKind, ServiceRole};
     use xwin_sec::{DecisionReason, SecurityDecision, browser_hostile_client};
@@ -470,64 +471,19 @@ mod tests {
         Ok(())
     }
 
-    fn success_response(path: impl Into<String>, width: u32, height: u32) -> IpcEnvelope {
-        IpcEnvelope::new(
-            ServiceRole::Displayd,
-            ServiceRole::Sessiond,
-            MessageKind::DisplayEvent(DisplayEvent::OutputCaptured {
-                output: "fullscreen".into(),
-                width,
-                height,
-                format: "RGBA8888".into(),
-                artifact_path: path.into(),
-            }),
-        )
-    }
-
-    fn spawn_loopback_displayd_server(
-        socket_path: PathBuf,
-        response: IpcEnvelope,
-        artifact_root: PathBuf,
-    ) -> (thread::JoinHandle<Result<()>>, mpsc::Receiver<()>) {
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let handle = thread::spawn(move || {
-            if let Some(parent) = socket_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let listener = UnixListener::bind(&socket_path)?;
-            ready_tx.send(()).ok();
-            let (mut stream, _) = listener.accept()?;
-            let mut reader = BufReader::new(stream.try_clone()?);
-            let request: IpcEnvelope = waybroker_common::read_json_line(&mut reader)?;
-            match request.kind {
-                MessageKind::DisplayCommand(waybroker_common::DisplayCommand::CaptureOutput {
-                    output,
-                }) => {
-                    assert!(!output.is_empty());
-                }
-                other => panic!("unexpected request kind: {other:?}"),
-            }
-            let artifact_path = artifact_root.join("frame.rgba");
-            write_rgba(&artifact_path, 2, 2)?;
-            waybroker_common::send_json_line(&mut stream, &response)?;
-            Ok(())
-        });
-        (handle, ready_rx)
-    }
-
     #[test]
     fn isolated_displayd_cli_capture_writes_png_from_loopback_artifact() {
         let socket_dir = tempdir().unwrap();
         let artifact_dir = tempdir().unwrap();
         let save_dir = tempdir().unwrap();
         let socket_path = socket_dir.path().join("displayd.sock");
-        let response = success_response("frame.rgba", 2, 2);
-        let (server, ready) = spawn_loopback_displayd_server(
+        let response = HarnessDisplaydResponse::output_captured("fullscreen", "frame.rgba", 2, 2);
+        let server = HarnessDisplayd::spawn(
             socket_path.clone(),
-            response,
             artifact_dir.path().to_path_buf(),
-        );
-        ready.recv().unwrap();
+            response,
+        )
+        .unwrap();
         let opts = CliOptions {
             backend: CaptureBackendKind::IsolatedDisplayd,
             displayd_socket: Some(socket_path),
@@ -538,7 +494,7 @@ mod tests {
         let saved = opts.run().unwrap();
         assert_eq!(saved.extension().and_then(|s| s.to_str()), Some("png"));
         assert!(saved.exists());
-        server.join().unwrap().unwrap();
+        server.join().unwrap();
     }
 
     #[test]
@@ -547,13 +503,13 @@ mod tests {
         let artifact_dir = tempdir().unwrap();
         let save_dir = tempdir().unwrap();
         let socket_path = socket_dir.path().join("displayd.sock");
-        let response = success_response("frame.rgba", 2, 2);
-        let (server, ready) = spawn_loopback_displayd_server(
+        let response = HarnessDisplaydResponse::output_captured("fullscreen", "frame.rgba", 2, 2);
+        let server = HarnessDisplayd::spawn(
             socket_path.clone(),
-            response,
             artifact_dir.path().to_path_buf(),
-        );
-        ready.recv().unwrap();
+            response,
+        )
+        .unwrap();
         let opts = CliOptions {
             backend: CaptureBackendKind::IsolatedDisplayd,
             displayd_socket: Some(socket_path),
@@ -565,7 +521,7 @@ mod tests {
         let saved = opts.run().unwrap();
         assert_eq!(saved.extension().and_then(|s| s.to_str()), Some("jpg"));
         assert!(saved.exists());
-        server.join().unwrap().unwrap();
+        server.join().unwrap();
     }
 
     #[test]
@@ -605,19 +561,15 @@ mod tests {
     #[test]
     fn existing_isolated_transport_tests_still_pass() {
         let dir = tempdir().unwrap();
-        let artifact_path = dir.path().join("frame.rgba");
-        write_rgba(&artifact_path, 2, 2).unwrap();
-        let transport = FakeDisplaydTransport::with_response(IpcEnvelope::new(
-            ServiceRole::Displayd,
-            ServiceRole::Sessiond,
-            MessageKind::DisplayEvent(DisplayEvent::OutputCaptured {
-                output: "fullscreen".into(),
-                width: 2,
-                height: 2,
-                format: "RGBA8888".into(),
-                artifact_path: "frame.rgba".into(),
-            }),
-        ));
+        let socket_dir = tempdir().unwrap();
+        let socket_path = socket_dir.path().join("displayd.sock");
+        let server = HarnessDisplayd::spawn(
+            socket_path.clone(),
+            dir.path(),
+            HarnessDisplaydResponse::output_captured("fullscreen", "frame.rgba", 2, 2),
+        )
+        .unwrap();
+        let transport = DisplaydUnixSocketTransport::new(&socket_path).unwrap();
         let ipc = DisplaydIpcCaptureClient::new(
             transport,
             BrowserSecurityPolicy,
@@ -629,6 +581,7 @@ mod tests {
         assert_eq!(frame.width, 2);
         assert_eq!(frame.height, 2);
         assert_eq!(frame.rgba.len(), 16);
+        server.join().unwrap();
     }
 
     #[test]

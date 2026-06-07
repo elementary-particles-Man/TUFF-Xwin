@@ -200,6 +200,7 @@ mod tests {
         displayd_ipc::{
             DisplaydUnixSocketTransport, FakeDisplaydTransport, screenshot_user_policy_context,
         },
+        harness_displayd::{HarnessDisplayd, HarnessDisplaydResponse},
         ui::ScreenshotApp,
     };
 
@@ -228,26 +229,10 @@ mod tests {
 
     fn spawn_loopback_displayd_server(
         socket_path: PathBuf,
-        response: IpcEnvelope,
-    ) -> (thread::JoinHandle<Result<()>>, std::sync::mpsc::Receiver<()>) {
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let handle = thread::spawn(move || {
-            if let Some(parent) = socket_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let listener = UnixListener::bind(&socket_path)?;
-            ready_tx.send(()).ok();
-            let (mut stream, _) = listener.accept()?;
-            let mut reader = std::io::BufReader::new(stream.try_clone()?);
-            let request: IpcEnvelope = waybroker_common::read_json_line(&mut reader)?;
-            assert!(matches!(
-                request.kind,
-                MessageKind::DisplayCommand(waybroker_common::DisplayCommand::CaptureOutput { .. })
-            ));
-            waybroker_common::send_json_line(&mut stream, &response)?;
-            Ok(())
-        });
-        (handle, ready_rx)
+        artifact_root: PathBuf,
+        response: HarnessDisplaydResponse,
+    ) -> HarnessDisplayd {
+        HarnessDisplayd::spawn(socket_path, artifact_root, response).unwrap()
     }
 
     #[test]
@@ -681,10 +666,13 @@ mod tests {
         let socket_dir = tempdir().unwrap();
         let artifact_path = artifact_dir.path().join("frame.rgba");
         write_rgba(&artifact_path, 2, 2).unwrap();
-        let response = success_response("frame.rgba", 2, 2);
+        let response = HarnessDisplaydResponse::output_captured("fullscreen", "frame.rgba", 2, 2);
         let socket_path = socket_dir.path().join("displayd.sock");
-        let (server, ready) = spawn_loopback_displayd_server(socket_path.clone(), response);
-        ready.recv().unwrap();
+        let server = spawn_loopback_displayd_server(
+            socket_path.clone(),
+            artifact_dir.path().to_path_buf(),
+            response,
+        );
         let transport = DisplaydUnixSocketTransport::new(&socket_path).unwrap();
         let ipc = DisplaydIpcCaptureClient::new(
             transport,
@@ -700,7 +688,7 @@ mod tests {
         assert_eq!(frame.width, 2);
         assert_eq!(frame.height, 2);
         assert_eq!(frame.rgba.len(), 16);
-        server.join().unwrap().unwrap();
+        server.join().unwrap();
     }
 
     #[test]
@@ -710,10 +698,13 @@ mod tests {
         let save_dir = tempdir().unwrap();
         let artifact_path = artifact_dir.path().join("frame.rgba");
         write_rgba(&artifact_path, 2, 2).unwrap();
-        let response = success_response("frame.rgba", 2, 2);
+        let response = HarnessDisplaydResponse::output_captured("fullscreen", "frame.rgba", 2, 2);
         let socket_path = socket_dir.path().join("displayd.sock");
-        let (server, ready) = spawn_loopback_displayd_server(socket_path.clone(), response);
-        ready.recv().unwrap();
+        let server = spawn_loopback_displayd_server(
+            socket_path.clone(),
+            artifact_dir.path().to_path_buf(),
+            response,
+        );
         let transport = DisplaydUnixSocketTransport::new(&socket_path).unwrap();
         let ipc = DisplaydIpcCaptureClient::new(
             transport,
@@ -739,7 +730,7 @@ mod tests {
         let saved = app.handle_command(crate::ui::ScreenshotUiCommand::Capture).unwrap().unwrap();
         assert_eq!(saved.extension().and_then(|s| s.to_str()), Some("png"));
         assert!(saved.exists());
-        server.join().unwrap().unwrap();
+        server.join().unwrap();
     }
 
     #[test]
@@ -749,10 +740,13 @@ mod tests {
         let save_dir = tempdir().unwrap();
         let artifact_path = artifact_dir.path().join("frame.rgba");
         write_rgba(&artifact_path, 2, 2).unwrap();
-        let response = success_response("frame.rgba", 2, 2);
+        let response = HarnessDisplaydResponse::output_captured("fullscreen", "frame.rgba", 2, 2);
         let socket_path = socket_dir.path().join("displayd.sock");
-        let (server, ready) = spawn_loopback_displayd_server(socket_path.clone(), response);
-        ready.recv().unwrap();
+        let server = spawn_loopback_displayd_server(
+            socket_path.clone(),
+            artifact_dir.path().to_path_buf(),
+            response,
+        );
         let transport = DisplaydUnixSocketTransport::new(&socket_path).unwrap();
         let ipc = DisplaydIpcCaptureClient::new(
             transport,
@@ -779,7 +773,7 @@ mod tests {
         let saved = app.handle_command(crate::ui::ScreenshotUiCommand::Capture).unwrap().unwrap();
         assert_eq!(saved.extension().and_then(|s| s.to_str()), Some("jpg"));
         assert!(saved.exists());
-        server.join().unwrap().unwrap();
+        server.join().unwrap();
     }
 
     #[test]

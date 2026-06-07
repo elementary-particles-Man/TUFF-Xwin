@@ -47,6 +47,14 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - 実 artifact 読み込み、実 raw 変換、実 global hotkey、実 tray は後続 phase に回す。
 - screen capture は `xwin-sec` の policy hook を通して判定する。
 
+## Phase 2-B
+
+- 本物の `displayd` process ではなく repo 内の test harness displayd を使う。
+- tempdir socket と tempdir artifact root だけを使い、`CaptureOutput` -> `OutputCaptured` -> RGBA8888 artifact -> ingest -> PNG/JPEG encode の契約 E2E を固定する。
+- 実 `displayd.sock` には接続しない。
+- 実 Wayland session / DRM-KMS / PipeWire / input device には触らない。
+- 実 OS 統合は後続の隔離環境 phase まで行わない。
+
 ## Phase 3
 
 - `DisplaydCaptureArtifact` を安全に ingest して `CapturedFrame` へ変換する。
@@ -58,6 +66,7 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - `DisplaydArtifactCaptureClient` により `DisplaydIpcCaptureClient` の返却物を encode 経路へ接続する。
 - 実 `displayd.sock` にはまだ接続しない。
 - symlink は Phase2-A で拒否し、TOCTOU 完全対策と実 runtime artifact 読み込みは後続 phase の扱いとする。
+- Phase2-B では test harness displayd により `CaptureOutput` / `OutputCaptured` / artifact ingest / encode の往復を repo 内で固定する。
 
 ## Phase 2-A
 

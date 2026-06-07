@@ -22,6 +22,14 @@ browser-as-hostile-client 境界の詳細は [browser-security-boundary.md](/mnt
 - 実 artifact 読み込み、実 raw 変換、実 global hotkey、実 tray は後続 phase に分ける。
 - screen capture 要求は `xwin-sec` の policy hook で事前判定する。
 
+## Screenshot Phase 2-B
+
+- 本物の `displayd` process ではなく repo 内の test harness displayd を使う。
+- tempdir socket と tempdir artifact root だけを使い、`CaptureOutput` -> `OutputCaptured` -> RGBA8888 artifact -> ingest -> PNG/JPEG encode の契約 E2E を固定する。
+- 実 `displayd.sock` には接続しない。
+- 実 Wayland session / DRM-KMS / PipeWire / input device には触らない。
+- 実 OS 統合は後続の隔離環境 phase まで行わない。
+
 ## Screenshot Phase 3
 
 - `DisplaydCaptureArtifact` は Phase2-A の方針として相対 artifact 名のみ ingest し、`allowed_root` 配下に join された結果だけを読む。
