@@ -217,7 +217,7 @@ fn default_success_response() -> IpcEnvelope {
             width: 1920,
             height: 1080,
             format: DISPLAYD_SCREENSHOT_FORMAT_RGBA8888.into(),
-            artifact_path: "/tmp/xwin-screenshot-placeholder.png".into(),
+            artifact_path: "frame.rgba".into(),
         }),
     )
 }

@@ -3,7 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::{
     capture::{
@@ -14,6 +14,8 @@ use crate::{
     displayd_ipc::{DisplaydIpcCaptureClient, DisplaydIpcTransport},
 };
 use xwin_sec::SecurityPolicy;
+
+pub const MAX_SCREENSHOT_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
 
 pub trait CaptureArtifactReader {
     fn read_frame(&self, artifact: &DisplaydCaptureArtifact) -> Result<CapturedFrame>;
@@ -33,7 +35,26 @@ impl ArtifactRoot {
         if !path.is_absolute() {
             bail!("artifact root must be absolute");
         }
-        Ok(Self { path })
+        if path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+        {
+            bail!("artifact root must not contain traversal segments");
+        }
+        if path.starts_with(Path::new("/run/user")) {
+            bail!("artifact root under /run/user is not permitted");
+        }
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("failed to inspect artifact root {}", path.display()))?;
+        if !metadata.is_dir() {
+            bail!("artifact root must be an existing directory");
+        }
+        let canonical_path = fs::canonicalize(&path)
+            .with_context(|| format!("failed to canonicalize artifact root {}", path.display()))?;
+        if canonical_path.starts_with(Path::new("/run/user")) {
+            bail!("artifact root under /run/user is not permitted");
+        }
+        Ok(Self { path: canonical_path })
     }
 
     pub fn as_path(&self) -> &Path {
@@ -51,28 +72,51 @@ impl FileCaptureArtifactReader {
         Ok(Self { allowed_root: ArtifactRoot::new(allowed_root)? })
     }
 
-    fn resolve_artifact_path(&self, artifact_path: &Path) -> Result<PathBuf> {
+    fn validate_relative_artifact_path(&self, artifact_path: &Path) -> Result<()> {
         if artifact_path.as_os_str().is_empty() {
             bail!("artifact path must not be empty");
         }
-        if artifact_path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-        {
-            bail!("artifact path must not contain traversal segments");
-        }
-
         if artifact_path.is_absolute() {
-            if !artifact_path.starts_with(self.allowed_root.as_path()) {
-                bail!(
-                    "artifact path must stay within allowed root {}",
-                    self.allowed_root.as_path().display()
-                );
-            }
-            Ok(artifact_path.to_path_buf())
-        } else {
-            Ok(self.allowed_root.as_path().join(artifact_path))
+            bail!("absolute artifact paths are not permitted in Phase2-A");
         }
+        for component in artifact_path.components() {
+            if !matches!(component, Component::Normal(_)) {
+                bail!("artifact path must be a simple relative path without traversal segments");
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_artifact_path(&self, artifact_path: &Path) -> Result<PathBuf> {
+        self.validate_relative_artifact_path(artifact_path)?;
+        Ok(self.allowed_root.as_path().join(artifact_path))
+    }
+
+    fn reject_symlink_components(&self, artifact_path: &Path) -> Result<()> {
+        let mut current = self.allowed_root.as_path().to_path_buf();
+        for component in artifact_path.components() {
+            current.push(component.as_os_str());
+            if let Ok(metadata) = fs::symlink_metadata(&current) {
+                if metadata.file_type().is_symlink() {
+                    bail!("artifact path must not traverse symlinks");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn expected_rgba_byte_len(&self, width: u32, height: u32) -> Result<usize> {
+        let expected = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| anyhow!("rgba artifact size overflow"))?;
+        if expected > MAX_SCREENSHOT_ARTIFACT_BYTES as u64 {
+            bail!(
+                "rgba artifact size {expected} exceeds limit of {} bytes",
+                MAX_SCREENSHOT_ARTIFACT_BYTES
+            );
+        }
+        Ok(expected as usize)
     }
 }
 
@@ -82,9 +126,26 @@ impl CaptureArtifactReader for FileCaptureArtifactReader {
         if artifact.width == 0 || artifact.height == 0 {
             bail!("displayd artifact dimensions must be non-zero");
         }
+        let expected_len = self.expected_rgba_byte_len(artifact.width, artifact.height)?;
         let path = self.resolve_artifact_path(&artifact.artifact_path)?;
+        self.reject_symlink_components(&artifact.artifact_path)?;
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("failed to inspect displayd artifact {}", path.display()))?;
+        if !metadata.is_file() {
+            bail!("displayd artifact path must point to a file");
+        }
+        let file_len = metadata.len();
+        if file_len != expected_len as u64 {
+            bail!("displayd artifact size mismatch: expected {expected_len}, got {file_len}");
+        }
         let rgba = fs::read(&path)
             .with_context(|| format!("failed to read displayd artifact {}", path.display()))?;
+        if rgba.len() != expected_len {
+            bail!(
+                "displayd artifact size mismatch after read: expected {expected_len}, got {}",
+                rgba.len()
+            );
+        }
         validate_rgba_buffer_size(artifact.width, artifact.height, rgba.len())?;
         CapturedFrame::new(artifact.width, artifact.height, rgba)
     }
@@ -196,7 +257,7 @@ mod tests {
         write_rgba(&artifact_path, 2, 2).unwrap();
         let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
         let artifact =
-            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", &artifact_path).unwrap();
+            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", "frame.rgba").unwrap();
         let frame = reader.read_frame(&artifact).unwrap();
         assert_eq!(frame.width, 2);
         assert_eq!(frame.height, 2);
@@ -204,17 +265,48 @@ mod tests {
     }
 
     #[test]
-    fn artifact_reader_accepts_rgba8888_contract() {
+    fn artifact_reader_reads_exact_expected_rgba_len() {
         let dir = tempdir().unwrap();
         let artifact_path = dir.path().join("frame.rgba");
         write_rgba(&artifact_path, 1, 1).unwrap();
         let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
         let artifact =
-            DisplaydCaptureArtifact::new("fullscreen", 1, 1, "RGBA8888", &artifact_path).unwrap();
+            DisplaydCaptureArtifact::new("fullscreen", 1, 1, "RGBA8888", "frame.rgba").unwrap();
         let frame = reader.read_frame(&artifact).unwrap();
         assert_eq!(frame.width, 1);
         assert_eq!(frame.height, 1);
         assert_eq!(frame.rgba.len(), 4);
+    }
+
+    #[test]
+    fn artifact_root_rejects_relative_root() {
+        assert!(ArtifactRoot::new("relative/root").is_err());
+    }
+
+    #[test]
+    fn artifact_root_rejects_missing_root() {
+        let missing = tempdir().unwrap().path().join("missing-root");
+        assert!(ArtifactRoot::new(missing).is_err());
+    }
+
+    #[test]
+    fn artifact_root_rejects_file_root() {
+        let dir = tempdir().unwrap();
+        let file_root = dir.path().join("artifact-root.txt");
+        fs::write(&file_root, b"not a directory").unwrap();
+        assert!(ArtifactRoot::new(file_root).is_err());
+    }
+
+    #[test]
+    fn artifact_root_rejects_run_user_root() {
+        assert!(ArtifactRoot::new("/run/user/1000/xwin-artifacts").is_err());
+    }
+
+    #[test]
+    fn artifact_root_accepts_existing_tempdir_root() {
+        let dir = tempdir().unwrap();
+        let root = ArtifactRoot::new(dir.path()).unwrap();
+        assert_eq!(root.as_path(), &dir.path().canonicalize().unwrap());
     }
 
     #[test]
@@ -225,8 +317,54 @@ mod tests {
             output: "fullscreen".into(),
             width: 2,
             height: 2,
-            format: "PNG".into(),
+            format: "RGBA8888".into(),
             artifact_path: PathBuf::from("../evil.rgba"),
+        };
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[test]
+    fn artifact_path_rejects_parent_dir_component() {
+        let dir = tempdir().unwrap();
+        let artifact_path = dir.path().join("frame.rgba");
+        write_rgba(&artifact_path, 2, 2).unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact = DisplaydCaptureArtifact {
+            output: "fullscreen".into(),
+            width: 2,
+            height: 2,
+            format: "RGBA8888".into(),
+            artifact_path: PathBuf::from("../frame.rgba"),
+        };
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[test]
+    fn artifact_path_rejects_cur_dir_component() {
+        let dir = tempdir().unwrap();
+        let artifact_path = dir.path().join("frame.rgba");
+        write_rgba(&artifact_path, 2, 2).unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact = DisplaydCaptureArtifact {
+            output: "fullscreen".into(),
+            width: 2,
+            height: 2,
+            format: "RGBA8888".into(),
+            artifact_path: PathBuf::from("./frame.rgba"),
+        };
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[test]
+    fn artifact_path_rejects_empty_artifact_path() {
+        let dir = tempdir().unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact = DisplaydCaptureArtifact {
+            output: "fullscreen".into(),
+            width: 2,
+            height: 2,
+            format: "RGBA8888".into(),
+            artifact_path: PathBuf::new(),
         };
         assert!(reader.read_frame(&artifact).is_err());
     }
@@ -235,14 +373,10 @@ mod tests {
     fn artifact_reader_rejects_allowed_root_escape() {
         let dir = tempdir().unwrap();
         let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
-        let artifact = DisplaydCaptureArtifact::new(
-            "fullscreen",
-            2,
-            2,
-            "RGBA8888",
-            PathBuf::from("/tmp/xwin-artifact-outside.rgba"),
-        )
-        .unwrap();
+        let artifact_path = dir.path().join("frame.rgba");
+        write_rgba(&artifact_path, 2, 2).unwrap();
+        let artifact =
+            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", artifact_path).unwrap();
         assert!(reader.read_frame(&artifact).is_err());
     }
 
@@ -257,13 +391,13 @@ mod tests {
     }
 
     #[test]
-    fn artifact_reader_rejects_size_mismatch() {
+    fn artifact_reader_rejects_metadata_size_mismatch_before_read() {
         let dir = tempdir().unwrap();
         let artifact_path = dir.path().join("frame.rgba");
         fs::write(&artifact_path, vec![0x55; 12]).unwrap();
         let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
         let artifact =
-            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", &artifact_path).unwrap();
+            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", "frame.rgba").unwrap();
         assert!(reader.read_frame(&artifact).is_err());
     }
 
@@ -274,7 +408,21 @@ mod tests {
         fs::write(&artifact_path, vec![0x55; 12]).unwrap();
         let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
         let artifact =
-            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", &artifact_path).unwrap();
+            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", "frame.rgba").unwrap();
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[test]
+    fn artifact_reader_rejects_oversized_expected_len() {
+        let dir = tempdir().unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact = DisplaydCaptureArtifact {
+            output: "fullscreen".into(),
+            width: 8193,
+            height: 8192,
+            format: "RGBA8888".into(),
+            artifact_path: PathBuf::from("frame.rgba"),
+        };
         assert!(reader.read_frame(&artifact).is_err());
     }
 
@@ -291,6 +439,46 @@ mod tests {
             format: "RGBA8888".into(),
             artifact_path,
         };
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_reader_rejects_symlink_artifact() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let artifact_path = dir.path().join("frame.rgba");
+        write_rgba(&artifact_path, 2, 2).unwrap();
+        let symlink_path = dir.path().join("link.rgba");
+        symlink(&artifact_path, &symlink_path).unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact =
+            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", "link.rgba").unwrap();
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_reader_rejects_symlink_parent_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let real_dir = root.path().join("real");
+        let symlink_dir = root.path().join("link-dir");
+        fs::create_dir_all(&real_dir).unwrap();
+        symlink(&real_dir, &symlink_dir).unwrap();
+        let artifact_path = real_dir.join("frame.rgba");
+        write_rgba(&artifact_path, 2, 2).unwrap();
+        let reader = FileCaptureArtifactReader::new(root.path()).unwrap();
+        let artifact = DisplaydCaptureArtifact::new(
+            "fullscreen",
+            2,
+            2,
+            "RGBA8888",
+            PathBuf::from("link-dir/frame.rgba"),
+        )
+        .unwrap();
         assert!(reader.read_frame(&artifact).is_err());
     }
 
@@ -311,11 +499,11 @@ mod tests {
     }
 
     #[test]
-    fn displayd_artifact_capture_client_converts_output_captured_to_frame() {
+    fn displayd_artifact_capture_client_still_converts_valid_artifact() {
         let dir = tempdir().unwrap();
         let artifact_path = dir.path().join("frame.rgba");
         write_rgba(&artifact_path, 2, 2).unwrap();
-        let response = success_response(artifact_path.to_string_lossy().to_string(), 2, 2);
+        let response = success_response("frame.rgba", 2, 2);
         let ipc = DisplaydIpcCaptureClient::new(
             FakeDisplaydTransport::with_response(response),
             BrowserSecurityPolicy,
@@ -337,7 +525,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let artifact_path = dir.path().join("frame.rgba");
         fs::write(&artifact_path, vec![0x11; 12]).unwrap();
-        let response = success_response(artifact_path.to_string_lossy().to_string(), 2, 2);
+        let response = success_response("frame.rgba", 2, 2);
         let ipc = DisplaydIpcCaptureClient::new(
             FakeDisplaydTransport::with_response(response),
             BrowserSecurityPolicy,
@@ -404,7 +592,7 @@ mod tests {
                 width: 2,
                 height: 2,
                 format: "PNG".into(),
-                artifact_path: artifact_path.to_string_lossy().to_string(),
+                artifact_path: "frame.rgba".into(),
             }),
         );
         let ipc = DisplaydIpcCaptureClient::new(
@@ -426,7 +614,7 @@ mod tests {
         let save_dir = tempdir().unwrap();
         let artifact_path = artifact_dir.path().join("frame.rgba");
         write_rgba(&artifact_path, 2, 2).unwrap();
-        let response = success_response(artifact_path.to_string_lossy().to_string(), 2, 2);
+        let response = success_response("frame.rgba", 2, 2);
         let ipc = DisplaydIpcCaptureClient::new(
             FakeDisplaydTransport::with_response(response),
             BrowserSecurityPolicy,
@@ -459,7 +647,7 @@ mod tests {
         let save_dir = tempdir().unwrap();
         let artifact_path = artifact_dir.path().join("frame.rgba");
         write_rgba(&artifact_path, 2, 2).unwrap();
-        let response = success_response(artifact_path.to_string_lossy().to_string(), 2, 2);
+        let response = success_response("frame.rgba", 2, 2);
         let ipc = DisplaydIpcCaptureClient::new(
             FakeDisplaydTransport::with_response(response),
             BrowserSecurityPolicy,
@@ -493,7 +681,7 @@ mod tests {
         let socket_dir = tempdir().unwrap();
         let artifact_path = artifact_dir.path().join("frame.rgba");
         write_rgba(&artifact_path, 2, 2).unwrap();
-        let response = success_response(artifact_path.to_string_lossy().to_string(), 2, 2);
+        let response = success_response("frame.rgba", 2, 2);
         let socket_path = socket_dir.path().join("displayd.sock");
         let (server, ready) = spawn_loopback_displayd_server(socket_path.clone(), response);
         ready.recv().unwrap();
@@ -522,7 +710,7 @@ mod tests {
         let save_dir = tempdir().unwrap();
         let artifact_path = artifact_dir.path().join("frame.rgba");
         write_rgba(&artifact_path, 2, 2).unwrap();
-        let response = success_response(artifact_path.to_string_lossy().to_string(), 2, 2);
+        let response = success_response("frame.rgba", 2, 2);
         let socket_path = socket_dir.path().join("displayd.sock");
         let (server, ready) = spawn_loopback_displayd_server(socket_path.clone(), response);
         ready.recv().unwrap();
@@ -561,7 +749,7 @@ mod tests {
         let save_dir = tempdir().unwrap();
         let artifact_path = artifact_dir.path().join("frame.rgba");
         write_rgba(&artifact_path, 2, 2).unwrap();
-        let response = success_response(artifact_path.to_string_lossy().to_string(), 2, 2);
+        let response = success_response("frame.rgba", 2, 2);
         let socket_path = socket_dir.path().join("displayd.sock");
         let (server, ready) = spawn_loopback_displayd_server(socket_path.clone(), response);
         ready.recv().unwrap();
@@ -608,7 +796,7 @@ mod tests {
         write_rgba(&artifact_path, 1, 1).unwrap();
         let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
         let artifact =
-            DisplaydCaptureArtifact::new("fullscreen", 1, 1, "RGBA8888", &artifact_path).unwrap();
+            DisplaydCaptureArtifact::new("fullscreen", 1, 1, "RGBA8888", "frame.rgba").unwrap();
         let frame = reader.read_frame(&artifact).unwrap();
         assert_eq!(frame.rgba.len(), 4);
     }

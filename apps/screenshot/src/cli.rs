@@ -638,7 +638,7 @@ mod tests {
         write_rgba(&artifact_path, 2, 2).unwrap();
         let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
         let artifact =
-            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", artifact_path).unwrap();
+            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", "frame.rgba").unwrap();
         let frame = reader.read_frame(&artifact).unwrap();
         assert_eq!(frame.rgba.len(), 16);
     }
@@ -650,7 +650,7 @@ mod tests {
         write_rgba(&artifact_path, 2, 2).unwrap();
         let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
         let artifact =
-            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", artifact_path).unwrap();
+            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", "frame.rgba").unwrap();
         let frame = reader.read_frame(&artifact).unwrap();
         assert_eq!(frame.width, 2);
         assert_eq!(frame.height, 2);

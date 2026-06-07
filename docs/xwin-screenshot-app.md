@@ -50,14 +50,23 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 ## Phase 3
 
 - `DisplaydCaptureArtifact` を安全に ingest して `CapturedFrame` へ変換する。
-- artifact path は明示した `allowed_root` 配下に限定する。
+- artifact path は Phase2-A の方針として相対名のみを受け付け、`allowed_root` 配下に join した結果だけを読む。
 - `displayd` の `OutputCaptured` は `width` / `height` / `format` / `artifact_path` を返し、現在の `format` 契約は `RGBA8888` である。
 - artifact 本体は PNG/JPEG ではなく raw RGBA8888 bytes として扱う。
 - `displayd` 側 writer は native `u32` dump ではなく明示的な RGBA8888 byte stream を書く。
 - raw RGBA artifact は `width * height * 4` と一致した場合のみ受理する。
 - `DisplaydArtifactCaptureClient` により `DisplaydIpcCaptureClient` の返却物を encode 経路へ接続する。
 - 実 `displayd.sock` にはまだ接続しない。
-- symlink / TOCTOU / 実 runtime artifact は後続 phase の扱いとする。
+- symlink は Phase2-A で拒否し、TOCTOU 完全対策と実 runtime artifact 読み込みは後続 phase の扱いとする。
+
+## Phase 2-A
+
+- `ArtifactRoot` は canonical root を保持する。
+- root は absolute かつ既存ディレクトリでなければならない。
+- `/run/user` 配下の root は拒否する。
+- artifact path は相対名のみを許可し、`..` / `.` / absolute path は拒否する。
+- symlink を含む artifact path は Phase2-A では拒否する。
+- TOCTOU の完全対策は後続 phase に残す。
 
 ## CLI backend selection
 

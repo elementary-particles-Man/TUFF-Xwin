@@ -24,14 +24,23 @@ browser-as-hostile-client 境界の詳細は [browser-security-boundary.md](/mnt
 
 ## Screenshot Phase 3
 
-- `DisplaydCaptureArtifact` は `allowed_root` 配下の artifact path のみ ingest する。
+- `DisplaydCaptureArtifact` は Phase2-A の方針として相対 artifact 名のみ ingest し、`allowed_root` 配下に join された結果だけを読む。
 - `displayd` の `OutputCaptured` は `width` / `height` / `format` / `artifact_path` を返し、現時点の format 契約は `RGBA8888` とする。
 - `displayd` 側 writer は native `u32` dump ではなく明示的な RGBA8888 byte stream を書く。
 - artifact 本体は PNG/JPEG ではなく raw RGBA8888 bytes として扱う。
 - raw RGBA artifact は `width * height * 4` の整合性を通してから `CapturedFrame` 化する。
 - `DisplaydArtifactCaptureClient` は `DisplaydIpcCaptureClient` の返却物を encode 経路へ渡す。
 - 実 `displayd.sock` にはまだ接続しない。
-- symlink / TOCTOU / 実 runtime artifact は後続 phase として残す。
+- symlink は Phase2-A で拒否し、TOCTOU 完全対策と実 runtime artifact は後続 phase として残す。
+
+## Screenshot Phase2-A
+
+- `ArtifactRoot` は canonical root を保持する。
+- root は absolute かつ既存ディレクトリでなければならない。
+- `/run/user` 配下の root は拒否する。
+- artifact path は相対名のみを許可し、`..` / `.` / absolute path は拒否する。
+- symlink を含む artifact path は Phase2-A では拒否する。
+- TOCTOU の完全対策は後続 phase に残す。
 
 ## Screenshot CLI backend selection
 

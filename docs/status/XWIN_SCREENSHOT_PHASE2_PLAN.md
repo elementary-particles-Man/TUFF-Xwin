@@ -32,8 +32,9 @@
 ## Phase2-A Artifact Root Hardening
 
 - 目的: `ArtifactRoot` の path安全性を強化する
-- symlink / TOCTOU 方針を固定する
-- canonical root validation を検討する
+- canonical root validation を固定する
+- artifact path は相対名のみ許可する
+- symlink を含む artifact path は拒否する
 - open後検証方針を検討する
 - `allowed_root` escape をさらに厳密化する
 - 実runtime artifact はまだ扱わない
