@@ -18,10 +18,7 @@ use waybroker_common::{
     send_json_line,
 };
 
-use crate::{
-    artifact::ArtifactRoot, capture::DISPLAYD_SCREENSHOT_FORMAT_RGBA8888,
-    capture::DisplaydCaptureArtifact,
-};
+use crate::{artifact::ArtifactRoot, capture::DISPLAYD_SCREENSHOT_FORMAT_RGBA8888};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HarnessDisplaydResponse {
@@ -266,7 +263,7 @@ fn is_simple_relative_path(path: &Path) -> bool {
         && path.components().all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn validate_socket_path(socket_path: &Path) -> Result<()> {
+pub fn validate_socket_path(socket_path: &Path) -> Result<()> {
     if socket_path.as_os_str().is_empty() {
         bail!("harness displayd socket path must not be empty");
     }

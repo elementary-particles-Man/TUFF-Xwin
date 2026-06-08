@@ -50,6 +50,7 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 ## Phase 2-B
 
 - 本物の `displayd` process ではなく repo 内の test harness displayd を使う。
+- `xwin-screenshot-harness-displayd` は dev-harness feature で起動する dev-only helper であり、production displayd ではない。
 - tempdir socket と tempdir artifact root だけを使い、`CaptureOutput` -> `OutputCaptured` -> RGBA8888 artifact -> ingest -> PNG/JPEG encode の契約 E2E を固定する。
 - 実 `displayd.sock` には接続しない。
 - 実 Wayland session / DRM-KMS / PipeWire / input device には触らない。
@@ -65,6 +66,7 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - raw RGBA artifact は `width * height * 4` と一致した場合のみ受理する。
 - Unix では artifact open/read を openat / O_NOFOLLOW / O_DIRECTORY / O_CLOEXEC で harden する。
 - `DisplaydArtifactCaptureClient` により `DisplaydIpcCaptureClient` の返却物を encode 経路へ接続する。
+- dev-only harness binary は production displayd ではなく、明示 socket / artifact root の tempdir 検証だけを担う。
 - 実 `displayd.sock` にはまだ接続しない。
 - symlink は Phase2-A で拒否し、kernel-level の完全証明と実 runtime artifact 読み込みは後続 phase の扱いとする。
 - Phase2-B では test harness displayd により `CaptureOutput` / `OutputCaptured` / artifact ingest / encode の往復を repo 内で固定する。

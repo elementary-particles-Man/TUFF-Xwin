@@ -29,6 +29,7 @@
 ## Phase2-B Fixed: Test Harness Displayd
 
 - repo内 test-only harness displayd を追加済み
+- dev-only harness binary `xwin-screenshot-harness-displayd` を `--features dev-harness` 付きで起動できる
 - tempdir socket のみ使用する
 - tempdir artifact root のみ使用する
 - CaptureOutput を受けて OutputCaptured または Rejected を返す
@@ -81,7 +82,7 @@
 - isolated-displayd backend を明示socket pathとartifact rootで構成可能
 - config file から fake / isolated-displayd backend を構成可能
 - CLI override で config file 値を上書き可能
-- test harness displayd で CaptureOutput -> OutputCaptured -> RGBA8888 artifact -> ingest -> PNG/JPEG encode を repo内E2E確認可能
+- test harness displayd と dev-only harness binary で CaptureOutput -> OutputCaptured -> RGBA8888 artifact -> ingest -> PNG/JPEG encode を repo内E2E確認可能
 - browser hostile clientの screen capture は explicit visible grant なしでは拒否される
 
 ## Still Not Done

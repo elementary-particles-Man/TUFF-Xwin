@@ -67,6 +67,8 @@
 
 - tempdir socket path を明示する
 - tempdir artifact root を明示する
+- dev-only binary `xwin-screenshot-harness-displayd` を `--features dev-harness` 付きで起動できるようにする
+- `cargo run -p xwin-screenshot --features dev-harness --bin xwin-screenshot-harness-displayd -- --socket <tempdir/socket> --artifact-root <tempdir/artifacts> --width 2 --height 2 --serve-once`
 - `xwin-screenshot --backend isolated-displayd --displayd-socket <tempdir/socket> --artifact-root <tempdir/artifacts> --format png --save-dir <tempdir/out>`
 - jpeg でも同等確認を行う
 - `/run/user` 配下pathは使わない

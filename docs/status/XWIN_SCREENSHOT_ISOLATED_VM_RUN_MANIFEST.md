@@ -90,7 +90,18 @@
 - log: `LOG_DIR/step3-fake-jpeg.log`
 - record: generated JPEG path and file size
 
-## Manifest Step 4: Isolated Displayd Harness PNG
+## Manifest Step 4: Dev Harness Displayd PNG
+
+- command: `cargo run -p xwin-screenshot --features dev-harness --bin xwin-screenshot-harness-displayd -- --socket SOCKET_PATH --artifact-root ARTIFACT_ROOT --width 2 --height 2 --serve-once`
+- pass: dev-only binary は production displayd ではない
+- pass: `SOCKET_PATH` は tempdir配下
+- pass: `ARTIFACT_ROOT` は tempdir配下
+- pass: `/run/user` path を使わない
+- pass: 実displayd.sock を使わない
+- log: `LOG_DIR/step4-harness-displayd-png.log`
+- record: harness readiness, artifact path, byte size
+
+## Manifest Step 5: Isolated Displayd Harness PNG
 
 - command: `xwin-screenshot --backend isolated-displayd --displayd-socket SOCKET_PATH --artifact-root ARTIFACT_ROOT --format png --save-dir OUT_DIR`
 - pass: `SOCKET_PATH` は tempdir配下
@@ -98,10 +109,21 @@
 - pass: `OUT_DIR` 配下に PNG が生成される
 - pass: `/run/user` path を使わない
 - pass: 本物displayd process を起動しない
-- log: `LOG_DIR/step4-isolated-displayd-png.log`
+- log: `LOG_DIR/step5-isolated-displayd-png.log`
 - record: generated artifact path, PNG path, file size
 
-## Manifest Step 5: Isolated Displayd Harness JPEG
+## Manifest Step 6: Dev Harness Displayd JPEG
+
+- command: `cargo run -p xwin-screenshot --features dev-harness --bin xwin-screenshot-harness-displayd -- --socket SOCKET_PATH --artifact-root ARTIFACT_ROOT --width 2 --height 2 --serve-once`
+- pass: dev-only binary は production displayd ではない
+- pass: `SOCKET_PATH` は tempdir配下
+- pass: `ARTIFACT_ROOT` は tempdir配下
+- pass: `/run/user` path を使わない
+- pass: 実displayd.sock を使わない
+- log: `LOG_DIR/step6-harness-displayd-jpeg.log`
+- record: harness readiness, artifact path, byte size
+
+## Manifest Step 7: Isolated Displayd Harness JPEG
 
 - command: `xwin-screenshot --backend isolated-displayd --displayd-socket SOCKET_PATH --artifact-root ARTIFACT_ROOT --format jpeg --save-dir OUT_DIR`
 - pass: `SOCKET_PATH` は tempdir配下
@@ -109,10 +131,10 @@
 - pass: `OUT_DIR` 配下に JPEG が生成される
 - pass: `/run/user` path を使わない
 - pass: 本物displayd process を起動しない
-- log: `LOG_DIR/step5-isolated-displayd-jpeg.log`
+- log: `LOG_DIR/step7-isolated-displayd-jpeg.log`
 - record: generated artifact path, JPEG path, file size
 
-## Manifest Step 6: Config File Fake Flow
+## Manifest Step 8: Config File Fake Flow
 
 - create: `CONFIG_DIR/fake-png.toml`
 - create: `CONFIG_DIR/fake-jpeg.toml`
@@ -121,10 +143,11 @@
 - pass: config fileは明示pathのみ
 - pass: `XDG_CONFIG_HOME` / `HOME` 自動探索なし
 - pass: `OUT_DIR` 配下に PNG/JPEG が生成される
-- log: `LOG_DIR/step6-config-fake.log`
+- log: `LOG_DIR/step8-config-fake.log`
 
-## Manifest Step 7: Config File Isolated Displayd Flow
+## Manifest Step 9: Config File Isolated Displayd Flow
 
+- prep: `cargo run -p xwin-screenshot --features dev-harness --bin xwin-screenshot-harness-displayd -- --socket SOCKET_PATH --artifact-root ARTIFACT_ROOT --width 2 --height 2 --serve-once`
 - create: `CONFIG_DIR/isolated-displayd-png.toml`
 - create: `CONFIG_DIR/isolated-displayd-jpeg.toml`
 - command: `xwin-screenshot --config CONFIG_DIR/isolated-displayd-png.toml`
@@ -132,9 +155,10 @@
 - pass: `displayd_socket` と `artifact_root` は tempdir配下
 - pass: `/run/user` path を使わない
 - pass: `OUT_DIR` 配下に PNG/JPEG が生成される
-- log: `LOG_DIR/step7-config-isolated-displayd.log`
+- log: `LOG_DIR/step9-harness-displayd.log`
+- log: `LOG_DIR/step9-config-isolated-displayd.log`
 
-## Manifest Step 8: Negative Contract Checks
+## Manifest Step 10: Negative Contract Checks
 
 - check: policy deny stops before socket transport
 - check: unknown format rejected
@@ -144,7 +168,7 @@
 - check: byte length mismatch rejected
 - check: `DisplayEvent::Rejected` が `Result error` に変換される
 - pass: すべて拒否される
-- log: `LOG_DIR/step8-negative-contract.log`
+- log: `LOG_DIR/step10-negative-contract.log`
 
 ## Report Format
 

@@ -25,6 +25,7 @@ browser-as-hostile-client 境界の詳細は [browser-security-boundary.md](/mnt
 ## Screenshot Phase 2-B
 
 - 本物の `displayd` process ではなく repo 内の test harness displayd を使う。
+- `xwin-screenshot-harness-displayd` は dev-harness feature で起動する dev-only helper であり、production displayd ではない。
 - tempdir socket と tempdir artifact root だけを使い、`CaptureOutput` -> `OutputCaptured` -> RGBA8888 artifact -> ingest -> PNG/JPEG encode の契約 E2E を固定する。
 - 実 `displayd.sock` には接続しない。
 - 実 Wayland session / DRM-KMS / PipeWire / input device には触らない。
@@ -39,6 +40,7 @@ browser-as-hostile-client 境界の詳細は [browser-security-boundary.md](/mnt
 - raw RGBA artifact は `width * height * 4` の整合性を通してから `CapturedFrame` 化する。
 - Unix では artifact open/read を openat / O_NOFOLLOW / O_DIRECTORY / O_CLOEXEC で harden する。
 - `DisplaydArtifactCaptureClient` は `DisplaydIpcCaptureClient` の返却物を encode 経路へ渡す。
+- dev-only harness binary は実 `displayd.sock` 境界を越えず、明示 socket / artifact root の tempdir 検証だけを行う。
 - 実 `displayd.sock` にはまだ接続しない。
 - symlink は Phase2-A で拒否し、kernel-level の完全証明と実 runtime artifact は後続 phase として残す。
 
