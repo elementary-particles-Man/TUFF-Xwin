@@ -112,6 +112,7 @@
 - 実displayd.sock pathは明示指定のみ
 - policy hook が transport 前に走ることを再確認
 - 失敗時ログ・artifact回収手順を先に固定
+- 実行コマンド列と記録形式は [XWIN_SCREENSHOT_ISOLATED_VM_RUN_MANIFEST.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_RUN_MANIFEST.md) に分離する
 
 ## Recommended Next Choices
 

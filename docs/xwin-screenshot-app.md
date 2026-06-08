@@ -104,5 +104,6 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - 詳細計画は [XWIN_SCREENSHOT_ISOLATED_VM_PLAN.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_PLAN.md) に分離する。
 - 実行手順は [XWIN_SCREENSHOT_ISOLATED_VM_RUNBOOK.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_RUNBOOK.md) に分離する。
 - checkpoint は [XWIN_SCREENSHOT_PHASE2_CHECKPOINT.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_PHASE2_CHECKPOINT.md) に固定する。
+- 実行コマンド列と記録形式は [XWIN_SCREENSHOT_ISOLATED_VM_RUN_MANIFEST.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_RUN_MANIFEST.md) に分離する。
 - 現用OSの displayd.sock / Wayland session / XDG_RUNTIME_DIR / DISPLAY / WAYLAND_DISPLAY は読まない。
 - 失敗しても VM またはテスト機だけで閉じる。
