@@ -21,9 +21,10 @@
 - artifact path は相対名のみ許可する
 - `..` / `.` / absolute artifact path を拒否する
 - symlinkを含む artifact path を拒否する
+- Unix では artifact open/read を openat / O_NOFOLLOW / O_DIRECTORY / O_CLOEXEC で harden 済みである
 - expected RGBA byte length を checked arithmetic で算出する
 - metadata length と read後 length の両方で mismatch を拒否する
-- TOCTOU完全対策は後続phaseに残す
+- TOCTOU の kernel-level 完全証明は後続phaseに残すが、既知の symlink 差し替えと親ディレクトリ差し替えは安全側へ倒している
 
 ## Phase2-B Fixed: Test Harness Displayd
 
@@ -71,6 +72,7 @@
 - `/run/user` path 拒否
 - policy deny は transport 前に停止
 - artifact contract mismatch は保存前に拒否
+- Unix artifact open/read は openat / O_NOFOLLOW 系で harden 済み
 - failure は panic ではなく Result error に寄せる
 
 ## Current xwin-screenshot Capabilities
@@ -91,7 +93,7 @@
 - 実DRM/KMS/PipeWire/input device接続
 - 実runtime artifact読み込み
 - 本物displayd process起動
-- openat/no-follow によるTOCTOU完全対策
+- openat/no-follow による kernel-level TOCTOU 完全証明
 - 実Chromeプロセス判定
 - Chrome/V8 exploit検出
 - ブラウザsandbox再実装

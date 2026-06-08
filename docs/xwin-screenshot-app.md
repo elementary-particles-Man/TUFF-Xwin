@@ -63,9 +63,10 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - artifact 本体は PNG/JPEG ではなく raw RGBA8888 bytes として扱う。
 - `displayd` 側 writer は native `u32` dump ではなく明示的な RGBA8888 byte stream を書く。
 - raw RGBA artifact は `width * height * 4` と一致した場合のみ受理する。
+- Unix では artifact open/read を openat / O_NOFOLLOW / O_DIRECTORY / O_CLOEXEC で harden する。
 - `DisplaydArtifactCaptureClient` により `DisplaydIpcCaptureClient` の返却物を encode 経路へ接続する。
 - 実 `displayd.sock` にはまだ接続しない。
-- symlink は Phase2-A で拒否し、TOCTOU 完全対策と実 runtime artifact 読み込みは後続 phase の扱いとする。
+- symlink は Phase2-A で拒否し、kernel-level の完全証明と実 runtime artifact 読み込みは後続 phase の扱いとする。
 - Phase2-B では test harness displayd により `CaptureOutput` / `OutputCaptured` / artifact ingest / encode の往復を repo 内で固定する。
 
 ## Phase 2-A

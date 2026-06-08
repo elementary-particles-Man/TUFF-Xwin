@@ -1,7 +1,13 @@
 use std::{
+    ffi::CString,
     fs,
+    io::Read,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     path::{Component, Path, PathBuf},
 };
+
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -92,19 +98,6 @@ impl FileCaptureArtifactReader {
         Ok(self.allowed_root.as_path().join(artifact_path))
     }
 
-    fn reject_symlink_components(&self, artifact_path: &Path) -> Result<()> {
-        let mut current = self.allowed_root.as_path().to_path_buf();
-        for component in artifact_path.components() {
-            current.push(component.as_os_str());
-            if let Ok(metadata) = fs::symlink_metadata(&current) {
-                if metadata.file_type().is_symlink() {
-                    bail!("artifact path must not traverse symlinks");
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn expected_rgba_byte_len(&self, width: u32, height: u32) -> Result<usize> {
         let expected = u64::from(width)
             .checked_mul(u64::from(height))
@@ -118,6 +111,64 @@ impl FileCaptureArtifactReader {
         }
         Ok(expected as usize)
     }
+
+    fn read_expected_rgba_bytes(
+        &self,
+        reader: &mut impl Read,
+        expected_len: usize,
+        path: &Path,
+    ) -> Result<Vec<u8>> {
+        let mut rgba = Vec::with_capacity(expected_len);
+        reader
+            .read_to_end(&mut rgba)
+            .with_context(|| format!("failed to read displayd artifact {}", path.display()))?;
+        if rgba.len() != expected_len {
+            bail!(
+                "displayd artifact size mismatch after read: expected {expected_len}, got {}",
+                rgba.len()
+            );
+        }
+        Ok(rgba)
+    }
+
+    #[cfg(unix)]
+    fn open_artifact_fd(&self, artifact_path: &Path) -> Result<OwnedFd> {
+        self.validate_relative_artifact_path(artifact_path)?;
+        let artifact_label = artifact_path.display().to_string();
+        let mut dir_fd = open_directory_fd(self.allowed_root.as_path()).with_context(|| {
+            format!("failed to open artifact root {}", self.allowed_root.as_path().display())
+        })?;
+
+        let components: Vec<_> = artifact_path.components().collect();
+        for (index, component) in components.iter().enumerate() {
+            let name = component.as_os_str().to_string_lossy();
+            let next = if index + 1 == components.len() {
+                open_artifact_file_fd(dir_fd.as_raw_fd(), component.as_os_str()).with_context(
+                    || {
+                        format!(
+                            "failed to open displayd artifact {} under {}",
+                            artifact_label,
+                            self.allowed_root.as_path().display()
+                        )
+                    },
+                )?
+            } else {
+                open_artifact_dir_fd(dir_fd.as_raw_fd(), component.as_os_str()).with_context(|| {
+                    format!(
+                        "failed to descend into artifact directory component {name} for {artifact_label}"
+                    )
+                })?
+            };
+            dir_fd = next;
+        }
+
+        Ok(dir_fd)
+    }
+
+    #[cfg(not(unix))]
+    fn open_artifact_fd(&self, _artifact_path: &Path) -> Result<OwnedFd> {
+        bail!("artifact reads are only supported on Unix in this build");
+    }
 }
 
 impl CaptureArtifactReader for FileCaptureArtifactReader {
@@ -128,8 +179,10 @@ impl CaptureArtifactReader for FileCaptureArtifactReader {
         }
         let expected_len = self.expected_rgba_byte_len(artifact.width, artifact.height)?;
         let path = self.resolve_artifact_path(&artifact.artifact_path)?;
-        self.reject_symlink_components(&artifact.artifact_path)?;
-        let metadata = fs::metadata(&path)
+        let fd = self.open_artifact_fd(&artifact.artifact_path)?;
+        let mut file = file_from_owned_fd(fd);
+        let metadata = file
+            .metadata()
             .with_context(|| format!("failed to inspect displayd artifact {}", path.display()))?;
         if !metadata.is_file() {
             bail!("displayd artifact path must point to a file");
@@ -138,17 +191,78 @@ impl CaptureArtifactReader for FileCaptureArtifactReader {
         if file_len != expected_len as u64 {
             bail!("displayd artifact size mismatch: expected {expected_len}, got {file_len}");
         }
-        let rgba = fs::read(&path)
-            .with_context(|| format!("failed to read displayd artifact {}", path.display()))?;
-        if rgba.len() != expected_len {
-            bail!(
-                "displayd artifact size mismatch after read: expected {expected_len}, got {}",
-                rgba.len()
-            );
-        }
+        let rgba = self.read_expected_rgba_bytes(&mut file, expected_len, &path)?;
         validate_rgba_buffer_size(artifact.width, artifact.height, rgba.len())?;
         CapturedFrame::new(artifact.width, artifact.height, rgba)
     }
+}
+
+#[cfg(unix)]
+fn open_directory_fd(path: &Path) -> Result<OwnedFd> {
+    let c_path = path_to_cstring(path)?;
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    owned_fd_from_raw(fd).with_context(|| format!("failed to open directory {}", path.display()))
+}
+
+#[cfg(unix)]
+fn open_artifact_dir_fd(dir_fd: RawFd, component: &std::ffi::OsStr) -> Result<OwnedFd> {
+    let c_component = os_str_to_cstring(component)?;
+    let fd = unsafe {
+        libc::openat(
+            dir_fd,
+            c_component.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    owned_fd_from_raw(fd).context("failed to open artifact directory component")
+}
+
+#[cfg(unix)]
+fn open_artifact_file_fd(dir_fd: RawFd, component: &std::ffi::OsStr) -> Result<OwnedFd> {
+    let c_component = os_str_to_cstring(component)?;
+    let fd = unsafe {
+        libc::openat(
+            dir_fd,
+            c_component.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    owned_fd_from_raw(fd).context("failed to open artifact file")
+}
+
+#[cfg(unix)]
+fn owned_fd_from_raw(fd: libc::c_int) -> Result<OwnedFd> {
+    if fd < 0 {
+        bail!("openat/open failed: {}", std::io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn path_to_cstring(path: &Path) -> Result<CString> {
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| anyhow!("path contains an embedded NUL byte"))
+}
+
+#[cfg(unix)]
+fn os_str_to_cstring(component: &std::ffi::OsStr) -> Result<CString> {
+    CString::new(component.as_bytes())
+        .map_err(|_| anyhow!("path component contains an embedded NUL byte"))
+}
+
+#[cfg(not(unix))]
+fn file_from_owned_fd(_fd: OwnedFd) -> fs::File {
+    unreachable!("file_from_owned_fd is only used on Unix")
+}
+
+#[cfg(unix)]
+fn file_from_owned_fd(fd: OwnedFd) -> fs::File {
+    fd.into()
 }
 
 #[derive(Debug)]
@@ -189,8 +303,6 @@ where
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::os::unix::net::UnixListener;
-    use std::thread;
     use tempfile::tempdir;
     use waybroker_common::{DisplayEvent, IpcEnvelope, MessageKind, ServiceRole};
     use xwin_sec::BrowserSecurityPolicy;
@@ -261,6 +373,20 @@ mod tests {
         assert_eq!(frame.width, 1);
         assert_eq!(frame.height, 1);
         assert_eq!(frame.rgba.len(), 4);
+    }
+
+    #[test]
+    fn openat_reader_accepts_valid_rgba8888_artifact_under_root() {
+        let dir = tempdir().unwrap();
+        let artifact_path = dir.path().join("frame.rgba");
+        write_rgba(&artifact_path, 2, 2).unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact =
+            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", "frame.rgba").unwrap();
+        let frame = reader.read_frame(&artifact).unwrap();
+        assert_eq!(frame.width, 2);
+        assert_eq!(frame.height, 2);
+        assert_eq!(frame.rgba.len(), 16);
     }
 
     #[test]
@@ -411,6 +537,17 @@ mod tests {
         assert!(reader.read_frame(&artifact).is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn openat_reader_rejects_directory_artifact() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("frame.rgba")).unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact =
+            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", "frame.rgba").unwrap();
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
     #[test]
     fn artifact_reader_rejects_zero_dimensions() {
         let dir = tempdir().unwrap();
@@ -429,7 +566,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn artifact_reader_rejects_symlink_artifact() {
+    fn openat_reader_rejects_symlink_artifact() {
         use std::os::unix::fs::symlink;
 
         let dir = tempdir().unwrap();
@@ -445,7 +582,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn artifact_reader_rejects_symlink_parent_directory() {
+    fn openat_reader_rejects_symlink_parent_directory() {
         use std::os::unix::fs::symlink;
 
         let root = tempdir().unwrap();
@@ -465,6 +602,64 @@ mod tests {
         )
         .unwrap();
         assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[test]
+    fn openat_reader_rejects_absolute_artifact_path() {
+        let dir = tempdir().unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact_path = PathBuf::from("/tmp/xwin-artifact-outside.rgba");
+        let artifact =
+            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", &artifact_path).unwrap();
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[test]
+    fn openat_reader_rejects_empty_or_dot_component() {
+        let dir = tempdir().unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact = DisplaydCaptureArtifact {
+            output: "fullscreen".into(),
+            width: 2,
+            height: 2,
+            format: "RGBA8888".into(),
+            artifact_path: PathBuf::from("./frame.rgba"),
+        };
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[test]
+    fn openat_reader_rejects_parent_traversal() {
+        let dir = tempdir().unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact = DisplaydCaptureArtifact {
+            output: "fullscreen".into(),
+            width: 2,
+            height: 2,
+            format: "RGBA8888".into(),
+            artifact_path: PathBuf::from("../frame.rgba"),
+        };
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[test]
+    fn openat_reader_rejects_metadata_length_mismatch_before_read() {
+        let dir = tempdir().unwrap();
+        let artifact_path = dir.path().join("frame.rgba");
+        fs::write(&artifact_path, vec![0x55; 12]).unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let artifact =
+            DisplaydCaptureArtifact::new("fullscreen", 2, 2, "RGBA8888", "frame.rgba").unwrap();
+        assert!(reader.read_frame(&artifact).is_err());
+    }
+
+    #[test]
+    fn openat_reader_rejects_read_length_mismatch_after_read() {
+        let dir = tempdir().unwrap();
+        let reader = FileCaptureArtifactReader::new(dir.path()).unwrap();
+        let mut rgba = std::io::Cursor::new(vec![0x55; 15]);
+        let path = Path::new("frame.rgba");
+        assert!(reader.read_expected_rgba_bytes(&mut rgba, 16, path).is_err());
     }
 
     #[test]
