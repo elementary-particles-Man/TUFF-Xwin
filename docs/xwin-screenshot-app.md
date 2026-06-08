@@ -102,5 +102,6 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 
 - 実 displayd.sock / 実 Wayland session / 実 input / 実 DRM-KMS に進む前に、隔離VMまたはテスト機の手順を固定する。
 - 詳細計画は [XWIN_SCREENSHOT_ISOLATED_VM_PLAN.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_PLAN.md) に分離する。
+- 実行手順は [XWIN_SCREENSHOT_ISOLATED_VM_RUNBOOK.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_RUNBOOK.md) に分離する。
 - 現用OSの displayd.sock / Wayland session / XDG_RUNTIME_DIR / DISPLAY / WAYLAND_DISPLAY は読まない。
 - 失敗しても VM またはテスト機だけで閉じる。

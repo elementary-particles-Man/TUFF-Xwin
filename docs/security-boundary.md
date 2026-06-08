@@ -72,6 +72,7 @@ browser-as-hostile-client 境界の詳細は [browser-security-boundary.md](/mnt
 
 - 実 displayd.sock / 実 Wayland session / 実 input / 実 DRM-KMS へ進む前に、隔離VMまたはテスト機の手順を固定する。
 - この段階の文書は [XWIN_SCREENSHOT_ISOLATED_VM_PLAN.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_PLAN.md) に分離する。
+- 実行手順は [XWIN_SCREENSHOT_ISOLATED_VM_RUNBOOK.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_RUNBOOK.md) に分離する。
 - 現用OSの displayd.sock / Wayland session / XDG_RUNTIME_DIR / DISPLAY / WAYLAND_DISPLAY は参照しない。
 - 失敗しても VM またはテスト機だけで閉じることを前提にする。
 
