@@ -6,6 +6,7 @@
 - この文書は Phase2 計画であり、実装ではない
 - Phase1 checkpoint: [docs/status/XWIN_SCREENSHOT_PHASE1_CHECKPOINT.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_PHASE1_CHECKPOINT.md)
 - 実OS統合前の repo内計画文書である
+- Phase2 checkpoint: [docs/status/XWIN_SCREENSHOT_PHASE2_CHECKPOINT.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_PHASE2_CHECKPOINT.md)
 
 ## Phase1 Fixed State
 

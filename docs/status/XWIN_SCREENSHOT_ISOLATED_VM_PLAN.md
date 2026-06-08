@@ -5,6 +5,7 @@
 - main HEAD: `8c6362c258f9c11a47cdc6f2bff090b6e34597d3`
 - この文書は隔離VM/テスト機検証計画であり、実装ではない
 - この文書作成時点では VM 起動・実OS操作・実displayd.sock接続を行わない
+- Phase2 checkpoint: [XWIN_SCREENSHOT_PHASE2_CHECKPOINT.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_PHASE2_CHECKPOINT.md)
 
 ## Purpose
 
