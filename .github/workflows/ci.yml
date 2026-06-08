@@ -39,3 +39,16 @@ jobs:
         run: ./scripts/run-lockd-identity-and-ui-path-smoke.sh
       - name: Lockd Recovery Execution Optionalization Smoke Test
         run: ./scripts/run-lockd-recovery-execution-optionalization.sh
+
+  xwin-screenshot-dev-harness-validation:
+    name: xwin-screenshot dev-harness validation
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: xwin-screenshot dev-harness check
+        run: cargo check --workspace --features dev-harness
+      - name: xwin-screenshot dev-harness test
+        run: cargo test --workspace --features dev-harness

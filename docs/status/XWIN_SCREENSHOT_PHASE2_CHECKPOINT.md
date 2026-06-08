@@ -82,6 +82,7 @@
 - isolated-displayd backend を明示socket pathとartifact rootで構成可能
 - config file から fake / isolated-displayd backend を構成可能
 - CLI override で config file 値を上書き可能
+- dev-harness feature は CI でも `cargo check/test --workspace --features dev-harness` で検証される
 - test harness displayd と dev-only harness binary で CaptureOutput -> OutputCaptured -> RGBA8888 artifact -> ingest -> PNG/JPEG encode を repo内E2E確認可能
 - browser hostile clientの screen capture は explicit visible grant なしでは拒否される
 

@@ -51,6 +51,7 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 
 - 本物の `displayd` process ではなく repo 内の test harness displayd を使う。
 - `xwin-screenshot-harness-displayd` は dev-harness feature で起動する dev-only helper であり、production displayd ではない。
+- dev-harness feature は default build には含めず、CI でのみ `cargo check/test --workspace --features dev-harness` を追加検証する。
 - tempdir socket と tempdir artifact root だけを使い、`CaptureOutput` -> `OutputCaptured` -> RGBA8888 artifact -> ingest -> PNG/JPEG encode の契約 E2E を固定する。
 - 実 `displayd.sock` には接続しない。
 - 実 Wayland session / DRM-KMS / PipeWire / input device には触らない。

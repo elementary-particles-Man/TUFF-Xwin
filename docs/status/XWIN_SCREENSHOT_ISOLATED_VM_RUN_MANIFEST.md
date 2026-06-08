@@ -72,6 +72,12 @@
 - log: `LOG_DIR/step1-cargo-test.log`
 - log: `LOG_DIR/step1-git-diff-check.log`
 
+## CI Validation Note
+
+- GitHub Actions では dev-harness feature も `cargo check --workspace --features dev-harness` と `cargo test --workspace --features dev-harness` で検証する
+- dev-harness feature は default build には含めない
+- 通常の `cargo check/test --workspace` を弱めない
+
 ## Manifest Step 2: Fake Backend CLI PNG
 
 - command: `xwin-screenshot --backend fake --format png --save-dir OUT_DIR`
