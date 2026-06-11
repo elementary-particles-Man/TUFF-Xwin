@@ -184,3 +184,10 @@ Anthropic の Mythos Preview に関する記述では、browser exploit の作�
 Xwin は exploit の作成や検出を担当しない。
 Xwin が担当するのは、compromised browser client を画面、入力、clipboard、file picker、screen capture、IME、GPU、compositor の境界で閉じ込めることだけである。
 
+## TUFF-Xwin browser surface boundary
+
+`crates/xwin-sec/src/browser_surface_boundary.rs` は、browser runtime が既に存在する前提で surface posture を passive に評価する補助モジュールである。
+`KAIRO` の `CisaKevBrowserRuntimeGate` は runtime version / KEV / update / restart posture を扱い、`TUFF-Xwin` の browser surface boundary は display / input / window / clipboard / drag-and-drop / file picker / GPU presentation / native messaging の境界を評価する。
+
+この評価モジュールは browser を起動せず、URL を開かず、JavaScript を実行せず、process attach も memory inspect もしない。
+browser profile、extension、policy、sandbox、update state の変更も行わない。
