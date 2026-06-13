@@ -12,7 +12,7 @@
 ## Runner Usage
 
 - primary execution path: `scripts/run-xwin-screenshot-isolated-manifest.sh`
-- runner は repo 直下の `target/xwin-screenshot-isolated-manifest/<run-id>` 配下に `RUN_ROOT` を作る
+- runner は repo 直下の `target/xsm/<run-id>` 配下に `RUN_ROOT` を作る
 - runner は step ごとのログ、report、artifact inventory を `RUN_ROOT` に保存する
 - 手打ちの command 列は manifest と runbook の参考情報として残す
 

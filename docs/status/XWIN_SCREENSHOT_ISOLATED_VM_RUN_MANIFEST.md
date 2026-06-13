@@ -11,7 +11,7 @@
 ## Repo-local Runner
 
 - primary execution path: `scripts/run-xwin-screenshot-isolated-manifest.sh`
-- runner は `target/xwin-screenshot-isolated-manifest/<timestamp-or-unique-run-id>` 配下に `RUN_ROOT` を作る
+- runner は `target/xsm/<timestamp-or-unique-run-id>` 配下に `RUN_ROOT` を作る
 - runner は step ごとの stdout/stderr log、markdown report、artifact inventory を `RUN_ROOT` に保存する
 - 手打ちのコマンド列は引き続き manifest の参照情報として残す
 

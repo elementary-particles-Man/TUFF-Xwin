@@ -71,7 +71,7 @@ resolve_run_root() {
     if [[ -z "$raw" ]]; then
         local run_id
         run_id="$(date +%Y%m%dT%H%M%S)-$$"
-        printf '%s/target/xwin-screenshot-isolated-manifest/%s\n' "$REPO_ROOT" "$run_id"
+        printf '%s/target/xsm/%s\n' "$REPO_ROOT" "$run_id"
         return 0
     fi
 
