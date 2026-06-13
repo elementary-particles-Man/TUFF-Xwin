@@ -13,10 +13,12 @@ export WAYBROKER_RUNTIME_DIR="${WAYBROKER_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/
 rm -rf "$WAYBROKER_RUNTIME_DIR"
 mkdir -p "$WAYBROKER_RUNTIME_DIR"
 session_instance_id="${WAYBROKER_SESSION_INSTANCE_ID:-role-scoped-recovery-execution}"
+export WAYBROKER_MOCK_HOLD_SECONDS="${WAYBROKER_MOCK_HOLD_SECONDS:-120}"
 
 echo "==> Running Role-Scoped Recovery Execution Smoke Test"
 echo "==> Runtime directory: $WAYBROKER_RUNTIME_DIR"
 echo "==> Session instance id: $session_instance_id"
+echo "==> Mock component hold seconds: $WAYBROKER_MOCK_HOLD_SECONDS"
 
 target_dir="$(
   cargo metadata --format-version 1 --no-deps --quiet |
