@@ -82,7 +82,7 @@ echo "==> Triggering compd resume failure..."
 echo "==> Waiting for recovery execution..."
 timeout=10
 count=0
-execution_artifact="$WAYBROKER_RUNTIME_DIR/watchdog-action-execution-compd.json"
+execution_artifact=$(ls "$WAYBROKER_RUNTIME_DIR"/session-*-watchdog-action-execution-compd.json 2>/dev/null | head -n 1)
 while [[ ! -f "$execution_artifact" ]]; do
   if [[ $count -ge $((timeout * 10)) ]]; then
     echo "FAILED: Recovery execution artifact not found"

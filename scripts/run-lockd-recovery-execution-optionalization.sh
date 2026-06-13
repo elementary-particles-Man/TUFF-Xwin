@@ -92,7 +92,8 @@ run_scenario() {
 
   echo "==> Verifying artifacts..."
 
-  local lock_artifact="$WAYBROKER_RUNTIME_DIR/lock-ui-path-lockd-trouble.json"
+  local lock_artifact
+  lock_artifact=$(ls "$WAYBROKER_RUNTIME_DIR"/session-*-lock-ui-path-lockd-trouble.json 2>/dev/null | head -n 1)
   if [[ ! -f "$lock_artifact" ]]; then
     echo "FAILED: Lock artifact not found"
     exit 1
@@ -111,7 +112,8 @@ run_scenario() {
     exit 1
   fi
 
-  local exec_artifact="$WAYBROKER_RUNTIME_DIR/watchdog-action-execution-lockd.json"
+  local exec_artifact
+  exec_artifact=$(ls "$WAYBROKER_RUNTIME_DIR"/session-*-watchdog-action-execution-lockd.json 2>/dev/null | head -n 1)
   if [[ "$expect_execution_result" == "none" ]]; then
     if [[ -f "$exec_artifact" ]]; then
       echo "FAILED: Execution artifact should not exist"
@@ -188,7 +190,7 @@ wait_for_socket "$WAYBROKER_RUNTIME_DIR/sessiond.sock"
 
 sleep 1.5
 
-exec_artifact="$WAYBROKER_RUNTIME_DIR/watchdog-action-execution-lockd.json"
+exec_artifact=$(ls "$WAYBROKER_RUNTIME_DIR"/session-*-watchdog-action-execution-lockd.json 2>/dev/null | head -n 1)
 if [[ ! -f "$exec_artifact" ]]; then
   echo "FAILED: Execution artifact not found for missing binding"
   exit 1

@@ -84,7 +84,8 @@ run_scenario() {
   cleanup
 
   # Verify trace
-  local trace_file="$WAYBROKER_RUNTIME_DIR/resume-trace-$scenario.json"
+  local trace_file
+  trace_file=$(ls "$WAYBROKER_RUNTIME_DIR"/session-*-resume-trace-"$scenario".json 2>/dev/null | head -n 1)
   if [[ ! -f "$trace_file" ]]; then
     echo "Error: Trace file not found: $trace_file"
     return 1
