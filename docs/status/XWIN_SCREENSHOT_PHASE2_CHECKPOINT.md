@@ -2,7 +2,7 @@
 
 ## Checkpoint Baseline
 
-- main HEAD: `1e01f6a38a62d9f5989eedd5f4881a53037461d0`
+- main HEAD: `92d607c4c5a1c5fa0541c09636b12894d7b728e8`
 - この文書は Phase2-A〜D の checkpoint であり、release ではない
 - この文書は実OS統合前の安全境界固定であり、実装ではない
 - この文書作成時点では VM起動・実displayd.sock接続・実Wayland session接続を行わない
@@ -54,6 +54,7 @@
 
 - 隔離VM/専用テスト機計画を追加済み
 - 隔離VM/専用テスト機runbookを追加済み
+- repo-local manifest runner を `scripts/run-xwin-screenshot-isolated-manifest.sh` として追加済み
 - 現用OSでは実施しない
 - CUI/SSH recovery path を先に確保する
 - snapshotまたは復元手順を先に確保する
@@ -69,6 +70,7 @@
 - 実global hotkey 非登録
 - 実system tray 非登録
 - 本物displayd process 非起動
+- browser surface boundary は main に固定済み
 - runtime自動探索なし
 - `/run/user` path 拒否
 - policy deny は transport 前に停止
@@ -82,6 +84,7 @@
 - isolated-displayd backend を明示socket pathとartifact rootで構成可能
 - config file から fake / isolated-displayd backend を構成可能
 - CLI override で config file 値を上書き可能
+- repo-local manifest runner で fake / dev-harness / isolated-displayd / config flow / negative checks をまとめて再現できる
 - dev-harness feature は CI でも `cargo check/test --workspace --features dev-harness` で検証される
 - test harness displayd と dev-only harness binary で CaptureOutput -> OutputCaptured -> RGBA8888 artifact -> ingest -> PNG/JPEG encode を repo内E2E確認可能
 - browser hostile clientの screen capture は explicit visible grant なしでは拒否される
@@ -140,6 +143,7 @@
 - `cargo fmt --check` PASS
 - `cargo check --workspace` PASS
 - `cargo test --workspace` PASS
+- `cargo test -p xwin-sec --test browser_surface_boundary` PASS
 - `git diff --check` PASS
 - origin/main同期
 - workspace clean

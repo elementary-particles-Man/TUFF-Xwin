@@ -2,11 +2,18 @@
 
 ## Manifest Baseline
 
-- main HEAD: `7ff095bcc346d0b6e949fd5b45a4516c64bd11d2`
+- main HEAD: `92d607c4c5a1c5fa0541c09636b12894d7b728e8`
 - この文書は隔離VM/専用テスト機で実行する検証コマンドのmanifestであり、実装ではない
 - この文書作成時点では VM起動・QEMU起動・実displayd.sock接続・実Wayland session接続を行わない
 - 前提文書: [XWIN_SCREENSHOT_PHASE2_CHECKPOINT.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_PHASE2_CHECKPOINT.md)
 - 前提文書: [XWIN_SCREENSHOT_ISOLATED_VM_RUNBOOK.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_RUNBOOK.md)
+
+## Repo-local Runner
+
+- primary execution path: `scripts/run-xwin-screenshot-isolated-manifest.sh`
+- runner は `target/xwin-screenshot-isolated-manifest/<timestamp-or-unique-run-id>` 配下に `RUN_ROOT` を作る
+- runner は step ごとの stdout/stderr log、markdown report、artifact inventory を `RUN_ROOT` に保存する
+- 手打ちのコマンド列は引き続き manifest の参照情報として残す
 
 ## Manifest Purpose
 
@@ -55,7 +62,7 @@
 - command: `git rev-parse --show-toplevel`
 - command: `git rev-parse HEAD`
 - command: `git status --short --branch`
-- pass: HEAD が `7ff095bcc346d0b6e949fd5b45a4516c64bd11d2` または実行時に明示指定された検証対象SHAである
+- pass: HEAD が `92d607c4c5a1c5fa0541c09636b12894d7b728e8` または実行時に明示指定された検証対象SHAである
 - pass: workspace clean
 - fail: cleanでない場合は以後の検証へ進まない
 
@@ -71,6 +78,13 @@
 - log: `LOG_DIR/step1-cargo-check.log`
 - log: `LOG_DIR/step1-cargo-test.log`
 - log: `LOG_DIR/step1-git-diff-check.log`
+
+## Manifest Step 1b: Browser Surface Boundary Regression
+
+- command: `cargo test -p xwin-sec --test browser_surface_boundary`
+- pass: `xwin-sec` の browser surface boundary tests が継続 PASS する
+- fail: `xwin-sec` の browser surface boundary regression が壊れている
+- log: `LOG_DIR/step1b-browser-surface-boundary.log`
 
 ## CI Validation Note
 
@@ -203,6 +217,7 @@
 
 - Step 0 PASS
 - Step 1 PASS
+- Step 1b PASS
 - Step 2 PASS
 - Step 3 PASS
 - Step 4 PASS
@@ -210,6 +225,8 @@
 - Step 6 PASS
 - Step 7 PASS
 - Step 8 PASS
+- Step 9 PASS
+- Step 10 PASS
 - workspace clean維持
 - 現用OS非干渉
 - 実displayd.sock非接続

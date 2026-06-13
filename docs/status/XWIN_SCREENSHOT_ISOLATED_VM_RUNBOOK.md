@@ -2,12 +2,19 @@
 
 ## Baseline
 
-- main HEAD: `3859a4a7c11260603c57a044f29b88905ecf6a5d`
+- main HEAD: `92d607c4c5a1c5fa0541c09636b12894d7b728e8`
 - この文書は隔離VM/専用テスト機で実行するためのrunbookであり、実装ではない
 - この文書作成時点では VM起動・QEMU起動・実displayd.sock接続・実Wayland session接続を行わない
 - 前提文書: [XWIN_SCREENSHOT_ISOLATED_VM_PLAN.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_PLAN.md)
 - Phase2 checkpoint: [XWIN_SCREENSHOT_PHASE2_CHECKPOINT.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_PHASE2_CHECKPOINT.md)
 - 実行コマンド列と記録形式は [XWIN_SCREENSHOT_ISOLATED_VM_RUN_MANIFEST.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_RUN_MANIFEST.md) に分離する
+
+## Runner Usage
+
+- primary execution path: `scripts/run-xwin-screenshot-isolated-manifest.sh`
+- runner は repo 直下の `target/xwin-screenshot-isolated-manifest/<run-id>` 配下に `RUN_ROOT` を作る
+- runner は step ごとのログ、report、artifact inventory を `RUN_ROOT` に保存する
+- 手打ちの command 列は manifest と runbook の参考情報として残す
 
 ## Runbook Purpose
 
@@ -49,6 +56,7 @@
 
 - `cargo fmt --check`
 - `cargo check --workspace`
+- `cargo test -p xwin-sec --test browser_surface_boundary`
 - `cargo test --workspace`
 - `git diff --check`
 - `git status --short --branch`
@@ -119,6 +127,7 @@
 
 - `cargo fmt --check` PASS
 - `cargo check --workspace` PASS
+- `cargo test -p xwin-sec --test browser_surface_boundary` PASS
 - `cargo test --workspace` PASS
 - fake backend PNG/JPEG PASS
 - isolated-displayd harness PNG/JPEG PASS
