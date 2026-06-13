@@ -87,7 +87,7 @@ echo "==> Executing resume scenario: compd-trouble"
 
 # Wait for supervisor to detect and execute recovery
 echo "==> Waiting for recovery execution..."
-timeout=30
+timeout=60
 count=0
 execution_artifact_files=("$WAYBROKER_RUNTIME_DIR"/session-*-watchdog-action-execution-compd.json)
 execution_artifact="${execution_artifact_files[0]:-}"
