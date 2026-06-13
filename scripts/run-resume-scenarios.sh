@@ -7,6 +7,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+shopt -s nullglob
 
 export WAYBROKER_RUNTIME_DIR="${WAYBROKER_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/waybroker-resume-scenarios}"
 rm -rf "$WAYBROKER_RUNTIME_DIR"
@@ -84,8 +85,8 @@ run_scenario() {
   cleanup
 
   # Verify trace
-  local trace_file
-  trace_file=$(ls "$WAYBROKER_RUNTIME_DIR"/session-*-resume-trace-"$scenario".json 2>/dev/null | head -n 1)
+  local trace_files=("$WAYBROKER_RUNTIME_DIR"/session-*-resume-trace-"$scenario".json)
+  local trace_file="${trace_files[0]:-}"
   if [[ ! -f "$trace_file" ]]; then
     echo "Error: Trace file not found: $trace_file"
     return 1
