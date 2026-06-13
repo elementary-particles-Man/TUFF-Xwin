@@ -49,6 +49,23 @@ wait_for_socket() {
   sleep 0.1
 }
 
+wait_for_file() {
+  local path=$1
+  local timeout=10
+  local count=0
+  echo "Waiting for file $path..."
+  while [[ ! -f "$path" ]]; do
+    if [[ $count -ge $((timeout * 10)) ]]; then
+      echo "Error: Timeout waiting for file $path" >&2
+      return 1
+    fi
+    sleep 0.1
+    count=$((count + 1))
+  done
+  echo "File $path found."
+  sleep 0.1
+}
+
 # Pre-build
 echo "==> Pre-building all packages..."
 cargo build --workspace
@@ -70,16 +87,9 @@ wait_for_socket "$WAYBROKER_RUNTIME_DIR/lockd.sock"
 # Start sessiond in manage-active mode
 "$target_dir/sessiond" --serve-ipc --manage-active --spawn-components --notify-watchdog --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/sessiond-managed.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/sessiond.sock"
-
-# Inject faulty compd.
-# sessiond already spawned one, let's kill it and start our own faulty one.
-# We need to make sure the faulty one uses the same socket path.
-pkill -f "compd" || true
-sleep 0.5
-rm -f "$WAYBROKER_RUNTIME_DIR/compd.sock"
-
-"$target_dir/compd" --serve-ipc --fail-resume --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/compd-faulty.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/compd.sock"
+launch_state_file="$WAYBROKER_RUNTIME_DIR/session-${session_instance_id}-launch-state.json"
+wait_for_file "$launch_state_file"
 
 # Run a second sessiond just to trigger the resume scenario against the running stack
 echo "==> Executing resume scenario: compd-trouble"
@@ -88,6 +98,22 @@ echo "==> Executing resume scenario: compd-trouble"
 # Wait for supervisor to detect and execute recovery
 echo "==> Waiting for recovery execution..."
 timeout=60
+count=0
+recovery_artifact_files=("$WAYBROKER_RUNTIME_DIR"/session-*-watchdog-recovery-compd.json)
+recovery_artifact="${recovery_artifact_files[0]:-}"
+while [[ ! -f "$recovery_artifact" ]]; do
+  if [[ $count -ge $((timeout * 10)) ]]; then
+    echo "FAILED: Recovery request artifact not found after timeout"
+    echo "--- sessiond log ---"
+    cat "$WAYBROKER_RUNTIME_DIR/sessiond-managed.log"
+    exit 1
+  fi
+  sleep 0.1
+  count=$((count + 1))
+done
+
+echo "Recovery request artifact found."
+
 count=0
 execution_artifact_files=("$WAYBROKER_RUNTIME_DIR"/session-*-watchdog-action-execution-compd.json)
 execution_artifact="${execution_artifact_files[0]:-}"
