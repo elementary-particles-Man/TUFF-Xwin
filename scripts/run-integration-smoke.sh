@@ -44,7 +44,10 @@ wait_for_socket() {
 echo "==> Pre-building all packages..."
 cargo build --workspace
 
-target_dir="/home/flux/.cache/tuff-xwin-target/debug"
+target_dir="$(
+  cargo metadata --format-version 1 --no-deps --quiet |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+)/debug"
 
 # 1. Hardware Broker Baseline (displayd)
 echo "==> [1/6] Testing displayd output enumeration"
