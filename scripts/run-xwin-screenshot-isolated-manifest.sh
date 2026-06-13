@@ -3,7 +3,6 @@ set -euo pipefail
 
 IFS=$'\n\t'
 
-EXPECTED_HEAD="92d607c4c5a1c5fa0541c09636b12894d7b728e8"
 SCRIPT_NAME="scripts/run-xwin-screenshot-isolated-manifest.sh"
 
 run_root_arg=""
@@ -549,10 +548,6 @@ main() {
     REPO_ROOT="$(git rev-parse --show-toplevel)"
     cd "$REPO_ROOT"
 
-    if [[ "$(git rev-parse HEAD)" != "$EXPECTED_HEAD" ]]; then
-        fail "expected HEAD $EXPECTED_HEAD but found $(git rev-parse HEAD)"
-    fi
-
     ensure_clean_workspace
 
     RUN_ROOT="$(resolve_run_root "$run_root_arg")"
@@ -576,7 +571,6 @@ main() {
     append_report "# TUFF-Xwin Screenshot Isolated Manifest Run"
     record_kv "script" "$SCRIPT_NAME"
     record_kv "repo_root" "$REPO_ROOT"
-    record_kv "expected_head" "$EXPECTED_HEAD"
     record_kv "run_root" "$RUN_ROOT"
     record_kv "tmp_root" "$TMP_ROOT"
     record_kv "socket_path" "$SOCKET_PATH"
