@@ -65,6 +65,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 declare -a CHILD_PIDS=()
+STARTED_HARNESS_PID=""
 
 resolve_run_root() {
     local raw="$1"
@@ -133,10 +134,9 @@ start_harness() {
 
     rm -f "$SOCKET_PATH"
     "${args[@]}" >"$log_file" 2>&1 &
-    local pid=$!
-    CHILD_PIDS+=("$pid")
-    wait_for_socket "$SOCKET_PATH" "$pid"
-    printf '%s\n' "$pid"
+    STARTED_HARNESS_PID=$!
+    CHILD_PIDS+=("$STARTED_HARNESS_PID")
+    wait_for_socket "$SOCKET_PATH" "$STARTED_HARNESS_PID"
 }
 
 run_simple_step() {
@@ -286,8 +286,8 @@ step4_dev_harness_png() {
     local client_log="$LOG_DIR/step4-client.log"
     mkdir -p "$step_dir" "$artifact_dir"
     snapshot_inventory "$before" "$step_dir" "$artifact_dir"
-    local harness_pid
-    harness_pid="$(start_harness "$harness_log" "$artifact_dir")"
+    start_harness "$harness_log" "$artifact_dir"
+    local harness_pid="$STARTED_HARNESS_PID"
     run_logged_shell \
         "Step 4 Dev Harness PNG Client" \
         "cargo run -p xwin-screenshot -- --backend isolated-displayd --displayd-socket ${SOCKET_PATH} --artifact-root ${artifact_dir} --format png --save-dir ${step_dir}" \
@@ -317,8 +317,8 @@ step5_dev_harness_jpeg() {
     local client_log="$LOG_DIR/step5-client.log"
     mkdir -p "$step_dir" "$artifact_dir"
     snapshot_inventory "$before" "$step_dir" "$artifact_dir"
-    local harness_pid
-    harness_pid="$(start_harness "$harness_log" "$artifact_dir")"
+    start_harness "$harness_log" "$artifact_dir"
+    local harness_pid="$STARTED_HARNESS_PID"
     run_logged_shell \
         "Step 5 Dev Harness JPEG Client" \
         "cargo run -p xwin-screenshot -- --backend isolated-displayd --displayd-socket ${SOCKET_PATH} --artifact-root ${artifact_dir} --format jpeg --save-dir ${step_dir}" \
@@ -427,15 +427,16 @@ save_dir = "$jpeg_dir"
 png_compression = 6
 jpeg_quality = 90
 EOF
-    local harness_pid
-    harness_pid="$(start_harness "$harness_log_png" "$png_artifact_dir")"
+    start_harness "$harness_log_png" "$png_artifact_dir"
+    local harness_pid="$STARTED_HARNESS_PID"
     run_logged_shell \
         "Step 7.1 Config Isolated Displayd PNG" \
         "cargo run -p xwin-screenshot -- --config ${png_cfg}" \
         "$client_log_png" \
         "cargo run -p xwin-screenshot -- --config \"${png_cfg}\""
     wait "$harness_pid"
-    harness_pid="$(start_harness "$harness_log_jpeg" "$jpeg_artifact_dir")"
+    start_harness "$harness_log_jpeg" "$jpeg_artifact_dir"
+    harness_pid="$STARTED_HARNESS_PID"
     run_logged_shell \
         "Step 7.2 Config Isolated Displayd JPEG" \
         "cargo run -p xwin-screenshot -- --config ${jpeg_cfg}" \
@@ -482,8 +483,8 @@ step8_negative_contract_checks() {
     record_command "cargo run -p xwin-screenshot --features dev-harness --bin xwin-screenshot-harness-displayd -- --socket ${SOCKET_PATH} --artifact-root ${reject_artifact_dir} --width 2 --height 2 --serve-once --reject policy denied"
     record_command "cargo run -p xwin-screenshot -- --backend isolated-displayd --displayd-socket ${SOCKET_PATH} --artifact-root ${reject_artifact_dir} --format png --save-dir ${reject_out_dir}"
     record_log_path "$runtime_log"
-    local harness_pid
-    harness_pid="$(start_harness "$runtime_log" "$reject_artifact_dir" "policy denied")"
+    start_harness "$runtime_log" "$reject_artifact_dir" "policy denied"
+    local harness_pid="$STARTED_HARNESS_PID"
     set +e
     cargo run -p xwin-screenshot -- --backend isolated-displayd --displayd-socket "$SOCKET_PATH" --artifact-root "$reject_artifact_dir" --format png --save-dir "$reject_out_dir" >>"$runtime_log" 2>&1
     client_rc=$?
