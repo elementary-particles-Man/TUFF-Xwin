@@ -14,7 +14,10 @@ mkdir -p "$WAYBROKER_RUNTIME_DIR"
 echo "==> Running Multi-Session Recovery Isolation Smoke Test"
 echo "==> Runtime directory: $WAYBROKER_RUNTIME_DIR"
 
-target_dir="/home/flux/.cache/tuff-xwin-target/debug"
+target_dir="$(
+  cargo metadata --format-version 1 --no-deps --quiet |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+)/debug"
 
 # 1. Start Watchdog in IPC mode
 # Watchdog handles multiple sessions by caching their states separately.

@@ -8,7 +8,10 @@ export WAYBROKER_RUNTIME_DIR="${WAYBROKER_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/
 rm -rf "$WAYBROKER_RUNTIME_DIR"
 mkdir -p "$WAYBROKER_RUNTIME_DIR"
 
-target_dir="/home/flux/.cache/tuff-xwin-target/debug"
+target_dir="$(
+  cargo metadata --format-version 1 --no-deps --quiet |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+)/debug"
 profile_id="demo-wayland-compd-recovery"
 displayd_pid=""
 waylandd_pid=""

@@ -9,7 +9,10 @@ displayd_socket="$runtime_dir/displayd.sock"
 waylandd_socket="$runtime_dir/waylandd.sock"
 snapshot_path="$runtime_dir/displayd-last-scene.json"
 wayland_registry_snapshot="$runtime_dir/waylandd-surface-registry.json"
-target_dir="/home/flux/.cache/tuff-xwin-target/debug"
+target_dir="$(
+  cargo metadata --format-version 1 --no-deps --quiet |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+)/debug"
 scene_path="$repo_root/examples/minimal-scene/scene.json"
 registry_path="$repo_root/examples/minimal-scene/surface-registry.json"
 
