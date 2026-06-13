@@ -19,6 +19,12 @@ while [[ $# -gt 0 ]]; do
       exit_code="${2:?missing exit code}"
       shift 2
       ;;
+    --session-instance-id)
+      # sessiond passes the active session instance to repo-script components.
+      # The mock helper does not need to use it, but it must accept the flag so
+      # the smoke tests can exercise the full manage-active path.
+      shift 2
+      ;;
     *)
       echo "unknown argument: $1" >&2
       exit 1
