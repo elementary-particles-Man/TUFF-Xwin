@@ -1,3 +1,4 @@
+pub mod age_assurance_browser_surface_boundary;
 pub mod browser;
 pub mod browser_surface_boundary;
 pub mod capability;
@@ -5,6 +6,12 @@ pub mod client;
 pub mod decision;
 pub mod policy;
 
+pub use age_assurance_browser_surface_boundary::{
+    AgeAssuranceBrowserOperatorOverrides, AgeAssuranceBrowserSurfaceBoundaryAction,
+    AgeAssuranceBrowserSurfaceBoundaryContext, AgeAssuranceBrowserSurfaceBoundaryDecision,
+    AgeAssuranceBrowserSurfaceBoundaryDecisionState, AgeAssuranceBrowserSurfaceBoundaryFinding,
+    AgeAssuranceBrowserSurfaceState, evaluate_age_assurance_browser_surface_boundary,
+};
 pub use browser::{browser_hostile_client, browser_hostile_policy_note};
 pub use browser_surface_boundary::{
     BrowserClipboardPolicy, BrowserExtensionOrNativePolicy, BrowserFileBoundaryPolicy,
