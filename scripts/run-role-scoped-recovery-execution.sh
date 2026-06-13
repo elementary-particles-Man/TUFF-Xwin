@@ -13,12 +13,10 @@ export WAYBROKER_RUNTIME_DIR="${WAYBROKER_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/
 rm -rf "$WAYBROKER_RUNTIME_DIR"
 mkdir -p "$WAYBROKER_RUNTIME_DIR"
 session_instance_id="${WAYBROKER_SESSION_INSTANCE_ID:-role-scoped-recovery-execution}"
-export WAYBROKER_MOCK_HOLD_SECONDS="${WAYBROKER_MOCK_HOLD_SECONDS:-120}"
 
 echo "==> Running Role-Scoped Recovery Execution Smoke Test"
 echo "==> Runtime directory: $WAYBROKER_RUNTIME_DIR"
 echo "==> Session instance id: $session_instance_id"
-echo "==> Mock component hold seconds: $WAYBROKER_MOCK_HOLD_SECONDS"
 
 target_dir="$(
   cargo metadata --format-version 1 --no-deps --quiet |
@@ -67,7 +65,7 @@ wait_for_socket "$WAYBROKER_RUNTIME_DIR/watchdog.sock"
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/lockd.sock"
 
 # We need a profile selection for manage-active sessiond
-"$target_dir/sessiond" --select-profile demo-x11 --write-selection --session-instance-id "$session_instance_id" > /dev/null
+"$target_dir/sessiond" --select-profile demo-wayland-compd-recovery --write-selection --session-instance-id "$session_instance_id" > /dev/null
 
 # Start sessiond in manage-active mode
 "$target_dir/sessiond" --serve-ipc --manage-active --spawn-components --notify-watchdog --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/sessiond-managed.log" 2>&1 &
