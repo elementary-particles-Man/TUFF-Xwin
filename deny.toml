@@ -15,10 +15,8 @@ copyleft = "deny"
 ignore = true
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-unsound = "warn"
-notice = "warn"
+unmaintained = "workspace"
+unsound = "workspace"
 
 [bans]
 multiple-versions = "warn"
