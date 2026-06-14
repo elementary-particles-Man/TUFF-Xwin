@@ -2,7 +2,7 @@
 
 ## Baseline
 
-- main HEAD: `92d607c4c5a1c5fa0541c09636b12894d7b728e8`
+- main HEAD: `2bfbbfbfde58b5e570ea97175ecc05a629e4ba5c`
 - この文書は隔離VM/専用テスト機で実行するためのrunbookであり、実装ではない
 - この文書作成時点では VM起動・QEMU起動・実displayd.sock接続・実Wayland session接続を行わない
 - 前提文書: [XWIN_SCREENSHOT_ISOLATED_VM_PLAN.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_PLAN.md)
@@ -57,6 +57,7 @@
 - `cargo fmt --check`
 - `cargo check --workspace`
 - `cargo test -p xwin-sec --test browser_surface_boundary`
+- `cargo test -p xwin-sec --test age_assurance_browser_surface_boundary`
 - `cargo test --workspace`
 - `git diff --check`
 - `git status --short --branch`
@@ -128,6 +129,7 @@
 - `cargo fmt --check` PASS
 - `cargo check --workspace` PASS
 - `cargo test -p xwin-sec --test browser_surface_boundary` PASS
+- `cargo test -p xwin-sec --test age_assurance_browser_surface_boundary` PASS
 - `cargo test --workspace` PASS
 - fake backend PNG/JPEG PASS
 - isolated-displayd harness PNG/JPEG PASS

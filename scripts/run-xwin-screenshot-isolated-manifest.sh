@@ -230,6 +230,11 @@ step1b_browser_surface_boundary_regression() {
     run_simple_step "Step 1b Browser Surface Boundary Regression" "cargo test -p xwin-sec --test browser_surface_boundary" "$LOG_DIR/step1b-browser-surface-boundary.log" cargo test -p xwin-sec --test browser_surface_boundary
 }
 
+step1c_age_assurance_browser_surface_boundary() {
+    run_simple_step "Step 1c AgeAssurance Browser Surface Boundary Regression" "cargo test -p xwin-sec --test age_assurance_browser_surface_boundary" "$LOG_DIR/step1c-age-assurance-browser-surface-boundary.log" cargo test -p xwin-sec --test age_assurance_browser_surface_boundary
+    append_report "  - AgeAssurance regression checks for: AgeSignalObserve / ClipboardQuarantine / FilePickerQuarantine / IdentityUploadFailClosed / BiometricPromptFailClosed / NativeMessagingFailClosed / ExternalProtocolFailClosed / ScreenCaptureFailClosed / KairoFailClosedPropagated / UnknownFailClosed"
+}
+
 step2_fake_png() {
     local step_dir="$OUT_DIR/step2-fake-png"
     local before="$RUN_ROOT/step2-before.txt"
@@ -584,6 +589,7 @@ main() {
     step0_identity_workspace
     step1_repo_validation
     step1b_browser_surface_boundary_regression
+    step1c_age_assurance_browser_surface_boundary
     step2_fake_png
     step3_fake_jpeg
     step4_dev_harness_png

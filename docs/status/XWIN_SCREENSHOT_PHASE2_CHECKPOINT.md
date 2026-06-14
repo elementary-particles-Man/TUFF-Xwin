@@ -2,7 +2,7 @@
 
 ## Checkpoint Baseline
 
-- main HEAD: `92d607c4c5a1c5fa0541c09636b12894d7b728e8`
+- main HEAD: `2bfbbfbfde58b5e570ea97175ecc05a629e4ba5c`
 - この文書は Phase2-A〜D の checkpoint であり、release ではない
 - この文書は実OS統合前の安全境界固定であり、実装ではない
 - この文書作成時点では VM起動・実displayd.sock接続・実Wayland session接続を行わない
@@ -71,6 +71,7 @@
 - 実system tray 非登録
 - 本物displayd process 非起動
 - browser surface boundary は main に固定済み
+- AgeAssuranceBrowserSurfaceBoundary (PR #4) は main に統合済み
 - runtime自動探索なし
 - `/run/user` path 拒否
 - policy deny は transport 前に停止
@@ -141,9 +142,10 @@
 ## Acceptance State for This Checkpoint
 
 - `cargo fmt --check` PASS
-- `cargo check --workspace` PASS
-- `cargo test --workspace` PASS
-- `cargo test -p xwin-sec --test browser_surface_boundary` PASS
+- `cargo check --workspace`
+- `cargo test --workspace`
+- `cargo test -p xwin-sec --test browser_surface_boundary`
+- `cargo test -p xwin-sec --test age_assurance_browser_surface_boundary`
 - `git diff --check` PASS
 - origin/main同期
 - workspace clean

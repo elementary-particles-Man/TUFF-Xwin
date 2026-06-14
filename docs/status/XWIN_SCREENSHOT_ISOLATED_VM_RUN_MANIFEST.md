@@ -2,7 +2,7 @@
 
 ## Manifest Baseline
 
-- main HEAD: `92d607c4c5a1c5fa0541c09636b12894d7b728e8`
+- main HEAD: `2bfbbfbfde58b5e570ea97175ecc05a629e4ba5c`
 - この文書は隔離VM/専用テスト機で実行する検証コマンドのmanifestであり、実装ではない
 - この文書作成時点では VM起動・QEMU起動・実displayd.sock接続・実Wayland session接続を行わない
 - 前提文書: [XWIN_SCREENSHOT_PHASE2_CHECKPOINT.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_PHASE2_CHECKPOINT.md)
@@ -62,7 +62,7 @@
 - command: `git rev-parse --show-toplevel`
 - command: `git rev-parse HEAD`
 - command: `git status --short --branch`
-- pass: HEAD が `92d607c4c5a1c5fa0541c09636b12894d7b728e8` または実行時に明示指定された検証対象SHAである
+- pass: HEAD が `2bfbbfbfde58b5e570ea97175ecc05a629e4ba5c` または実行時に明示指定された検証対象SHAである
 - pass: workspace clean
 - fail: cleanでない場合は以後の検証へ進まない
 
@@ -85,6 +85,14 @@
 - pass: `xwin-sec` の browser surface boundary tests が継続 PASS する
 - fail: `xwin-sec` の browser surface boundary regression が壊れている
 - log: `LOG_DIR/step1b-browser-surface-boundary.log`
+
+## Manifest Step 1c: AgeAssurance Browser Surface Boundary Regression
+
+- command: `cargo test -p xwin-sec --test age_assurance_browser_surface_boundary`
+- pass: `xwin-sec` の age assurance browser surface boundary tests が継続 PASS する
+- pass: AgeSignalObserve / ClipboardQuarantine / FilePickerQuarantine / IdentityUploadFailClosed / BiometricPromptFailClosed / NativeMessagingFailClosed / ExternalProtocolFailClosed / ScreenCaptureFailClosed / KairoFailClosedPropagated / UnknownFailClosed が守られている
+- fail: `xwin-sec` の age assurance regression が失敗した
+- log: `LOG_DIR/step1c-age-assurance-browser-surface-boundary.log`
 
 ## CI Validation Note
 
@@ -218,6 +226,7 @@
 - Step 0 PASS
 - Step 1 PASS
 - Step 1b PASS
+- Step 1c PASS
 - Step 2 PASS
 - Step 3 PASS
 - Step 4 PASS
