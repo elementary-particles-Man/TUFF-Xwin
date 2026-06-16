@@ -20,18 +20,25 @@ OUT_DIR="$TMP_ROOT/out"
 REPORT_FILE="$RUN_ROOT/XWIN_SCREENSHOT_PREFLIGHT_REPORT.md"
 
 NO_REAL_CONNECT=false
+ALLOW_X11_REAL_CAPTURE=false
+X11_DISPLAY=""
 
 usage() {
     cat <<EOF
-Usage: $0 [--no-real-connect]
+Usage: $0 [options]
 
---no-real-connect: Validate script syntax and build binaries without actually starting displayd.
+Options:
+  --no-real-connect: Validate script syntax and build binaries without actually starting displayd.
+  --allow-x11-real-capture: Enable real X11 capture connection test (Case 7).
+  --x11-display DISPLAY: X11 display to use for real capture (e.g., :0).
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-real-connect) NO_REAL_CONNECT=true; shift ;;
+        --allow-x11-real-capture) ALLOW_X11_REAL_CAPTURE=true; shift ;;
+        --x11-display) X11_DISPLAY="$2"; shift 2 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown argument: $1"; usage; exit 1 ;;
     esac
@@ -46,6 +53,8 @@ cat >"$REPORT_FILE" <<EOF
 - run_root: $RUN_ROOT
 - socket_path: $SOCKET_PATH
 - artifact_root: $ARTIFACT_ROOT
+- allow_x11_real_capture: $ALLOW_X11_REAL_CAPTURE
+- x11_display: $X11_DISPLAY
 
 EOF
 
@@ -66,7 +75,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 log "Building binaries..."
-cargo build -p displayd -p xwin-screenshot
+cargo build -p displayd -p xwin-screenshot --features real-x11
 
 TARGET_DIR="$(
   cargo metadata --format-version 1 --no-deps --quiet |
@@ -163,6 +172,70 @@ else
     exit 1
 fi
 wait "$DISPLAYD_PID" || true
+
+# Test 5: X11 Method without Display (Should fail to start)
+log "Case 5: X11 Method without --x11-display"
+rm -f "$SOCKET_PATH"
+if ! "$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --capture-backend real --allow-real-capture --capture-method x11 --once > "$LOG_DIR/displayd-x11-no-display.log" 2>&1; then
+    log "Case 5 SUCCESS (Rejected as expected)"
+    append_report "Case 5 (X11 without Display): REJECTED (SUCCESS)"
+else
+    log "Case 5 FAILED (Should have been rejected)"
+    append_report "Case 5 (X11 without Display): FAILED"
+    exit 1
+fi
+
+# Test 6: --x11-display without Method (Should fail to start)
+log "Case 6: --x11-display without --capture-method x11"
+rm -f "$SOCKET_PATH"
+if ! "$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --capture-backend real --allow-real-capture --x11-display ":0" --once > "$LOG_DIR/displayd-display-no-method.log" 2>&1; then
+    log "Case 6 SUCCESS (Rejected as expected)"
+    append_report "Case 6 (Display without Method): REJECTED (SUCCESS)"
+else
+    log "Case 6 FAILED (Should have been rejected)"
+    append_report "Case 6 (Display without Method): FAILED"
+    exit 1
+fi
+
+# Test 7: Real X11 Capture (Optional)
+log "Case 7: Real X11 Capture"
+if [[ "$ALLOW_X11_REAL_CAPTURE" == "true" ]]; then
+    if [[ -z "$X11_DISPLAY" ]]; then
+        log "Error: --allow-x11-real-capture requires --x11-display DISPLAY"
+        exit 1
+    fi
+    log "Performing REAL X11 connection to $X11_DISPLAY..."
+    rm -f "$SOCKET_PATH"
+    "$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --capture-backend real --allow-real-capture --capture-method x11 --x11-display "$X11_DISPLAY" --once > "$LOG_DIR/displayd-x11-real.log" 2>&1 &
+    DISPLAYD_PID=$!
+
+    # Wait for socket
+    for i in $(seq 1 50); do
+        if [[ -S "$SOCKET_PATH" ]]; then break; fi
+        sleep 0.1
+    done
+
+    if [[ ! -S "$SOCKET_PATH" ]]; then
+        log "Timeout waiting for X11 backend socket. Check X11 availability."
+        append_report "Case 7 (X11 Real Connect): TIMEOUT (FAILED)"
+        exit 1
+    fi
+
+    if "$TARGET_DIR/xwin-screenshot" --backend isolated-displayd --displayd-socket "$SOCKET_PATH" --artifact-root "$ARTIFACT_ROOT" --save-dir "$OUT_DIR/x11" --format png > "$LOG_DIR/screenshot-x11.log" 2>&1; then
+        log "Case 7 SUCCESS (X11 Real Connect)"
+        append_report "Case 7 (X11 Real Connect): SUCCESS"
+    else
+        RC=$?
+        log "Case 7 FAILED (exit $RC). Check displayd log."
+        cat "$LOG_DIR/displayd-x11-real.log"
+        append_report "Case 7 (X11 Real Connect): FAILED (exit $RC)"
+        exit "$RC"
+    fi
+    wait "$DISPLAYD_PID" || true
+else
+    log "Case 7 SKIP (Not opted into X11 real connection)"
+    append_report "Case 7 (X11 Real Connect): SKIP"
+fi
 
 log "Preflight report written to $REPORT_FILE"
 echo "Preflight completed successfully."

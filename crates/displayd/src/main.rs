@@ -42,7 +42,13 @@ async fn main() -> Result<()> {
 
     let capture_backend: Box<dyn CaptureBackend> = match config.capture_backend {
         CaptureBackendType::Fake => Box::new(FakeCaptureBackend),
-        CaptureBackendType::Real => Box::new(RealCaptureBackendStub),
+        CaptureBackendType::Real => match config.capture_method {
+            CaptureMethod::Stub => Box::new(RealCaptureBackendStub),
+            CaptureMethod::X11 => {
+                let display = config.x11_display.as_ref().expect("validated");
+                Box::new(X11CaptureBackend::new(display)?)
+            }
+        },
     };
 
     let mut record_backend = FakeRecordBackend;
@@ -88,6 +94,13 @@ enum CaptureBackendType {
     Real,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum CaptureMethod {
+    #[default]
+    Stub,
+    X11,
+}
+
 #[derive(Debug, Clone, Default)]
 struct Config {
     serve_once: bool,
@@ -97,6 +110,8 @@ struct Config {
     socket_path: Option<PathBuf>,
     capture_backend: CaptureBackendType,
     allow_real_capture: bool,
+    capture_method: CaptureMethod,
+    x11_display: Option<String>,
 }
 
 impl Config {
@@ -125,12 +140,27 @@ impl Config {
                         _ => bail!("unknown capture backend: {val}"),
                     };
                 }
+                "--capture-method" => {
+                    let val = args.next().context("--capture-method requires a value")?;
+                    config.capture_method = match val.as_str() {
+                        "stub" => CaptureMethod::Stub,
+                        "x11" => CaptureMethod::X11,
+                        _ => bail!("unknown capture method: {val}"),
+                    };
+                }
+                "--x11-display" => {
+                    let val = args.next().context("--x11-display requires a value")?;
+                    if val.is_empty() {
+                        bail!("--x11-display cannot be empty");
+                    }
+                    config.x11_display = Some(val);
+                }
                 "--allow-real-capture" => {
                     config.allow_real_capture = true;
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID] [--socket PATH] [--capture-backend fake|real] [--allow-real-capture]"
+                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID] [--socket PATH] [--capture-backend fake|real] [--allow-real-capture] [--capture-method stub|x11] [--x11-display DISPLAY]"
                     );
                     std::process::exit(0);
                 }
@@ -143,6 +173,27 @@ impl Config {
         }
         if config.allow_real_capture && config.capture_backend != CaptureBackendType::Real {
             bail!("--allow-real-capture requires --capture-backend real");
+        }
+
+        if config.capture_method == CaptureMethod::X11 {
+            if config.capture_backend != CaptureBackendType::Real {
+                bail!("--capture-method x11 requires --capture-backend real");
+            }
+            if config.x11_display.is_none() {
+                bail!(
+                    "--capture-method x11 requires --x11-display DISPLAY (DISPLAY env is not used)"
+                );
+            }
+        }
+
+        if config.x11_display.is_some() && config.capture_method != CaptureMethod::X11 {
+            bail!("--x11-display requires --capture-method x11");
+        }
+
+        if config.capture_backend == CaptureBackendType::Fake
+            && config.capture_method != CaptureMethod::Stub
+        {
+            bail!("--capture-backend fake only supports --capture-method stub");
         }
 
         Ok(config)
@@ -422,6 +473,100 @@ impl CaptureBackend for RealCaptureBackendStub {
             "real screen capture is not implemented/supported in this environment (RealCaptureBackendStub)"
         )
     }
+}
+
+struct X11CaptureBackend {
+    #[allow(dead_code)]
+    display: String,
+}
+
+impl X11CaptureBackend {
+    fn new(display: &str) -> Result<Self> {
+        if display.is_empty() {
+            bail!("X11 display string is empty");
+        }
+        Ok(Self { display: display.to_string() })
+    }
+}
+
+#[cfg(feature = "real-x11")]
+impl CaptureBackend for X11CaptureBackend {
+    fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::{ConnectionExt, ImageFormat};
+
+        let (conn, screen_num) = x11rb::connect(Some(&self.display))
+            .with_context(|| format!("failed to connect to X11 display {}", self.display))?;
+        let screen = &conn.setup().roots[screen_num];
+        let root = screen.root;
+
+        let width = screen.width_in_pixels;
+        let height = screen.height_in_pixels;
+
+        let reply = conn
+            .get_image(ImageFormat::Z_PIXMAP, root, 0, 0, width, height, !0)?
+            .reply()
+            .context("failed to get X11 image from root window")?;
+
+        if reply.depth != 24 && reply.depth != 32 {
+            bail!("unsupported X11 image depth: {}", reply.depth);
+        }
+
+        let visual = screen
+            .allowed_depths
+            .iter()
+            .flat_map(|d| &d.visuals)
+            .find(|v| v.visual_id == screen.root_visual)
+            .context("failed to find root visual")?;
+
+        let pixels = convert_x11_to_internal_u32(
+            width as u32,
+            height as u32,
+            &reply.data,
+            visual.red_mask,
+            visual.green_mask,
+            visual.blue_mask,
+        )?;
+
+        Ok((width as u32, height as u32, pixels))
+    }
+}
+
+#[cfg(not(feature = "real-x11"))]
+impl CaptureBackend for X11CaptureBackend {
+    fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+        bail!("real-x11 feature is not enabled. X11 capture is unavailable.")
+    }
+}
+
+fn convert_x11_to_internal_u32(
+    width: u32,
+    height: u32,
+    data: &[u8],
+    red_mask: u32,
+    green_mask: u32,
+    blue_mask: u32,
+) -> Result<Vec<u32>> {
+    let expected_len = (width as usize) * (height as usize) * 4;
+    if data.len() < expected_len {
+        bail!("X11 image data too short: got {}, expected {}", data.len(), expected_len);
+    }
+
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for chunk in data.chunks_exact(4).take((width * height) as usize) {
+        // X11 returns data in host byte order for 32-bit ZPixmap
+        let val = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+
+        let r = (val & red_mask).wrapping_shr(red_mask.trailing_zeros()) & 0xFF;
+        let g = (val & green_mask).wrapping_shr(green_mask.trailing_zeros()) & 0xFF;
+        let b = (val & blue_mask).wrapping_shr(blue_mask.trailing_zeros()) & 0xFF;
+        let a = 0xFF;
+
+        // Internal format: 0xAARRGGBB
+        pixels.push((a << 24) | (r << 16) | (g << 8) | b);
+    }
+
+    Ok(pixels)
 }
 
 struct FakeRecordBackend;
@@ -1124,13 +1269,104 @@ mod tests {
     }
 
     #[test]
-    fn test_config_parser_rejects_unknown_backend() {
-        let args =
-            vec!["displayd".to_string(), "--capture-backend".to_string(), "magical".to_string()]
-                .into_iter()
-                .skip(1);
+    fn test_config_parser_accepts_x11_real_with_all_flags() {
+        let args = vec![
+            "displayd".to_string(),
+            "--capture-backend".to_string(),
+            "real".to_string(),
+            "--allow-real-capture".to_string(),
+            "--capture-method".to_string(),
+            "x11".to_string(),
+            "--x11-display".to_string(),
+            ":0".to_string(),
+        ]
+        .into_iter()
+        .skip(1);
+        let config = Config::from_args(args).unwrap();
+        assert_eq!(config.capture_backend, CaptureBackendType::Real);
+        assert_eq!(config.capture_method, CaptureMethod::X11);
+        assert_eq!(config.x11_display.unwrap(), ":0");
+    }
+
+    #[test]
+    fn test_config_parser_rejects_x11_without_display() {
+        let args = vec![
+            "displayd".to_string(),
+            "--capture-backend".to_string(),
+            "real".to_string(),
+            "--allow-real-capture".to_string(),
+            "--capture-method".to_string(),
+            "x11".to_string(),
+        ]
+        .into_iter()
+        .skip(1);
         let err = Config::from_args(args).unwrap_err();
-        assert!(err.to_string().contains("unknown capture backend"));
+        assert!(err.to_string().contains("requires --x11-display"));
+    }
+
+    #[test]
+    fn test_config_parser_rejects_x11_display_without_x11_method() {
+        let args = vec![
+            "displayd".to_string(),
+            "--capture-backend".to_string(),
+            "real".to_string(),
+            "--allow-real-capture".to_string(),
+            "--x11-display".to_string(),
+            ":0".to_string(),
+        ]
+        .into_iter()
+        .skip(1);
+        let err = Config::from_args(args).unwrap_err();
+        assert!(err.to_string().contains("requires --capture-method x11"));
+    }
+
+    #[test]
+    fn test_config_parser_rejects_unknown_capture_method() {
+        let args = vec![
+            "displayd".to_string(),
+            "--capture-backend".to_string(),
+            "real".to_string(),
+            "--allow-real-capture".to_string(),
+            "--capture-method".to_string(),
+            "magical".to_string(),
+        ]
+        .into_iter()
+        .skip(1);
+        let err = Config::from_args(args).unwrap_err();
+        assert!(err.to_string().contains("unknown capture method"));
+    }
+
+    #[test]
+    fn test_convert_x11_to_internal_u32_handles_rgb_layout() {
+        let data = vec![
+            0x11, 0x22, 0x33, 0xFF, // Pixel 1
+        ];
+        let red_mask = 0x00FF0000;
+        let green_mask = 0x0000FF00;
+        let blue_mask = 0x000000FF;
+
+        let result =
+            convert_x11_to_internal_u32(1, 1, &data, red_mask, green_mask, blue_mask).unwrap();
+        assert_eq!(result[0], 0xFF332211);
+    }
+
+    #[test]
+    fn test_convert_x11_to_internal_u32_handles_bgr_layout() {
+        let data = vec![0x33, 0x22, 0x11, 0xFF];
+        let red_mask = 0x000000FF;
+        let green_mask = 0x0000FF00;
+        let blue_mask = 0x00FF0000;
+
+        let result =
+            convert_x11_to_internal_u32(1, 1, &data, red_mask, green_mask, blue_mask).unwrap();
+        assert_eq!(result[0], 0xFF332211);
+    }
+
+    #[test]
+    fn test_convert_x11_to_internal_u32_rejects_mismatch() {
+        let data = vec![0u8; 3];
+        let err = convert_x11_to_internal_u32(1, 1, &data, 0, 0, 0).unwrap_err();
+        assert!(err.to_string().contains("data too short"));
     }
 
     #[tokio::test]
