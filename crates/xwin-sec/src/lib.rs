@@ -25,3 +25,5 @@ pub use capability::{CapabilityGrant, GrantLifetime, GrantScope, XwinCapability}
 pub use client::{AppId, ClientId, ClientKind, ClientProfile, ClientTrust, SurfaceId};
 pub use decision::{DecisionReason, PolicyContext, SecurityDecision};
 pub use policy::{BrowserSecurityPolicy, SecurityPolicy};
+pub mod privileged_ai_surface_boundary;
+pub use privileged_ai_surface_boundary::*;
