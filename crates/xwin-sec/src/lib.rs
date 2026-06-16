@@ -27,3 +27,5 @@ pub use decision::{DecisionReason, PolicyContext, SecurityDecision};
 pub use policy::{BrowserSecurityPolicy, SecurityPolicy};
 pub mod privileged_ai_surface_boundary;
 pub use privileged_ai_surface_boundary::*;
+pub mod developer_tool_surface_boundary;
+pub use developer_tool_surface_boundary::*;
