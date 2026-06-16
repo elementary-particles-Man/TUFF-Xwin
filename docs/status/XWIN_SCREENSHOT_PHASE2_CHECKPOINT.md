@@ -70,6 +70,14 @@
 - 自動ランタイム探索を回避し、repo 内の隔離されたパスでのみ実バイナリ間通信を確認する手順を固定。
 - 失敗時のログ回収と停止手順を定義済み。
 
+## Phase2-F Fixed: Real Capture Backend Scaffold
+
+- `displayd` において、`FakeCaptureBackend` 固定の状態から、実画面取得 backend を選択可能な構造へ分離。
+- `--capture-backend <fake|real>` および保護フラグ `--allow-real-capture` を導入。
+- `real` を選択する場合、両方のフラグが必須（二重の明示的 opt-in）であり、欠落している場合は起動を拒否する。
+- 現段階の `RealCaptureBackendStub` は NotImplemented として fail-closed し、DRM/KMS/PipeWire/Wayland 等への自動接触を防止。
+- 未実装時に `fake` へ黙って fallback しないことを保証。
+
 ## Current Verified Boundaries
 
 - 実displayd.sock 非接続
@@ -77,10 +85,12 @@
 - 実DRM/KMS/PipeWire/input device 非接触
 - 実global hotkey 非登録
 - 実system tray 非登録
-- 本物displayd process 非起動
+- 本物displayd process 非起動 (Preflight runnerによる一時起動を除く)
 - browser surface boundary は main に固定済み
 - AgeAssuranceBrowserSurfaceBoundary (PR #4) は main に統合済み
 - `displayd` は `--socket <PATH>` による明示バインドをサポート済み
+- `displayd` は `--capture-backend` による明示選択をサポートし、default=fake を維持
+- real capture は二重の明示的 opt-in (--capture-backend real + --allow-real-capture) でのみ許可
 - runtime自動探索なし
 - `/run/user` path 拒否
 - policy deny は transport 前に停止
@@ -95,7 +105,7 @@
 - config file から fake / isolated-displayd backend を構成可能
 - CLI override で config file 値を上書き可能
 - repo-local manifest runner で fake / dev-harness / isolated-displayd / config flow / negative checks をまとめて再現できる
-- real displayd explicit socket preflight runner により、プロダクションバイナリ間の明示接続を再現できる
+- real displayd explicit socket preflight runner により、プロダクションバイナリ間の明示接続および backend 選択の安全性を再現できる
 - dev-harness feature は CI でも `cargo check/test --workspace --features dev-harness` で検証される
 - test harness displayd と dev-only harness binary で CaptureOutput -> OutputCaptured -> RGBA8888 artifact -> ingest -> PNG/JPEG encode を repo内E2E確認可能
 - browser hostile clientの screen capture は explicit visible grant なしでは拒否される
@@ -157,6 +167,7 @@
 - `cargo test -p xwin-sec --test browser_surface_boundary`
 - `cargo test -p xwin-sec --test age_assurance_browser_surface_boundary`
 - `bash -n scripts/run-xwin-screenshot-real-displayd-preflight.sh` PASS
+- `scripts/run-xwin-screenshot-real-displayd-preflight.sh` SUCCESS (including backend selection safety)
 - `git diff --check` PASS
 - origin/main同期
 - workspace clean
@@ -164,3 +175,4 @@
 - VM未起動
 - 実displayd.sock未接続 (自動探索・システム接続なし)
 - 本物displayd process未起動 (Preflight runnerによる一時起動を除く)
+- Real Capture Backend 選択は fail-closed である

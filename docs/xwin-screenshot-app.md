@@ -120,3 +120,10 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - `displayd` は `--socket <PATH>` 引数により、環境変数や自動探索を介さず指定されたパスでサービスを開始できる。
 - `scripts/run-xwin-screenshot-real-displayd-preflight.sh` により、repo 内の隔離されたパスで実バイナリ間通信（CaptureOutput契約）を確認する。
 - 常駐起動やシステムへのインストールは行わず、一時的なプロセスとして検証を行う。
+
+## Phase 2-F
+
+- `displayd` において、`FakeCaptureBackend` 以外の実画面取得 backend を安全に追加するための足場（Scaffold）を導入した。
+- 実画面取得は、デフォルトの `fake` を維持しつつ、`--capture-backend real` と保護フラグ `--allow-real-capture` の両方を明示した場合のみ有効になる（二重の opt-in）。
+- 現時点の `RealCaptureBackendStub` は NotImplemented / Unsupported として fail-closed し、DRM/KMS/PipeWire/Wayland 等への自動接触を防止している。
+- 実画面取得の成功はこの段階では要求されず、安全な構造分離と拒否の動作を優先している。

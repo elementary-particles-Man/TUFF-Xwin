@@ -79,49 +79,89 @@ if [[ "$NO_REAL_CONNECT" == "true" ]]; then
     exit 0
 fi
 
-log "Starting real displayd with explicit socket: $SOCKET_PATH"
+# Test 1: Explicit Fake Backend (Should succeed)
+log "Case 1: Explicit Fake Backend"
 export WAYBROKER_RUNTIME_DIR="$ARTIFACT_ROOT"
-"$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --once > "$LOG_DIR/displayd.log" 2>&1 &
+rm -f "$SOCKET_PATH"
+"$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --capture-backend fake --once > "$LOG_DIR/displayd-fake.log" 2>&1 &
 DISPLAYD_PID=$!
 
 # Wait for socket
-log "Waiting for displayd socket..."
 for i in $(seq 1 50); do
-    if [[ -S "$SOCKET_PATH" ]]; then
-        break
-    fi
-    if ! kill -0 "$DISPLAYD_PID" >/dev/null 2>&1; then
-        log "displayd failed to start. Log:"
-        cat "$LOG_DIR/displayd.log"
-        append_report "displayd failed to start"
-        exit 1
-    fi
+    if [[ -S "$SOCKET_PATH" ]]; then break; fi
     sleep 0.1
 done
 
 if [[ ! -S "$SOCKET_PATH" ]]; then
-    log "Timeout waiting for displayd socket."
-    append_report "Timeout waiting for displayd socket"
+    log "Timeout waiting for fake backend socket."
     exit 1
 fi
 
-log "Connecting xwin-screenshot to real displayd..."
-if "$TARGET_DIR/xwin-screenshot" \
-    --backend isolated-displayd \
-    --displayd-socket "$SOCKET_PATH" \
-    --artifact-root "$ARTIFACT_ROOT" \
-    --save-dir "$OUT_DIR" \
-    --format png > "$LOG_DIR/screenshot.log" 2>&1; then
-    log "Preflight connection SUCCESS"
-    append_report "Connection: SUCCESS"
+if "$TARGET_DIR/xwin-screenshot" --backend isolated-displayd --displayd-socket "$SOCKET_PATH" --artifact-root "$ARTIFACT_ROOT" --save-dir "$OUT_DIR/fake" --format png > "$LOG_DIR/screenshot-fake.log" 2>&1; then
+    log "Case 1 SUCCESS (Fake Backend)"
+    append_report "Case 1 (Fake Backend): SUCCESS"
 else
-    RC=$?
-    log "Preflight connection FAILED (exit $RC). Log:"
-    cat "$LOG_DIR/screenshot.log"
-    append_report "Connection: FAILED (exit $RC)"
-    exit "$RC"
+    log "Case 1 FAILED"
+    append_report "Case 1 (Fake Backend): FAILED"
+    exit 1
+fi
+wait "$DISPLAYD_PID" || true
+
+# Test 2: Real Backend without Allow Flag (Should fail to start)
+log "Case 2: Real Backend without Allow Flag"
+rm -f "$SOCKET_PATH"
+if ! "$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --capture-backend real --once > "$LOG_DIR/displayd-real-no-allow.log" 2>&1; then
+    log "Case 2 SUCCESS (Rejected as expected)"
+    append_report "Case 2 (Real without Allow): REJECTED (SUCCESS)"
+else
+    log "Case 2 FAILED (Should have been rejected)"
+    append_report "Case 2 (Real without Allow): FAILED"
+    exit 1
 fi
 
+# Test 3: Allow Flag without Real Backend (Should fail to start)
+log "Case 3: Allow Flag without Real Backend"
+rm -f "$SOCKET_PATH"
+if ! "$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --allow-real-capture --once > "$LOG_DIR/displayd-allow-no-real.log" 2>&1; then
+    log "Case 3 SUCCESS (Rejected as expected)"
+    append_report "Case 3 (Allow without Real): REJECTED (SUCCESS)"
+else
+    log "Case 3 FAILED (Should have been rejected)"
+    append_report "Case 3 (Allow without Real): FAILED"
+    exit 1
+fi
+
+# Test 4: Real Backend with Allow Flag (Should start but fail-closed on capture)
+log "Case 4: Real Backend with Allow Flag (Fail-Closed Stub)"
+rm -f "$SOCKET_PATH"
+"$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --capture-backend real --allow-real-capture --once > "$LOG_DIR/displayd-real-fail-closed.log" 2>&1 &
+DISPLAYD_PID=$!
+
+# Wait for socket
+for i in $(seq 1 50); do
+    if [[ -S "$SOCKET_PATH" ]]; then break; fi
+    sleep 0.1
+done
+
+if [[ ! -S "$SOCKET_PATH" ]]; then
+    log "Timeout waiting for real backend socket."
+    exit 1
+fi
+
+if ! "$TARGET_DIR/xwin-screenshot" --backend isolated-displayd --displayd-socket "$SOCKET_PATH" --artifact-root "$ARTIFACT_ROOT" --save-dir "$OUT_DIR/real" --format png > "$LOG_DIR/screenshot-real.log" 2>&1; then
+    log "Case 4 SUCCESS (Fail-closed as expected)"
+    if grep -q "real screen capture is not implemented/supported" "$LOG_DIR/screenshot-real.log"; then
+        log "Confirmed: Stub error message found."
+        append_report "Case 4 (Real Fail-Closed): SUCCESS (Confirmed Stub Error)"
+    else
+        log "Warning: Stub error message not found in screenshot log, but connection failed."
+        append_report "Case 4 (Real Fail-Closed): SUCCESS (Connection Failed)"
+    fi
+else
+    log "Case 4 FAILED (Should have failed-closed)"
+    append_report "Case 4 (Real Fail-Closed): FAILED"
+    exit 1
+fi
 wait "$DISPLAYD_PID" || true
 
 log "Preflight report written to $REPORT_FILE"

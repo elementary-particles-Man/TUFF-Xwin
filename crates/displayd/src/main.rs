@@ -39,7 +39,12 @@ async fn main() -> Result<()> {
 
     let mut state = DisplayState::load(&config.session_instance_id)?;
     let mut clock = FakePresentationClock::default();
-    let capture_backend = FakeCaptureBackend;
+
+    let capture_backend: Box<dyn CaptureBackend> = match config.capture_backend {
+        CaptureBackendType::Fake => Box::new(FakeCaptureBackend),
+        CaptureBackendType::Real => Box::new(RealCaptureBackendStub),
+    };
+
     let mut record_backend = FakeRecordBackend;
     let mut display_backend = FakeDisplayBackend;
 
@@ -60,7 +65,7 @@ async fn main() -> Result<()> {
             &mut state,
             vulkan.as_ref(),
             &mut clock,
-            &capture_backend,
+            capture_backend.as_ref(),
             &mut record_backend,
             &mut display_backend,
         )
@@ -76,6 +81,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum CaptureBackendType {
+    #[default]
+    Fake,
+    Real,
+}
+
 #[derive(Debug, Clone, Default)]
 struct Config {
     serve_once: bool,
@@ -83,6 +95,8 @@ struct Config {
     use_vulkan: bool,
     session_instance_id: String,
     socket_path: Option<PathBuf>,
+    capture_backend: CaptureBackendType,
+    allow_real_capture: bool,
 }
 
 impl Config {
@@ -103,14 +117,32 @@ impl Config {
                     config.socket_path =
                         Some(PathBuf::from(args.next().context("--socket requires a path")?));
                 }
+                "--capture-backend" => {
+                    let val = args.next().context("--capture-backend requires a value")?;
+                    config.capture_backend = match val.as_str() {
+                        "fake" => CaptureBackendType::Fake,
+                        "real" => CaptureBackendType::Real,
+                        _ => bail!("unknown capture backend: {val}"),
+                    };
+                }
+                "--allow-real-capture" => {
+                    config.allow_real_capture = true;
+                }
                 "--help" | "-h" => {
                     println!(
-                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID] [--socket PATH]"
+                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID] [--socket PATH] [--capture-backend fake|real] [--allow-real-capture]"
                     );
                     std::process::exit(0);
                 }
                 _ => bail!("unknown argument: {arg}"),
             }
+        }
+
+        if config.capture_backend == CaptureBackendType::Real && !config.allow_real_capture {
+            bail!("--capture-backend real requires --allow-real-capture");
+        }
+        if config.allow_real_capture && config.capture_backend != CaptureBackendType::Real {
+            bail!("--allow-real-capture requires --capture-backend real");
         }
 
         Ok(config)
@@ -379,6 +411,16 @@ impl CaptureBackend for FakeCaptureBackend {
         let width = 1920;
         let height = 1080;
         Ok((width, height, generate_mock_pixels(width, height)))
+    }
+}
+
+struct RealCaptureBackendStub;
+
+impl CaptureBackend for RealCaptureBackendStub {
+    fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+        bail!(
+            "real screen capture is not implemented/supported in this environment (RealCaptureBackendStub)"
+        )
     }
 }
 
@@ -1028,5 +1070,74 @@ mod tests {
         .await
         .expect("handle capture");
         assert!(matches!(result, DisplayEvent::OutputCaptured { .. }));
+    }
+
+    #[test]
+    fn test_config_parser_capture_backend_defaults_to_fake() {
+        let args = vec!["displayd".to_string()].into_iter().skip(1);
+        let config = Config::from_args(args).unwrap();
+        assert_eq!(config.capture_backend, CaptureBackendType::Fake);
+        assert!(!config.allow_real_capture);
+    }
+
+    #[test]
+    fn test_config_parser_accepts_fake_explicitly() {
+        let args =
+            vec!["displayd".to_string(), "--capture-backend".to_string(), "fake".to_string()]
+                .into_iter()
+                .skip(1);
+        let config = Config::from_args(args).unwrap();
+        assert_eq!(config.capture_backend, CaptureBackendType::Fake);
+    }
+
+    #[test]
+    fn test_config_parser_rejects_real_without_allow_flag() {
+        let args =
+            vec!["displayd".to_string(), "--capture-backend".to_string(), "real".to_string()]
+                .into_iter()
+                .skip(1);
+        let err = Config::from_args(args).unwrap_err();
+        assert!(err.to_string().contains("requires --allow-real-capture"));
+    }
+
+    #[test]
+    fn test_config_parser_rejects_allow_flag_without_real_backend() {
+        let args =
+            vec!["displayd".to_string(), "--allow-real-capture".to_string()].into_iter().skip(1);
+        let err = Config::from_args(args).unwrap_err();
+        assert!(err.to_string().contains("requires --capture-backend real"));
+    }
+
+    #[test]
+    fn test_config_parser_accepts_real_with_allow_flag() {
+        let args = vec![
+            "displayd".to_string(),
+            "--capture-backend".to_string(),
+            "real".to_string(),
+            "--allow-real-capture".to_string(),
+        ]
+        .into_iter()
+        .skip(1);
+        let config = Config::from_args(args).unwrap();
+        assert_eq!(config.capture_backend, CaptureBackendType::Real);
+        assert!(config.allow_real_capture);
+    }
+
+    #[test]
+    fn test_config_parser_rejects_unknown_backend() {
+        let args =
+            vec!["displayd".to_string(), "--capture-backend".to_string(), "magical".to_string()]
+                .into_iter()
+                .skip(1);
+        let err = Config::from_args(args).unwrap_err();
+        assert!(err.to_string().contains("unknown capture backend"));
+    }
+
+    #[tokio::test]
+    async fn test_real_capture_backend_stub_returns_error() {
+        let backend = RealCaptureBackendStub;
+        let err = backend.capture("eDP-1").unwrap_err();
+        assert!(err.to_string().contains("not implemented/supported"));
+        assert!(err.to_string().contains("RealCaptureBackendStub"));
     }
 }

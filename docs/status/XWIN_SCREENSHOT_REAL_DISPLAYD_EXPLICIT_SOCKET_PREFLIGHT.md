@@ -17,6 +17,12 @@
 - `xwin-screenshot` は `--displayd-socket <PATH>` 引数を用い、環境変数や自動探索に頼らず指定されたパスへ直接接続する。
 - 既存の `/run/user` / `XDG_RUNTIME_DIR` / `WAYLAND_DISPLAY` / `DISPLAY` は自動参照しない。
 
+## Capture Backend Selection
+
+- `displayd` は `--capture-backend <fake|real>` オプションにより、キャプチャの実装を選択できる。
+- `real` を選択する場合、追加の保護フラグ `--allow-real-capture` が必須である（二重の明示的 opt-in）。
+- 実装が未定義または環境が不適合な場合、`fake` に黙って fallback することはなく、明示的にエラーを返して fail-closed する。
+
 ## Startup Procedure (Preflight Plan)
 
 1. **Workspace Preparation**:
