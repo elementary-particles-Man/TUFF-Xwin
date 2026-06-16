@@ -569,7 +569,11 @@ async fn handle_capture_output(
         width,
         height,
         format: "RGBA8888".into(),
-        artifact_path: artifact_path.to_string_lossy().to_string(),
+        artifact_path: artifact_path
+            .file_name()
+            .expect("artifact path has filename")
+            .to_string_lossy()
+            .into_owned(),
     })
 }
 
@@ -788,7 +792,9 @@ mod tests {
             assert_eq!(height, 1080);
             assert_eq!(format, "RGBA8888");
             assert!(artifact_path.contains("screenshot-eDP-1-"));
-            assert!(std::path::Path::new(&artifact_path).exists());
+            // Since it's now relative, we check against the runtime dir
+            let full_path = waybroker_common::runtime_dir().join(artifact_path);
+            assert!(full_path.exists());
         } else {
             panic!("Unexpected event: {:?}", result);
         }

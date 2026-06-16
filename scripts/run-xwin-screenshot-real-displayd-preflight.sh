@@ -68,6 +68,11 @@ trap cleanup EXIT INT TERM
 log "Building binaries..."
 cargo build -p displayd -p xwin-screenshot
 
+TARGET_DIR="$(
+  cargo metadata --format-version 1 --no-deps --quiet |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+)/debug"
+
 if [[ "$NO_REAL_CONNECT" == "true" ]]; then
     log "Preflight validation complete (no-real-connect mode)."
     append_report "Preflight validation complete (no-real-connect mode)."
@@ -75,7 +80,8 @@ if [[ "$NO_REAL_CONNECT" == "true" ]]; then
 fi
 
 log "Starting real displayd with explicit socket: $SOCKET_PATH"
-"$REPO_ROOT/target/debug/displayd" --socket "$SOCKET_PATH" --once > "$LOG_DIR/displayd.log" 2>&1 &
+export WAYBROKER_RUNTIME_DIR="$ARTIFACT_ROOT"
+"$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --once > "$LOG_DIR/displayd.log" 2>&1 &
 DISPLAYD_PID=$!
 
 # Wait for socket
@@ -100,7 +106,7 @@ if [[ ! -S "$SOCKET_PATH" ]]; then
 fi
 
 log "Connecting xwin-screenshot to real displayd..."
-if "$REPO_ROOT/target/debug/xwin-screenshot" \
+if "$TARGET_DIR/xwin-screenshot" \
     --backend isolated-displayd \
     --displayd-socket "$SOCKET_PATH" \
     --artifact-root "$ARTIFACT_ROOT" \
