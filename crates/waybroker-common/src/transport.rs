@@ -355,6 +355,15 @@ pub fn sanitize_session_instance_id(id: &str) -> String {
 pub fn bind_service_socket(role: ServiceRole) -> Result<ServiceListener> {
     let _ = ensure_runtime_dir()?;
     let endpoint = service_endpoint(role);
+    bind_endpoint(endpoint)
+}
+
+pub fn bind_explicit_unix_socket(path: PathBuf) -> Result<ServiceListener> {
+    let endpoint = ServiceEndpoint::Unix(path);
+    bind_endpoint(endpoint)
+}
+
+fn bind_endpoint(endpoint: ServiceEndpoint) -> Result<ServiceListener> {
     endpoint.cleanup_stale()?;
 
     let inner = match &endpoint {

@@ -113,3 +113,10 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - 実行コマンド列と記録形式は [XWIN_SCREENSHOT_ISOLATED_VM_RUN_MANIFEST.md](/mnt/thpdoc/Develop/TUFF-Xwin/docs/status/XWIN_SCREENSHOT_ISOLATED_VM_RUN_MANIFEST.md) に分離する。
 - 現用OSの displayd.sock / Wayland session / XDG_RUNTIME_DIR / DISPLAY / WAYLAND_DISPLAY は読まない。
 - 失敗しても VM またはテスト機だけで閉じる。
+
+## Phase 2-E
+
+- プロダクション用の `displayd` バイナリへ明示的なソケットパス経由で接続する Preflight runner を追加した。
+- `displayd` は `--socket <PATH>` 引数により、環境変数や自動探索を介さず指定されたパスでサービスを開始できる。
+- `scripts/run-xwin-screenshot-real-displayd-preflight.sh` により、repo 内の隔離されたパスで実バイナリ間通信（CaptureOutput契約）を確認する。
+- 常駐起動やシステムへのインストールは行わず、一時的なプロセスとして検証を行う。

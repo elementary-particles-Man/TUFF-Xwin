@@ -20,11 +20,11 @@ pub use profile::{
     SessionWatchdogComponentReport, SessionWatchdogReport,
 };
 pub use transport::{
-    ServiceEndpoint, ServiceListener, ServiceStream, bind_service_socket, connect_service_socket,
-    ensure_runtime_dir, is_recoverable_accept_error, read_json_line, runtime_dir,
-    sanitize_artifact_filename, sanitize_session_instance_id, send_json_line, service_socket_path,
-    session_artifact_path, validate_artifact_filename, validate_runtime_socket_path,
-    validate_session_instance_id,
+    ServiceEndpoint, ServiceListener, ServiceStream, bind_explicit_unix_socket,
+    bind_service_socket, connect_service_socket, ensure_runtime_dir, is_recoverable_accept_error,
+    read_json_line, runtime_dir, sanitize_artifact_filename, sanitize_session_instance_id,
+    send_json_line, service_socket_path, session_artifact_path, validate_artifact_filename,
+    validate_runtime_socket_path, validate_session_instance_id,
 };
 
 pub fn now_unix_timestamp() -> u64 {

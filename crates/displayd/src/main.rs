@@ -43,7 +43,11 @@ async fn main() -> Result<()> {
     let mut record_backend = FakeRecordBackend;
     let mut display_backend = FakeDisplayBackend;
 
-    let listener = bind_service_socket(ServiceRole::Displayd)?;
+    let listener = if let Some(socket_path) = &config.socket_path {
+        waybroker_common::bind_explicit_unix_socket(socket_path.clone())?
+    } else {
+        bind_service_socket(ServiceRole::Displayd)?
+    };
     let _socket_guard = SocketGuard::new(listener.endpoint().clone());
     println!("service=displayd op=listen event=socket_bound path={}", listener.endpoint());
 
@@ -78,6 +82,7 @@ struct Config {
     fail_resume: bool,
     use_vulkan: bool,
     session_instance_id: String,
+    socket_path: Option<PathBuf>,
 }
 
 impl Config {
@@ -94,9 +99,13 @@ impl Config {
                     config.session_instance_id =
                         args.next().context("--session-instance-id requires an id")?;
                 }
+                "--socket" => {
+                    config.socket_path =
+                        Some(PathBuf::from(args.next().context("--socket requires a path")?));
+                }
                 "--help" | "-h" => {
                     println!(
-                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID]"
+                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID] [--socket PATH]"
                     );
                     std::process::exit(0);
                 }

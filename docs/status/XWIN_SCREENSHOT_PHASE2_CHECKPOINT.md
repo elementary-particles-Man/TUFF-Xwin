@@ -62,6 +62,14 @@
 - runbookは repo checkout / cargo検証 / fake backend / isolated-displayd harness / config flow / negative tests を順序化する
 - runbook作成時点では VM起動も実displayd.sock接続も行っていない
 
+## Phase2-E Fixed: Real Displayd Explicit Socket Preflight
+
+- プロダクション用 `displayd` バイナリへの明示ソケット接続準備を完了。
+- `displayd` に `--socket <PATH>` オプションを追加し、環境変数に頼らずソケットパスを指定可能にした。
+- `scripts/run-xwin-screenshot-real-displayd-preflight.sh` を追加。
+- 自動ランタイム探索を回避し、repo 内の隔離されたパスでのみ実バイナリ間通信を確認する手順を固定。
+- 失敗時のログ回収と停止手順を定義済み。
+
 ## Current Verified Boundaries
 
 - 実displayd.sock 非接続
@@ -72,6 +80,7 @@
 - 本物displayd process 非起動
 - browser surface boundary は main に固定済み
 - AgeAssuranceBrowserSurfaceBoundary (PR #4) は main に統合済み
+- `displayd` は `--socket <PATH>` による明示バインドをサポート済み
 - runtime自動探索なし
 - `/run/user` path 拒否
 - policy deny は transport 前に停止
@@ -86,6 +95,7 @@
 - config file から fake / isolated-displayd backend を構成可能
 - CLI override で config file 値を上書き可能
 - repo-local manifest runner で fake / dev-harness / isolated-displayd / config flow / negative checks をまとめて再現できる
+- real displayd explicit socket preflight runner により、プロダクションバイナリ間の明示接続を再現できる
 - dev-harness feature は CI でも `cargo check/test --workspace --features dev-harness` で検証される
 - test harness displayd と dev-only harness binary で CaptureOutput -> OutputCaptured -> RGBA8888 artifact -> ingest -> PNG/JPEG encode を repo内E2E確認可能
 - browser hostile clientの screen capture は explicit visible grant なしでは拒否される
@@ -98,7 +108,7 @@
 - 実system tray登録
 - 実DRM/KMS/PipeWire/input device接続
 - 実runtime artifact読み込み
-- 本物displayd process起動
+- 本物displayd process起動 (Preflight段階であり、常駐起動は未実施)
 - openat/no-follow による kernel-level TOCTOU 完全証明
 - 実Chromeプロセス判定
 - Chrome/V8 exploit検出
@@ -146,10 +156,11 @@
 - `cargo test --workspace`
 - `cargo test -p xwin-sec --test browser_surface_boundary`
 - `cargo test -p xwin-sec --test age_assurance_browser_surface_boundary`
+- `bash -n scripts/run-xwin-screenshot-real-displayd-preflight.sh` PASS
 - `git diff --check` PASS
 - origin/main同期
 - workspace clean
 - 稼働中OS非干渉
 - VM未起動
-- 実displayd.sock未接続
-- 本物displayd process未起動
+- 実displayd.sock未接続 (自動探索・システム接続なし)
+- 本物displayd process未起動 (Preflight runnerによる一時起動を除く)
