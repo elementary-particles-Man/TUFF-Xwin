@@ -78,6 +78,15 @@
 - 現段階の `RealCaptureBackendStub` は NotImplemented として fail-closed し、DRM/KMS/PipeWire/Wayland 等への自動接触を防止。
 - 未実装時に `fake` へ黙って fallback しないことを保証。
 
+## Phase2-G Fixed: Explicit X11 Real Capture Backend
+
+- `displayd` において、X11 root window を対象とした実画面取得 backend を実装。
+- `--capture-method <stub|x11>` および `--x11-display <DISPLAY>` を導入。
+- X11 キャプチャは、`--capture-backend real`, `--allow-real-capture`, `--capture-method x11`, `--x11-display` の 4 つが揃った場合のみ有効化。
+- `DISPLAY` 環境変数の自動参照を禁止し、予期せぬセッションへの接続を防止。
+- 接続失敗、root window 取得失敗、フォーマット変換失敗は全て fail-closed とし、`fake` への fallback を排除。
+- X11 以外の Wayland / PipeWire / DRM-KMS / Portal は引き続き未実装として明示的に分離。
+
 ## Current Verified Boundaries
 
 - 実displayd.sock 非接続
@@ -89,8 +98,9 @@
 - browser surface boundary は main に固定済み
 - AgeAssuranceBrowserSurfaceBoundary (PR #4) は main に統合済み
 - `displayd` は `--socket <PATH>` による明示バインドをサポート済み
-- `displayd` は `--capture-backend` による明示選択をサポートし、default=fake を維持
-- real capture は二重の明示的 opt-in (--capture-backend real + --allow-real-capture) でのみ許可
+- `displayd` は `--capture-backend` / `--capture-method` による明示手法選択をサポート
+- real capture は二重または四重の明示的 opt-in でのみ許可
+- X11 接続時の `DISPLAY` 環境変数自動参照なし
 - runtime自動探索なし
 - `/run/user` path 拒否
 - policy deny は transport 前に停止
@@ -105,7 +115,7 @@
 - config file から fake / isolated-displayd backend を構成可能
 - CLI override で config file 値を上書き可能
 - repo-local manifest runner で fake / dev-harness / isolated-displayd / config flow / negative checks をまとめて再現できる
-- real displayd explicit socket preflight runner により、プロダクションバイナリ間の明示接続および backend 選択の安全性を再現できる
+- real displayd explicit socket preflight runner により、プロダクションバイナリ間の明示接続、手法選択、X11実接続（opt-in時のみ）を再現できる
 - dev-harness feature は CI でも `cargo check/test --workspace --features dev-harness` で検証される
 - test harness displayd と dev-only harness binary で CaptureOutput -> OutputCaptured -> RGBA8888 artifact -> ingest -> PNG/JPEG encode を repo内E2E確認可能
 - browser hostile clientの screen capture は explicit visible grant なしでは拒否される
@@ -162,12 +172,12 @@
 ## Acceptance State for This Checkpoint
 
 - `cargo fmt --check` PASS
-- `cargo check --workspace`
-- `cargo test --workspace`
-- `cargo test -p xwin-sec --test browser_surface_boundary`
-- `cargo test -p xwin-sec --test age_assurance_browser_surface_boundary`
+- `cargo check --workspace --features real-x11` PASS
+- `cargo test --workspace --features real-x11` PASS
+- `cargo test -p xwin-sec --test browser_surface_boundary` PASS
+- `cargo test -p xwin-sec --test age_assurance_browser_surface_boundary` PASS
 - `bash -n scripts/run-xwin-screenshot-real-displayd-preflight.sh` PASS
-- `scripts/run-xwin-screenshot-real-displayd-preflight.sh` SUCCESS (including backend selection safety)
+- `scripts/run-xwin-screenshot-real-displayd-preflight.sh` SUCCESS (including X11 backend selection safety)
 - `git diff --check` PASS
 - origin/main同期
 - workspace clean
@@ -176,3 +186,4 @@
 - 実displayd.sock未接続 (自動探索・システム接続なし)
 - 本物displayd process未起動 (Preflight runnerによる一時起動を除く)
 - Real Capture Backend 選択は fail-closed である
+- X11 Real Capture は明示 opt-in 時のみ動作する

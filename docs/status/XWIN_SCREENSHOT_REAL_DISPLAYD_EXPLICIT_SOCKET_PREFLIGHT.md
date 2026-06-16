@@ -21,23 +21,26 @@
 
 - `displayd` は `--capture-backend <fake|real>` オプションにより、キャプチャの実装を選択できる。
 - `real` を選択する場合、追加の保護フラグ `--allow-real-capture` が必須である（二重の明示的 opt-in）。
+- `--capture-method <stub|x11>` により、具体的な取得手法を指定する。既定は `stub`。
+- `x11` 手法を用いる場合は `--x11-display <DISPLAY>` が必須であり、環境変数 `DISPLAY` は自動参照されない。
 - 実装が未定義または環境が不適合な場合、`fake` に黙って fallback することはなく、明示的にエラーを返して fail-closed する。
 
 ## Startup Procedure (Preflight Plan)
 
 1. **Workspace Preparation**:
    - `git status` が clean であることを確認。
-   - `cargo build --workspace` で全バイナリをビルド。
+   - `cargo build --workspace --features real-x11` で X11 サポートを有効にしてビルド。
 
 2. **Real Displayd Startup**:
    - `target/debug/displayd` を起動。
    - ソケットパスは `target/xsm/preflight/displayd.sock` のように、repo 内の temp ディレクトリを指定する。
    - ログは `target/xsm/preflight/displayd.log` へリダイレクトする。
-   - 注: 現在の `displayd` 内部は `FakeCaptureBackend` であるが、バイナリ自体はプロダクション用（Real）として扱う。
+   - `fake` テスト時は `--capture-backend fake` を明示（既定）。
+   - `x11` テスト時は `--capture-backend real --allow-real-capture --capture-method x11 --x11-display :0` 等を明示。
 
 3. **Screenshot App Connection**:
    - `target/debug/xwin-screenshot --backend isolated-displayd --displayd-socket <PATH> --artifact-root <PATH> ...` を実行。
-   - プロダクション用バイナリ間の IPC 通信および契約（CaptureOutput -> OutputCaptured）を、明示的な境界越しに確認する。
+   - `displayd` の設定に応じ、`fake` / `stub` / `x11` のそれぞれの振る舞い（成功・拒否・取得）を確認する。
 
 ## Failure and Stop Conditions
 

@@ -127,3 +127,11 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - 実画面取得は、デフォルトの `fake` を維持しつつ、`--capture-backend real` と保護フラグ `--allow-real-capture` の両方を明示した場合のみ有効になる（二重の opt-in）。
 - 現時点の `RealCaptureBackendStub` は NotImplemented / Unsupported として fail-closed し、DRM/KMS/PipeWire/Wayland 等への自動接触を防止している。
 - 実画面取得の成功はこの段階では要求されず、安全な構造分離と拒否の動作を優先している。
+
+## Phase 2-G
+
+- `displayd` において、X11 root window を対象とした実画面取得 backend を実装した。
+- X11 キャプチャは、`--capture-backend real`, `--allow-real-capture`, `--capture-method x11`, `--x11-display <DISPLAY>` の 4 つが揃った場合のみ有効になる。
+- `DISPLAY` 環境変数の自動参照は行わず、明示的なディスプレイ指定を必須としている。
+- 接続失敗、取得失敗、フォーマット変換失敗は全て fail-closed となり、`fake` への自動 fallback は行われない。
+- Wayland / PipeWire / Portal 手法は引き続き未実装であり、別フェーズでの対応を予定している。
