@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use async_trait;
 use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
 };
@@ -48,7 +49,7 @@ async fn main() -> Result<()> {
                 let display = config.x11_display.as_ref().expect("validated");
                 Box::new(X11CaptureBackend::new(display)?)
             }
-            CaptureMethod::Portal => Box::new(PortalCaptureBackendStub),
+            CaptureMethod::Portal => Box::new(PortalCaptureBackend::new()?),
         },
     };
 
@@ -115,6 +116,7 @@ struct Config {
     capture_method: CaptureMethod,
     x11_display: Option<String>,
     allow_portal_capture: bool,
+    allow_portal_dialog: bool,
 }
 
 impl Config {
@@ -165,9 +167,12 @@ impl Config {
                 "--allow-portal-capture" => {
                     config.allow_portal_capture = true;
                 }
+                "--allow-portal-dialog" => {
+                    config.allow_portal_dialog = true;
+                }
                 "--help" | "-h" => {
                     println!(
-                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID] [--socket PATH] [--capture-backend fake|real] [--allow-real-capture] [--capture-method stub|x11|portal] [--x11-display DISPLAY] [--allow-portal-capture]"
+                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID] [--socket PATH] [--capture-backend fake|real] [--allow-real-capture] [--capture-method stub|x11|portal] [--x11-display DISPLAY] [--allow-portal-capture] [--allow-portal-dialog]"
                     );
                     std::process::exit(0);
                 }
@@ -200,10 +205,17 @@ impl Config {
             if !config.allow_portal_capture {
                 bail!("--capture-method portal requires --allow-portal-capture");
             }
+            if !config.allow_portal_dialog {
+                bail!("--capture-method portal requires --allow-portal-dialog for user interaction");
+            }
         }
 
         if config.allow_portal_capture && config.capture_method != CaptureMethod::Portal {
             bail!("--allow-portal-capture requires --capture-method portal");
+        }
+
+        if config.allow_portal_dialog && config.capture_method != CaptureMethod::Portal {
+            bail!("--allow-portal-dialog requires --capture-method portal");
         }
 
         if config.x11_display.is_some() && config.capture_method != CaptureMethod::X11 {
@@ -441,8 +453,9 @@ trait PresentationClock {
     fn current_seq(&self) -> u64;
 }
 
-trait CaptureBackend {
-    fn capture(&self, output: &str) -> Result<(u32, u32, Vec<u32>)>;
+#[async_trait::async_trait]
+trait CaptureBackend: Send + Sync {
+    async fn capture(&self, output: &str) -> Result<(u32, u32, Vec<u32>)>;
 }
 
 trait RecordBackend {
@@ -477,8 +490,9 @@ impl DisplayBackend for FakeDisplayBackend {
 
 struct FakeCaptureBackend;
 
+#[async_trait::async_trait]
 impl CaptureBackend for FakeCaptureBackend {
-    fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+    async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
         let width = 1920;
         let height = 1080;
         Ok((width, height, generate_mock_pixels(width, height)))
@@ -487,8 +501,9 @@ impl CaptureBackend for FakeCaptureBackend {
 
 struct RealCaptureBackendStub;
 
+#[async_trait::async_trait]
 impl CaptureBackend for RealCaptureBackendStub {
-    fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+    async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
         bail!(
             "real screen capture is not implemented/supported in this environment (RealCaptureBackendStub)"
         )
@@ -497,11 +512,87 @@ impl CaptureBackend for RealCaptureBackendStub {
 
 struct PortalCaptureBackendStub;
 
+#[async_trait::async_trait]
 impl CaptureBackend for PortalCaptureBackendStub {
-    fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+    async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
         bail!(
             "PipeWire/portal screen capture is not implemented/supported in this environment (PortalCaptureBackendStub)"
         )
+    }
+}
+
+struct PortalCaptureBackend;
+
+impl PortalCaptureBackend {
+    fn new() -> Result<Self> {
+        Ok(Self {})
+    }
+}
+
+#[cfg(feature = "real-portal")]
+#[async_trait::async_trait]
+impl CaptureBackend for PortalCaptureBackend {
+    async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+        use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
+        use ashpd::desktop::PersistMode;
+        use ashpd::WindowIdentifier;
+
+        println!("service=displayd op=portal_capture event=initiation");
+
+        let proxy = Screencast::new().await.context("failed to create Screencast portal proxy")?;
+        let session = proxy
+            .create_session()
+            .await
+            .context("failed to create portal screencast session")?;
+
+        println!("service=displayd op=portal_capture event=select_sources_begin");
+        proxy
+            .select_sources(
+                &session,
+                CursorMode::Metadata,
+                SourceType::Monitor | SourceType::Window,
+                false,
+                None,
+                PersistMode::DoNot,
+            )
+            .await
+            .context("failed to select sources in portal")?;
+
+        println!("service=displayd op=portal_capture event=start_begin");
+        let response = proxy
+            .start(&session, &WindowIdentifier::default())
+            .await
+            .context("failed to start portal screencast")?
+            .response()
+            .context("portal start request was cancelled or failed")?;
+
+        println!("service=displayd op=portal_capture event=session_started");
+
+        let streams = response.streams();
+        if streams.is_empty() {
+            bail!("no streams returned from portal screencast session");
+        }
+
+        let _fd = proxy
+            .open_pipe_wire_remote(&session)
+            .await
+            .context("failed to open PipeWire remote from portal")?;
+
+        println!("service=displayd op=portal_capture event=pipewire_remote_opened");
+
+        // Since we don't have libpipewire-0.3-dev, we can't actually read the frames yet.
+        // We fulfill the user-mediated session requirement and fail-closed here.
+        bail!(
+            "User-mediated portal session established, but PipeWire frame ingestion is not implemented (requires libpipewire-0.3-dev)"
+        );
+    }
+}
+
+#[cfg(not(feature = "real-portal"))]
+#[async_trait::async_trait]
+impl CaptureBackend for PortalCaptureBackend {
+    async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+        bail!("real-portal feature is not enabled. Portal capture is unavailable.")
     }
 }
 
@@ -520,8 +611,9 @@ impl X11CaptureBackend {
 }
 
 #[cfg(feature = "real-x11")]
+#[async_trait::async_trait]
 impl CaptureBackend for X11CaptureBackend {
-    fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+    async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
         use x11rb::connection::Connection;
         use x11rb::protocol::xproto::{ConnectionExt, ImageFormat};
 
@@ -563,8 +655,9 @@ impl CaptureBackend for X11CaptureBackend {
 }
 
 #[cfg(not(feature = "real-x11"))]
+#[async_trait::async_trait]
 impl CaptureBackend for X11CaptureBackend {
-    fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+    async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
         bail!("real-x11 feature is not enabled. X11 capture is unavailable.")
     }
 }
@@ -729,7 +822,7 @@ async fn handle_capture_output(
 ) -> Result<DisplayEvent> {
     println!("service=displayd op=capture_output event=begin output={output}");
 
-    let (width, height, mut pixels) = backend.capture(output)?;
+    let (width, height, mut pixels) = backend.capture(output).await?;
     validate_capture_pixel_count(width, height, pixels.len())?;
     let payload_len = pixels
         .len()
@@ -1144,8 +1237,9 @@ mod tests {
     async fn test_handle_capture_output_propagates_backend_error() {
         struct FailingCaptureBackend;
 
+        #[async_trait::async_trait]
         impl CaptureBackend for FailingCaptureBackend {
-            fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+            async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
                 Err(anyhow::anyhow!("capture failed"))
             }
         }
@@ -1182,8 +1276,9 @@ mod tests {
     async fn capture_backend_failure_still_returns_result_error() {
         struct FailingCaptureBackend;
 
+        #[async_trait::async_trait]
         impl CaptureBackend for FailingCaptureBackend {
-            fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+            async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
                 Err(anyhow::anyhow!("capture failed"))
             }
         }
@@ -1409,6 +1504,7 @@ mod tests {
             "--capture-method".to_string(),
             "portal".to_string(),
             "--allow-portal-capture".to_string(),
+            "--allow-portal-dialog".to_string(),
         ]
         .into_iter()
         .skip(1);
@@ -1416,10 +1512,11 @@ mod tests {
         assert_eq!(config.capture_backend, CaptureBackendType::Real);
         assert_eq!(config.capture_method, CaptureMethod::Portal);
         assert!(config.allow_portal_capture);
+        assert!(config.allow_portal_dialog);
     }
 
     #[test]
-    fn test_config_parser_rejects_portal_without_allow_portal() {
+    fn test_config_parser_rejects_portal_without_interactive_flag() {
         let args = vec![
             "displayd".to_string(),
             "--capture-backend".to_string(),
@@ -1427,21 +1524,22 @@ mod tests {
             "--allow-real-capture".to_string(),
             "--capture-method".to_string(),
             "portal".to_string(),
+            "--allow-portal-capture".to_string(),
         ]
         .into_iter()
         .skip(1);
         let err = Config::from_args(args).unwrap_err();
-        assert!(err.to_string().contains("requires --allow-portal-capture"));
+        assert!(err.to_string().contains("requires --allow-portal-dialog"));
     }
 
     #[test]
-    fn test_config_parser_rejects_allow_portal_without_portal_method() {
+    fn test_config_parser_rejects_interactive_flag_without_portal_method() {
         let args = vec![
             "displayd".to_string(),
             "--capture-backend".to_string(),
             "real".to_string(),
             "--allow-real-capture".to_string(),
-            "--allow-portal-capture".to_string(),
+            "--allow-portal-dialog".to_string(),
         ]
         .into_iter()
         .skip(1);
@@ -1452,7 +1550,7 @@ mod tests {
     #[tokio::test]
     async fn test_portal_capture_backend_stub_returns_error() {
         let backend = PortalCaptureBackendStub;
-        let err = backend.capture("fullscreen").unwrap_err();
+        let err = backend.capture("fullscreen").await.unwrap_err();
         assert!(err.to_string().contains("PipeWire/portal screen capture"));
         assert!(err.to_string().contains("PortalCaptureBackendStub"));
     }

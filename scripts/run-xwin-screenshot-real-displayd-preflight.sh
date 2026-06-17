@@ -21,6 +21,7 @@ REPORT_FILE="$RUN_ROOT/XWIN_SCREENSHOT_PREFLIGHT_REPORT.md"
 
 NO_REAL_CONNECT=false
 ALLOW_X11_REAL_CAPTURE=false
+ALLOW_PORTAL_REAL_CAPTURE=false
 X11_DISPLAY=""
 
 usage() {
@@ -30,6 +31,7 @@ Usage: $0 [options]
 Options:
   --no-real-connect: Validate script syntax and build binaries without actually starting displayd.
   --allow-x11-real-capture: Enable real X11 capture connection test (Case 7).
+  --allow-portal-real-capture: Enable real portal capture connection test (Case 11).
   --x11-display DISPLAY: X11 display to use for real capture (e.g., :0).
 EOF
 }
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-real-connect) NO_REAL_CONNECT=true; shift ;;
         --allow-x11-real-capture) ALLOW_X11_REAL_CAPTURE=true; shift ;;
+        --allow-portal-real-capture) ALLOW_PORTAL_REAL_CAPTURE=true; shift ;;
         --x11-display) X11_DISPLAY="$2"; shift 2 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown argument: $1"; usage; exit 1 ;;
@@ -54,6 +57,7 @@ cat >"$REPORT_FILE" <<EOF
 - socket_path: $SOCKET_PATH
 - artifact_root: $ARTIFACT_ROOT
 - allow_x11_real_capture: $ALLOW_X11_REAL_CAPTURE
+- allow_portal_real_capture: $ALLOW_PORTAL_REAL_CAPTURE
 - x11_display: $X11_DISPLAY
 
 EOF
@@ -75,7 +79,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 log "Building binaries..."
-cargo build -p displayd -p xwin-screenshot --features real-x11
+cargo build -p displayd -p xwin-screenshot --features real-x11,real-portal
 
 TARGET_DIR="$(
   cargo metadata --format-version 1 --no-deps --quiet |
@@ -245,7 +249,7 @@ fi
 # Test 8: Portal Method without Allow Portal Flag (Should fail to start)
 log "Case 8: Portal Method without --allow-portal-capture"
 rm -f "$SOCKET_PATH"
-if ! "$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --capture-backend real --allow-real-capture --capture-method portal --once > "$LOG_DIR/displayd-portal-no-allow.log" 2>&1; then
+if ! "$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --capture-backend real --allow-real-capture --capture-method portal --allow-portal-dialog --once > "$LOG_DIR/displayd-portal-no-allow.log" 2>&1; then
     log "Case 8 SUCCESS (Rejected as expected)"
     append_report "Case 8 (Portal without Allow): REJECTED (SUCCESS)"
 else
@@ -266,38 +270,61 @@ else
     exit 1
 fi
 
-# Test 10: Real Portal Capture Scaffold (Should start but fail-closed on capture)
-log "Case 10: Real Portal Capture (Fail-Closed Stub)"
+# Test 10: Real Portal Capture without Interactive Flag (Should fail to start)
+log "Case 10: Portal Method without --allow-portal-dialog"
 rm -f "$SOCKET_PATH"
-"$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --capture-backend real --allow-real-capture --capture-method portal --allow-portal-capture --once > "$LOG_DIR/displayd-portal-fail-closed.log" 2>&1 &
-DISPLAYD_PID=$!
-
-# Wait for socket
-for i in $(seq 1 50); do
-    if [[ -S "$SOCKET_PATH" ]]; then break; fi
-    sleep 0.1
-done
-
-if [[ ! -S "$SOCKET_PATH" ]]; then
-    log "Timeout waiting for portal backend socket."
-    exit 1
-fi
-
-if ! "$TARGET_DIR/xwin-screenshot" --backend isolated-displayd --displayd-socket "$SOCKET_PATH" --artifact-root "$ARTIFACT_ROOT" --save-dir "$OUT_DIR/portal" --format png > "$LOG_DIR/screenshot-portal.log" 2>&1; then
-    log "Case 10 SUCCESS (Fail-closed as expected)"
-    if grep -q "PipeWire/portal screen capture" "$LOG_DIR/screenshot-portal.log"; then
-        log "Confirmed: Portal stub error message found."
-        append_report "Case 10 (Portal Fail-Closed): SUCCESS (Confirmed Stub Error)"
-    else
-        log "Warning: Portal stub error message not found in screenshot log, but connection failed."
-        append_report "Case 10 (Portal Fail-Closed): SUCCESS (Connection Failed)"
-    fi
+if ! "$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --capture-backend real --allow-real-capture --capture-method portal --allow-portal-capture --once > "$LOG_DIR/displayd-portal-no-dialog.log" 2>&1; then
+    log "Case 10 SUCCESS (Rejected as expected)"
+    append_report "Case 10 (Portal without Dialog): REJECTED (SUCCESS)"
 else
-    log "Case 10 FAILED (Should have failed-closed)"
-    append_report "Case 10 (Portal Fail-Closed): FAILED"
+    log "Case 10 FAILED (Should have been rejected)"
+    append_report "Case 10 (Portal without Dialog): FAILED"
     exit 1
 fi
-wait "$DISPLAYD_PID" || true
+
+# Test 11: Real Portal Capture (Optional, Interactive)
+log "Case 11: Real Portal Capture (User-Mediated)"
+if [[ "$ALLOW_PORTAL_REAL_CAPTURE" == "true" ]]; then
+    log "Performing REAL Portal connection. USER INTERACTION REQUIRED (Look for portal dialog)."
+    rm -f "$SOCKET_PATH"
+    "$TARGET_DIR/displayd" --socket "$SOCKET_PATH" --capture-backend real --allow-real-capture --capture-method portal --allow-portal-capture --allow-portal-dialog --once > "$LOG_DIR/displayd-portal-real.log" 2>&1 &
+    DISPLAYD_PID=$!
+
+    # Wait for socket
+    for i in $(seq 1 50); do
+        if [[ -S "$SOCKET_PATH" ]]; then break; fi
+        sleep 0.1
+    done
+
+    if [[ ! -S "$SOCKET_PATH" ]]; then
+        log "Timeout waiting for Portal backend socket."
+        append_report "Case 11 (Portal Real Connect): TIMEOUT (FAILED)"
+        exit 1
+    fi
+
+    if "$TARGET_DIR/xwin-screenshot" --backend isolated-displayd --displayd-socket "$SOCKET_PATH" --artifact-root "$ARTIFACT_ROOT" --save-dir "$OUT_DIR/portal" --format png > "$LOG_DIR/screenshot-portal.log" 2>&1; then
+        log "Case 11 SUCCESS (Portal Real Connect)"
+        append_report "Case 11 (Portal Real Connect): SUCCESS"
+    else
+        RC=$?
+        if grep -q "User-mediated portal session established" "$LOG_DIR/displayd-portal-real.log" || grep -q "User-mediated portal session established" "$LOG_DIR/screenshot-portal.log"; then
+             log "Case 11 FAIL-CLOSED (Session established, ingestion stubbed - SUCCESS)"
+             append_report "Case 11 (Portal Real Connect): FAIL-CLOSED (Stubbed Ingestion, SUCCESS)"
+        elif grep -q "cancelled" "$LOG_DIR/displayd-portal-real.log" || grep -q "cancelled" "$LOG_DIR/screenshot-portal.log"; then
+             log "Case 11 FAIL-CLOSED (User cancelled - SUCCESS)"
+             append_report "Case 11 (Portal Real Connect): FAIL-CLOSED (User Cancelled, SUCCESS)"
+        else
+            log "Case 11 FAILED (exit $RC). Check logs."
+            cat "$LOG_DIR/displayd-portal-real.log"
+            append_report "Case 11 (Portal Real Connect): FAILED (exit $RC)"
+            exit "$RC"
+        fi
+    fi
+    wait "$DISPLAYD_PID" || true
+else
+    log "Case 11 SKIP (Not opted into Portal real connection)"
+    append_report "Case 11 (Portal Real Connect): SKIP"
+fi
 
 log "Preflight report written to $REPORT_FILE"
 echo "Preflight completed successfully."
