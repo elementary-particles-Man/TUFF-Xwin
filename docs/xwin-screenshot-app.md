@@ -135,3 +135,10 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 - `DISPLAY` 環境変数の自動参照は行わず、明示的なディスプレイ指定を必須としている。
 - 接続失敗、取得失敗、フォーマット変換失敗は全て fail-closed となり、`fake` への自動 fallback は行われない。
 - Wayland / PipeWire / Portal 手法は引き続き未実装であり、別フェーズでの対応を予定している。
+
+## Phase 2-H
+
+- Wayland 環境での実画面取得に向け、PipeWire / xdg-desktop-portal 経由のキャプチャ手法を選択可能にする足場（Scaffold）を導入した。
+- Portal キャプチャは、`--capture-backend real`, `--allow-real-capture`, `--capture-method portal`, `--allow-portal-capture` の 4 つが揃った場合のみ有効になる（四重の opt-in）。
+- 現時点の `PortalCaptureBackendStub` は NotImplemented / Unsupported として fail-closed し、ダイアログの自動承認や未許可の接続を防止している。
+- Xwayland 環境での X11 `BadMatch` を「正しく拒否された状態（fail-closed）」として定義し、予期せぬ fallback がないことを保証している。

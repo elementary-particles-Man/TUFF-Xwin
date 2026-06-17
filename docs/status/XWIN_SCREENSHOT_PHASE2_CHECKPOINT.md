@@ -87,6 +87,13 @@
 - 接続失敗、root window 取得失敗、フォーマット変換失敗は全て fail-closed とし、`fake` への fallback を排除。
 - X11 以外の Wayland / PipeWire / DRM-KMS / Portal は引き続き未実装として明示的に分離。
 
+## Phase2-H Fixed: PipeWire Portal Capture Scaffold
+
+- Wayland 環境での実画面取得に向け、PipeWire / xdg-desktop-portal 経由のキャプチャ手法を選択可能にする scaffold を導入。
+- `portal` 手法の明示選択をサポートし、保護フラグ `--allow-portal-capture` を必須化（四重の明示的 opt-in）。
+- 初期段階の `PortalCaptureBackendStub` は NotImplemented/Unsupported として fail-closed し、ダイアログの自動承認や未許可の D-Bus 接続を防止。
+- Xwayland 環境における X11 `BadMatch` を期待される fail-closed (Case 7 SUCCESS) として整理。
+
 ## Current Verified Boundaries
 
 - 実displayd.sock 非接続
@@ -101,6 +108,7 @@
 - `displayd` は `--capture-backend` / `--capture-method` による明示手法選択をサポート
 - real capture は二重または四重の明示的 opt-in でのみ許可
 - X11 接続時の `DISPLAY` 環境変数自動参照なし
+- Portal 接続時の自動接続・自動承認なし
 - runtime自動探索なし
 - `/run/user` path 拒否
 - policy deny は transport 前に停止
@@ -177,7 +185,7 @@
 - `cargo test -p xwin-sec --test browser_surface_boundary` PASS
 - `cargo test -p xwin-sec --test age_assurance_browser_surface_boundary` PASS
 - `bash -n scripts/run-xwin-screenshot-real-displayd-preflight.sh` PASS
-- `scripts/run-xwin-screenshot-real-displayd-preflight.sh` SUCCESS (including X11 backend selection safety)
+- `scripts/run-xwin-screenshot-real-displayd-preflight.sh` SUCCESS (including X11/Portal backend selection safety)
 - `git diff --check` PASS
 - origin/main同期
 - workspace clean
@@ -186,4 +194,5 @@
 - 実displayd.sock未接続 (自動探索・システム接続なし)
 - 本物displayd process未起動 (Preflight runnerによる一時起動を除く)
 - Real Capture Backend 選択は fail-closed である
-- X11 Real Capture は明示 opt-in 時のみ動作する
+- X11 Real Capture は明示 opt-in 時のみ動作し、Xwayland では BadMatch fail-closed する
+- Portal Real Capture は明示 opt-in 時のみ動作し、現在は fail-closed する

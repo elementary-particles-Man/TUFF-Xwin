@@ -48,6 +48,7 @@ async fn main() -> Result<()> {
                 let display = config.x11_display.as_ref().expect("validated");
                 Box::new(X11CaptureBackend::new(display)?)
             }
+            CaptureMethod::Portal => Box::new(PortalCaptureBackendStub),
         },
     };
 
@@ -99,6 +100,7 @@ enum CaptureMethod {
     #[default]
     Stub,
     X11,
+    Portal,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -112,6 +114,7 @@ struct Config {
     allow_real_capture: bool,
     capture_method: CaptureMethod,
     x11_display: Option<String>,
+    allow_portal_capture: bool,
 }
 
 impl Config {
@@ -145,6 +148,7 @@ impl Config {
                     config.capture_method = match val.as_str() {
                         "stub" => CaptureMethod::Stub,
                         "x11" => CaptureMethod::X11,
+                        "portal" => CaptureMethod::Portal,
                         _ => bail!("unknown capture method: {val}"),
                     };
                 }
@@ -158,9 +162,12 @@ impl Config {
                 "--allow-real-capture" => {
                     config.allow_real_capture = true;
                 }
+                "--allow-portal-capture" => {
+                    config.allow_portal_capture = true;
+                }
                 "--help" | "-h" => {
                     println!(
-                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID] [--socket PATH] [--capture-backend fake|real] [--allow-real-capture] [--capture-method stub|x11] [--x11-display DISPLAY]"
+                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID] [--socket PATH] [--capture-backend fake|real] [--allow-real-capture] [--capture-method stub|x11|portal] [--x11-display DISPLAY] [--allow-portal-capture]"
                     );
                     std::process::exit(0);
                 }
@@ -184,6 +191,19 @@ impl Config {
                     "--capture-method x11 requires --x11-display DISPLAY (DISPLAY env is not used)"
                 );
             }
+        }
+
+        if config.capture_method == CaptureMethod::Portal {
+            if config.capture_backend != CaptureBackendType::Real {
+                bail!("--capture-method portal requires --capture-backend real");
+            }
+            if !config.allow_portal_capture {
+                bail!("--capture-method portal requires --allow-portal-capture");
+            }
+        }
+
+        if config.allow_portal_capture && config.capture_method != CaptureMethod::Portal {
+            bail!("--allow-portal-capture requires --capture-method portal");
         }
 
         if config.x11_display.is_some() && config.capture_method != CaptureMethod::X11 {
@@ -471,6 +491,16 @@ impl CaptureBackend for RealCaptureBackendStub {
     fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
         bail!(
             "real screen capture is not implemented/supported in this environment (RealCaptureBackendStub)"
+        )
+    }
+}
+
+struct PortalCaptureBackendStub;
+
+impl CaptureBackend for PortalCaptureBackendStub {
+    fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+        bail!(
+            "PipeWire/portal screen capture is not implemented/supported in this environment (PortalCaptureBackendStub)"
         )
     }
 }
@@ -1369,11 +1399,61 @@ mod tests {
         assert!(err.to_string().contains("data too short"));
     }
 
+    #[test]
+    fn test_config_parser_accepts_portal_real_with_all_flags() {
+        let args = vec![
+            "displayd".to_string(),
+            "--capture-backend".to_string(),
+            "real".to_string(),
+            "--allow-real-capture".to_string(),
+            "--capture-method".to_string(),
+            "portal".to_string(),
+            "--allow-portal-capture".to_string(),
+        ]
+        .into_iter()
+        .skip(1);
+        let config = Config::from_args(args).unwrap();
+        assert_eq!(config.capture_backend, CaptureBackendType::Real);
+        assert_eq!(config.capture_method, CaptureMethod::Portal);
+        assert!(config.allow_portal_capture);
+    }
+
+    #[test]
+    fn test_config_parser_rejects_portal_without_allow_portal() {
+        let args = vec![
+            "displayd".to_string(),
+            "--capture-backend".to_string(),
+            "real".to_string(),
+            "--allow-real-capture".to_string(),
+            "--capture-method".to_string(),
+            "portal".to_string(),
+        ]
+        .into_iter()
+        .skip(1);
+        let err = Config::from_args(args).unwrap_err();
+        assert!(err.to_string().contains("requires --allow-portal-capture"));
+    }
+
+    #[test]
+    fn test_config_parser_rejects_allow_portal_without_portal_method() {
+        let args = vec![
+            "displayd".to_string(),
+            "--capture-backend".to_string(),
+            "real".to_string(),
+            "--allow-real-capture".to_string(),
+            "--allow-portal-capture".to_string(),
+        ]
+        .into_iter()
+        .skip(1);
+        let err = Config::from_args(args).unwrap_err();
+        assert!(err.to_string().contains("requires --capture-method portal"));
+    }
+
     #[tokio::test]
-    async fn test_real_capture_backend_stub_returns_error() {
-        let backend = RealCaptureBackendStub;
-        let err = backend.capture("eDP-1").unwrap_err();
-        assert!(err.to_string().contains("not implemented/supported"));
-        assert!(err.to_string().contains("RealCaptureBackendStub"));
+    async fn test_portal_capture_backend_stub_returns_error() {
+        let backend = PortalCaptureBackendStub;
+        let err = backend.capture("fullscreen").unwrap_err();
+        assert!(err.to_string().contains("PipeWire/portal screen capture"));
+        assert!(err.to_string().contains("PortalCaptureBackendStub"));
     }
 }
