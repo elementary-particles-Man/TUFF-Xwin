@@ -105,9 +105,11 @@
 
 ## Current Verified Boundaries
 
-- 実displayd.sock 非接続
-- 実Wayland session 非接続
-- 実DRM/KMS/PipeWire/input device 非接触
+- 実displayd.sock 自動接続なし
+- Wayland compositor 直接接続なし
+- DRM/KMS/input device 直接接触なし。PipeWireはportal-returned FD経由のみCase11 opt-in時に限定
+- PipeWire frame ingestion は未実装で fail-closed
+- fake fallback なし
 - 実global hotkey 非登録
 - 実system tray 非登録
 - 本物displayd process 非起動 (Preflight runnerによる一時起動を除く)

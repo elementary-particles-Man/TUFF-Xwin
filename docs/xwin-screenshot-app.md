@@ -11,10 +11,11 @@
 ## 非目的
 
 - KDE 級の巨大デスクトップ環境を作ることではない。
-- 実 Wayland session へ接続することではない。
+- 実 Wayland session へ直接接続することではない。
 - 実 global hotkey 登録を行うことではない。
 - 実 system tray 登録を行うことではない。
-- 実 DRM / KMS / PipeWire / input device を触ることではない。
+- 実 DRM / KMS / input device を直接触ることではない。
+- xwin-screenshot app本体が直接 PipeWire を触ることではない（displayd が portal から取得した FD を経由して扱うのみ）。
 
 ## 設定
 
