@@ -206,7 +206,9 @@ impl Config {
                 bail!("--capture-method portal requires --allow-portal-capture");
             }
             if !config.allow_portal_dialog {
-                bail!("--capture-method portal requires --allow-portal-dialog for user interaction");
+                bail!(
+                    "--capture-method portal requires --allow-portal-dialog for user interaction"
+                );
             }
         }
 
@@ -533,17 +535,25 @@ impl PortalCaptureBackend {
 #[async_trait::async_trait]
 impl CaptureBackend for PortalCaptureBackend {
     async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
-        use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
-        use ashpd::desktop::PersistMode;
         use ashpd::WindowIdentifier;
+        use ashpd::desktop::PersistMode;
+        use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
+        use pipewire::properties::properties;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use std::time::Duration;
+
+        // Initialize PipeWire once
+        static PW_ONCE: std::sync::Once = std::sync::Once::new();
+        PW_ONCE.call_once(|| {
+            pipewire::init();
+        });
 
         println!("service=displayd op=portal_capture event=initiation");
 
         let proxy = Screencast::new().await.context("failed to create Screencast portal proxy")?;
-        let session = proxy
-            .create_session()
-            .await
-            .context("failed to create portal screencast session")?;
+        let session =
+            proxy.create_session().await.context("failed to create portal screencast session")?;
 
         println!("service=displayd op=portal_capture event=select_sources_begin");
         proxy
@@ -572,6 +582,8 @@ impl CaptureBackend for PortalCaptureBackend {
         if streams.is_empty() {
             bail!("no streams returned from portal screencast session");
         }
+        let target_node_id = streams[0].pipe_wire_node_id();
+        println!("service=displayd op=portal_capture event=stream_info node_id={}", target_node_id);
 
         let _fd = proxy
             .open_pipe_wire_remote(&session)
@@ -580,12 +592,352 @@ impl CaptureBackend for PortalCaptureBackend {
 
         println!("service=displayd op=portal_capture event=pipewire_remote_opened");
 
-        // Since we don't have libpipewire-0.3-dev, we can't actually read the frames yet.
-        // We fulfill the user-mediated session requirement and fail-closed here.
-        bail!(
-            "User-mediated portal session established, but PipeWire frame ingestion is not implemented (requires libpipewire-0.3-dev)"
+        let mainloop = pipewire::main_loop::MainLoopRc::new(None)
+            .map_err(|e| anyhow::anyhow!("failed to create PipeWire MainLoop: {:?}", e))?;
+        let context = pipewire::context::ContextRc::new(&mainloop, None)
+            .map_err(|e| anyhow::anyhow!("failed to create PipeWire Context: {:?}", e))?;
+        let core = context
+            .connect_fd_rc(_fd, None)
+            .map_err(|e| anyhow::anyhow!("failed to connect PipeWire Core from FD: {:?}", e))?;
+
+        let props = properties! {
+            *pipewire::keys::MEDIA_TYPE => "Video",
+            *pipewire::keys::MEDIA_CATEGORY => "Capture",
+            *pipewire::keys::MEDIA_ROLE => "Camera",
+        };
+        let stream = pipewire::stream::StreamBox::new(&core, "tuff-xwin-capture", props)
+            .map_err(|e| anyhow::anyhow!("failed to create PipeWire Stream: {:?}", e))?;
+
+        struct CaptureState {
+            format: Option<pipewire::spa::param::video::VideoInfoRaw>,
+            frame_data: Option<Result<(u32, u32, Vec<u32>)>>,
+            mainloop: pipewire::main_loop::MainLoopRc,
+        }
+
+        let state = Rc::new(RefCell::new(CaptureState {
+            format: None,
+            frame_data: None,
+            mainloop: mainloop.clone(),
+        }));
+
+        let listener = stream
+            .add_local_listener_with_user_data(state.clone())
+            .param_changed(|_stream, state_cell, id, param| {
+                let Some(param) = param else { return; };
+                if id != pipewire::spa::param::ParamType::Format.as_raw() { return; }
+
+                let (media_type, media_subtype) = match pipewire::spa::param::format_utils::parse_format(param) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+
+                if media_type != pipewire::spa::param::format::MediaType::Video
+                    || media_subtype != pipewire::spa::param::format::MediaSubtype::Raw
+                {
+                    return;
+                }
+
+                let mut video_info = pipewire::spa::param::video::VideoInfoRaw::default();
+                if video_info.parse(param).is_ok() {
+                    println!("service=displayd op=portal_capture event=format_negotiated size={}x{} format={:?}",
+                        video_info.size().width, video_info.size().height, video_info.format().as_raw());
+                    state_cell.borrow_mut().format = Some(video_info);
+                }
+            })
+            .process(|stream, state_cell| {
+                let mut cell = state_cell.borrow_mut();
+                if cell.frame_data.is_some() { return; }
+
+                let video_info = match &cell.format {
+                    Some(info) => info.clone(),
+                    None => {
+                        cell.frame_data = Some(Err(anyhow::anyhow!("process called before format negotiation")));
+                        cell.mainloop.quit();
+                        return;
+                    }
+                };
+
+                match stream.dequeue_buffer() {
+                    None => {},
+                    Some(mut buffer) => {
+                        let datas = buffer.datas_mut();
+                        if datas.is_empty() { return; }
+                        let data = &datas[0];
+
+                        let width = video_info.size().width;
+                        let height = video_info.size().height;
+                        let format = video_info.format();
+
+                        let res = process_pipewire_frame(data, width, height, format);
+                        cell.frame_data = Some(res);
+                        cell.mainloop.quit();
+                    }
+                }
+            })
+            .register()
+            .map_err(|e| anyhow::anyhow!("failed to register stream listener: {:?}", e))?;
+
+        // Format negotiation setup
+        let obj = pipewire::spa::pod::object!(
+            pipewire::spa::utils::SpaTypes::ObjectParamFormat,
+            pipewire::spa::param::ParamType::EnumFormat,
+            pipewire::spa::pod::property!(
+                pipewire::spa::param::format::FormatProperties::MediaType,
+                Id,
+                pipewire::spa::param::format::MediaType::Video
+            ),
+            pipewire::spa::pod::property!(
+                pipewire::spa::param::format::FormatProperties::MediaSubtype,
+                Id,
+                pipewire::spa::param::format::MediaSubtype::Raw
+            ),
+            pipewire::spa::pod::property!(
+                pipewire::spa::param::format::FormatProperties::VideoFormat,
+                Choice,
+                Enum,
+                Id,
+                pipewire::spa::param::video::VideoFormat::BGRx,
+                pipewire::spa::param::video::VideoFormat::BGRx,
+                pipewire::spa::param::video::VideoFormat::BGRA,
+                pipewire::spa::param::video::VideoFormat::RGBx,
+                pipewire::spa::param::video::VideoFormat::RGBA,
+                pipewire::spa::param::video::VideoFormat::ARGB,
+                pipewire::spa::param::video::VideoFormat::xRGB,
+                pipewire::spa::param::video::VideoFormat::RGB,
+                pipewire::spa::param::video::VideoFormat::BGR,
+            ),
         );
+
+        let values: Vec<u8> = pipewire::spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &pipewire::spa::pod::Value::Object(obj),
+        )
+        .map_err(|e| anyhow::anyhow!("failed to serialize format pod: {:?}", e))?
+        .0
+        .into_inner();
+
+        let mut params = [pipewire::spa::pod::Pod::from_bytes(&values)
+            .ok_or_else(|| anyhow::anyhow!("failed to build format Pod"))?];
+
+        stream
+            .connect(
+                pipewire::spa::utils::Direction::Input,
+                Some(target_node_id),
+                pipewire::stream::StreamFlags::DONT_RECONNECT
+                    | pipewire::stream::StreamFlags::MAP_BUFFERS
+                    | pipewire::stream::StreamFlags::AUTOCONNECT,
+                &mut params,
+            )
+            .map_err(|e| anyhow::anyhow!("failed to connect PipeWire stream: {:?}", e))?;
+
+        // 30s timeout timer
+        let timer = mainloop.loop_().add_timer({
+            let mainloop_clone = mainloop.clone();
+            let state_clone = state.clone();
+            move |_| {
+                println!("service=displayd op=portal_capture event=timeout");
+                state_clone.borrow_mut().frame_data =
+                    Some(Err(anyhow::anyhow!("timeout waiting for PipeWire frame")));
+                mainloop_clone.quit();
+            }
+        });
+        timer.update_timer(Some(Duration::from_secs(30)), None);
+
+        // Run the mainloop
+        mainloop.run();
+
+        // Retrieve result
+        let res =
+            state.borrow_mut().frame_data.take().unwrap_or_else(|| {
+                Err(anyhow::anyhow!("mainloop exited without capturing a frame"))
+            });
+
+        // Make sure to clean up stream (it drops and disconnects)
+        drop(listener);
+        drop(stream);
+
+        res
     }
+}
+
+#[cfg(feature = "real-portal")]
+fn process_pipewire_frame(
+    data: &pipewire::spa::buffer::Data,
+    width: u32,
+    height: u32,
+    format: pipewire::spa::param::video::VideoFormat,
+) -> Result<(u32, u32, Vec<u32>)> {
+    let chunk = data.chunk();
+    let stride = chunk.stride();
+    let offset = chunk.offset() as usize;
+    let chunk_size = chunk.size() as usize;
+
+    let bytes_per_pixel = match format {
+        pipewire::spa::param::video::VideoFormat::BGRx
+        | pipewire::spa::param::video::VideoFormat::BGRA
+        | pipewire::spa::param::video::VideoFormat::RGBx
+        | pipewire::spa::param::video::VideoFormat::RGBA
+        | pipewire::spa::param::video::VideoFormat::ARGB
+        | pipewire::spa::param::video::VideoFormat::xRGB
+        | pipewire::spa::param::video::VideoFormat::xBGR
+        | pipewire::spa::param::video::VideoFormat::ABGR => 4,
+        pipewire::spa::param::video::VideoFormat::RGB
+        | pipewire::spa::param::video::VideoFormat::BGR => 3,
+        _ => bail!("Unsupported PipeWire video format: {:?}", format),
+    };
+
+    // Stride validation: stride < width * bytes_per_pixel is rejected
+    if stride < (width * bytes_per_pixel) as i32 {
+        bail!("invalid stride: got {}, expected >= {}", stride, width * bytes_per_pixel);
+    }
+
+    // Buffer size validation: chunk size < stride * height is rejected
+    let expected_min_size = (stride as usize) * (height as usize);
+    if chunk_size < expected_min_size {
+        bail!("invalid chunk size: got {}, expected >= {}", chunk_size, expected_min_size);
+    }
+
+    // Retrieve data slice
+    let raw_data = unsafe {
+        let ptr = data.as_raw().data as *const u8;
+        let maxsize = data.as_raw().maxsize as usize;
+        if ptr.is_null() {
+            bail!("PipeWire buffer data pointer is NULL");
+        }
+        if maxsize < offset + chunk_size {
+            bail!(
+                "PipeWire data maxsize too small: got {}, expected >= {}",
+                maxsize,
+                offset + chunk_size
+            );
+        }
+        std::slice::from_raw_parts(ptr.add(offset), chunk_size)
+    };
+
+    let stride = stride as usize;
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+
+    for y in 0..(height as usize) {
+        let row_start = y * stride;
+        let row_slice =
+            &raw_data[row_start..row_start + (width as usize) * (bytes_per_pixel as usize)];
+
+        match format {
+            pipewire::spa::param::video::VideoFormat::RGBx => {
+                for chunk in row_slice.chunks_exact(4) {
+                    let r = chunk[0];
+                    let g = chunk[1];
+                    let b = chunk[2];
+                    let a = 0xFF;
+                    pixels.push(
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+                    );
+                }
+            }
+            pipewire::spa::param::video::VideoFormat::RGBA => {
+                for chunk in row_slice.chunks_exact(4) {
+                    let r = chunk[0];
+                    let g = chunk[1];
+                    let b = chunk[2];
+                    let a = chunk[3];
+                    pixels.push(
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+                    );
+                }
+            }
+            pipewire::spa::param::video::VideoFormat::BGRx => {
+                for chunk in row_slice.chunks_exact(4) {
+                    let b = chunk[0];
+                    let g = chunk[1];
+                    let r = chunk[2];
+                    let a = 0xFF;
+                    pixels.push(
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+                    );
+                }
+            }
+            pipewire::spa::param::video::VideoFormat::BGRA => {
+                for chunk in row_slice.chunks_exact(4) {
+                    let b = chunk[0];
+                    let g = chunk[1];
+                    let r = chunk[2];
+                    let a = chunk[3];
+                    pixels.push(
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+                    );
+                }
+            }
+            pipewire::spa::param::video::VideoFormat::ARGB => {
+                for chunk in row_slice.chunks_exact(4) {
+                    let a = chunk[0];
+                    let r = chunk[1];
+                    let g = chunk[2];
+                    let b = chunk[3];
+                    pixels.push(
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+                    );
+                }
+            }
+            pipewire::spa::param::video::VideoFormat::xRGB => {
+                for chunk in row_slice.chunks_exact(4) {
+                    let r = chunk[1];
+                    let g = chunk[2];
+                    let b = chunk[3];
+                    let a = 0xFF;
+                    pixels.push(
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+                    );
+                }
+            }
+            pipewire::spa::param::video::VideoFormat::xBGR => {
+                for chunk in row_slice.chunks_exact(4) {
+                    let b = chunk[1];
+                    let g = chunk[2];
+                    let r = chunk[3];
+                    let a = 0xFF;
+                    pixels.push(
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+                    );
+                }
+            }
+            pipewire::spa::param::video::VideoFormat::ABGR => {
+                for chunk in row_slice.chunks_exact(4) {
+                    let a = chunk[0];
+                    let b = chunk[1];
+                    let g = chunk[2];
+                    let r = chunk[3];
+                    pixels.push(
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+                    );
+                }
+            }
+            pipewire::spa::param::video::VideoFormat::RGB => {
+                for chunk in row_slice.chunks_exact(3) {
+                    let r = chunk[0];
+                    let g = chunk[1];
+                    let b = chunk[2];
+                    let a = 0xFF;
+                    pixels.push(
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+                    );
+                }
+            }
+            pipewire::spa::param::video::VideoFormat::BGR => {
+                for chunk in row_slice.chunks_exact(3) {
+                    let b = chunk[0];
+                    let g = chunk[1];
+                    let r = chunk[2];
+                    let a = 0xFF;
+                    pixels.push(
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+                    );
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    Ok((width, height, pixels))
 }
 
 #[cfg(not(feature = "real-portal"))]
@@ -1553,5 +1905,135 @@ mod tests {
         let err = backend.capture("fullscreen").await.unwrap_err();
         assert!(err.to_string().contains("PipeWire/portal screen capture"));
         assert!(err.to_string().contains("PortalCaptureBackendStub"));
+    }
+
+    #[cfg(feature = "real-portal")]
+    mod portal_ingestion_tests {
+        use super::*;
+        use pipewire::spa::sys as spa_sys;
+
+        fn make_mock_data(
+            raw_pixels: &[u8],
+            stride: i32,
+            offset: u32,
+            size: u32,
+            maxsize: u32,
+        ) -> (spa_sys::spa_data, spa_sys::spa_chunk) {
+            let chunk = spa_sys::spa_chunk { offset, size, stride, flags: 0 };
+            let raw = spa_sys::spa_data {
+                type_: spa_sys::SPA_DATA_MemPtr,
+                flags: 0,
+                fd: -1,
+                mapoffset: 0,
+                maxsize: maxsize,
+                data: raw_pixels.as_ptr() as *mut _,
+                chunk: std::ptr::null_mut(), // initialized dynamically in tests
+            };
+            (raw, chunk)
+        }
+
+        #[test]
+        fn test_pipewire_frame_metadata_validation_valid() {
+            let pixels = vec![0u8; 16 * 16 * 4];
+            let (mut raw, mut chunk) = make_mock_data(&pixels, 16 * 4, 0, 16 * 16 * 4, 16 * 16 * 4);
+            raw.chunk = &mut chunk;
+            let data: &pipewire::spa::buffer::Data = unsafe {
+                &*(&raw as *const spa_sys::spa_data as *const pipewire::spa::buffer::Data)
+            };
+
+            let res = process_pipewire_frame(
+                data,
+                16,
+                16,
+                pipewire::spa::param::video::VideoFormat::RGBA,
+            );
+            assert!(res.is_ok());
+            let (w, h, p) = res.unwrap();
+            assert_eq!(w, 16);
+            assert_eq!(h, 16);
+            assert_eq!(p.len(), 16 * 16);
+        }
+
+        #[test]
+        fn test_pipewire_frame_metadata_validation_stride_too_small() {
+            let pixels = vec![0u8; 16 * 16 * 4];
+            let (mut raw, mut chunk) = make_mock_data(&pixels, 10, 0, 16 * 16 * 4, 16 * 16 * 4);
+            raw.chunk = &mut chunk;
+            let data: &pipewire::spa::buffer::Data = unsafe {
+                &*(&raw as *const spa_sys::spa_data as *const pipewire::spa::buffer::Data)
+            };
+
+            let res = process_pipewire_frame(
+                data,
+                16,
+                16,
+                pipewire::spa::param::video::VideoFormat::RGBA,
+            );
+            assert!(res.is_err());
+            assert!(res.unwrap_err().to_string().contains("stride"));
+        }
+
+        #[test]
+        fn test_pipewire_frame_metadata_validation_buffer_too_small() {
+            let pixels = vec![0u8; 16 * 16 * 4];
+            let (mut raw, mut chunk) = make_mock_data(&pixels, 16 * 4, 0, 100, 16 * 16 * 4);
+            raw.chunk = &mut chunk;
+            let data: &pipewire::spa::buffer::Data = unsafe {
+                &*(&raw as *const spa_sys::spa_data as *const pipewire::spa::buffer::Data)
+            };
+
+            let res = process_pipewire_frame(
+                data,
+                16,
+                16,
+                pipewire::spa::param::video::VideoFormat::RGBA,
+            );
+            assert!(res.is_err());
+            assert!(res.unwrap_err().to_string().contains("chunk size"));
+        }
+
+        #[test]
+        fn test_pixel_conversion_for_supported_formats() {
+            // Test BGRx format
+            let pixels = vec![0x11, 0x22, 0x33, 0x00];
+            let (mut raw, mut chunk) = make_mock_data(&pixels, 4, 0, 4, 4);
+            raw.chunk = &mut chunk;
+            let data: &pipewire::spa::buffer::Data = unsafe {
+                &*(&raw as *const spa_sys::spa_data as *const pipewire::spa::buffer::Data)
+            };
+
+            let (_, _, p) =
+                process_pipewire_frame(data, 1, 1, pipewire::spa::param::video::VideoFormat::BGRx)
+                    .unwrap();
+            assert_eq!(p[0], 0xFF332211);
+
+            // Test RGBA format
+            let pixels = vec![0x11, 0x22, 0x33, 0xAA];
+            let (mut raw, mut chunk) = make_mock_data(&pixels, 4, 0, 4, 4);
+            raw.chunk = &mut chunk;
+            let data: &pipewire::spa::buffer::Data = unsafe {
+                &*(&raw as *const spa_sys::spa_data as *const pipewire::spa::buffer::Data)
+            };
+
+            let (_, _, p) =
+                process_pipewire_frame(data, 1, 1, pipewire::spa::param::video::VideoFormat::RGBA)
+                    .unwrap();
+            assert_eq!(p[0], 0xAA112233);
+        }
+
+        #[test]
+        fn test_unsupported_format_returns_fail_closed() {
+            let pixels = vec![0u8; 16];
+            let (mut raw, mut chunk) = make_mock_data(&pixels, 4, 0, 16, 16);
+            raw.chunk = &mut chunk;
+            let data: &pipewire::spa::buffer::Data = unsafe {
+                &*(&raw as *const spa_sys::spa_data as *const pipewire::spa::buffer::Data)
+            };
+
+            let res =
+                process_pipewire_frame(data, 2, 2, pipewire::spa::param::video::VideoFormat::I420);
+            assert!(res.is_err());
+            assert!(res.unwrap_err().to_string().contains("Unsupported"));
+        }
     }
 }

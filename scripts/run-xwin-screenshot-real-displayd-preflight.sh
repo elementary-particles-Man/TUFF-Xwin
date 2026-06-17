@@ -305,19 +305,32 @@ if [[ "$ALLOW_PORTAL_REAL_CAPTURE" == "true" ]]; then
     if "$TARGET_DIR/xwin-screenshot" --backend isolated-displayd --displayd-socket "$SOCKET_PATH" --artifact-root "$ARTIFACT_ROOT" --save-dir "$OUT_DIR/portal" --format png > "$LOG_DIR/screenshot-portal.log" 2>&1; then
         log "Case 11 SUCCESS (Portal Real Connect)"
         append_report "Case 11 (Portal Real Connect): SUCCESS"
+
+        RAW_ART=$(find "$ARTIFACT_ROOT" -name "screenshot-*.raw" | head -n 1 || true)
+        PNG_ART=$(find "$OUT_DIR/portal" -name "*.png" | head -n 1 || true)
+
+        if [[ -n "$RAW_ART" ]]; then
+            append_report "  - Raw Artifact: $(basename "$RAW_ART") ($(stat -c%s "$RAW_ART") bytes)"
+        fi
+        if [[ -n "$PNG_ART" ]]; then
+            append_report "  - PNG Artifact: $(basename "$PNG_ART") ($(stat -c%s "$PNG_ART") bytes)"
+        fi
+
+        NODE_ID=$(grep "node_id=" "$LOG_DIR/displayd-portal-real.log" | head -n 1 | sed -e 's/.*node_id=\([0-9]*\).*/\1/' || true)
+        if [[ -n "$NODE_ID" ]]; then
+            append_report "  - PipeWire Node ID: $NODE_ID"
+        fi
     else
         RC=$?
-        if grep -q "User-mediated portal session established" "$LOG_DIR/displayd-portal-real.log" || grep -q "User-mediated portal session established" "$LOG_DIR/screenshot-portal.log"; then
-             log "Case 11 FAIL-CLOSED (Session established, ingestion stubbed - SUCCESS)"
-             append_report "Case 11 (Portal Real Connect): FAIL-CLOSED (Stubbed Ingestion, SUCCESS)"
-        elif grep -q "cancelled" "$LOG_DIR/displayd-portal-real.log" || grep -q "cancelled" "$LOG_DIR/screenshot-portal.log"; then
+        if grep -q -E "cancelled|cancelled or failed" "$LOG_DIR/displayd-portal-real.log" || grep -q -E "cancelled|cancelled or failed" "$LOG_DIR/screenshot-portal.log"; then
              log "Case 11 FAIL-CLOSED (User cancelled - SUCCESS)"
-             append_report "Case 11 (Portal Real Connect): FAIL-CLOSED (User Cancelled, SUCCESS)"
+             append_report "Case 11 (Portal Real Connect): FAIL-CLOSED (User Cancelled, EXPECTED_FAIL_CLOSED)"
         else
-            log "Case 11 FAILED (exit $RC). Check logs."
-            cat "$LOG_DIR/displayd-portal-real.log"
-            append_report "Case 11 (Portal Real Connect): FAILED (exit $RC)"
-            exit "$RC"
+             log "Case 11 FAILED (exit $RC). Check logs."
+             append_report "Case 11 (Portal Real Connect): FAILED (exit $RC)"
+             ERR_MSG=$(tail -n 5 "$LOG_DIR/displayd-portal-real.log" || true)
+             append_report "  - Error Details: $ERR_MSG"
+             exit "$RC"
         fi
     fi
     wait "$DISPLAYD_PID" || true
