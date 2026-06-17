@@ -94,6 +94,15 @@
 - 初期段階の `PortalCaptureBackendStub` は NotImplemented/Unsupported として fail-closed し、ダイアログの自動承認や未許可の D-Bus 接続を防止。
 - Xwayland 環境における X11 `BadMatch` を期待される fail-closed (Case 7 SUCCESS) として整理。
 
+## Phase2-I Fixed: Explicit Portal User-Mediated Capture
+
+- xdg-desktop-portal を用いた Wayland 実画面キャプチャの対話的検証経路を実装。
+- Portal 接続に四重 opt-in（`--capture-backend real`, `--allow-real-capture`, `--capture-method portal`, `--allow-portal-capture`）に加えて対話許可フラグ（`--allow-portal-dialog`）を強制。
+- `PortalCaptureBackend` にて、セッション作成 -> 画面選択ダイアログ表示 -> PipeWire FD 取得までのロジックを実装。
+- PipeWire フレーム自体の取得は、環境依存（libpipewire等）を考慮し、セッション成立と PipeWire リモートオープンを確認した上で明示的に fail-closed 扱いとする（`FAIL-CLOSED (Session established, ingestion stubbed - SUCCESS)`）。
+- キャプチャの成否に関わらず、`fake` への自動 fallback は行われない。
+- 検証スクリプト `run-xwin-screenshot-real-displayd-preflight.sh` に対話的テスト Case 11 を追加し、明示フラグがない場合は SKIP される構造を保証。
+
 ## Current Verified Boundaries
 
 - 実displayd.sock 非接続
@@ -195,4 +204,4 @@
 - 本物displayd process未起動 (Preflight runnerによる一時起動を除く)
 - Real Capture Backend 選択は fail-closed である
 - X11 Real Capture は明示 opt-in 時のみ動作し、Xwayland では BadMatch fail-closed する
-- Portal Real Capture は明示 opt-in 時のみ動作し、現在は fail-closed する
+- Portal Real Capture は明示 opt-in 時のみ動作し、ユーザー許可ダイアログを経て PipeWire リモート確立を確認し、現在は fail-closed (Ingestion stubbed) する

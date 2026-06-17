@@ -23,7 +23,7 @@
 - `real` を選択する場合、追加の保護フラグ `--allow-real-capture` が必須である（二重の明示的 opt-in）。
 - `--capture-method <stub|x11|portal>` により、具体的な取得手法を指定する。既定は `stub`。
 - `x11` 手法を用いる場合は `--x11-display <DISPLAY>` が必須であり、環境変数 `DISPLAY` は自動参照されない。
-- `portal` 手法を用いる場合は追加の保護フラグ `--allow-portal-capture` が必須である（四重の明示的 opt-in）。
+- `portal` 手法を用いる場合は、追加の保護フラグ `--allow-portal-capture` と対話許可フラグ `--allow-portal-dialog` が必須である（対話的実行のための明示的 opt-in 拡張）。
 - 実装が未定義または環境が不適合な場合、`fake` に黙って fallback することはなく、明示的にエラーを返して fail-closed する。
 - 注: Xwayland 環境では `x11` 手法は `BadMatch` により fail-closed することが期待される挙動である。
 
@@ -31,7 +31,7 @@
 
 1. **Workspace Preparation**:
    - `git status` が clean であることを確認。
-   - `cargo build --workspace --features real-x11` で X11 サポートを有効にしてビルド。
+   - `cargo build --workspace --features real-x11,real-portal` で X11 および Portal サポートを有効にしてビルド。
 
 2. **Real Displayd Startup**:
    - `target/debug/displayd` を起動。
@@ -39,7 +39,7 @@
    - ログは `target/xsm/preflight/displayd.log` へリダイレクトする。
    - `fake` テスト時は `--capture-backend fake` を明示（既定）。
    - `x11` テスト時は `--capture-backend real --allow-real-capture --capture-method x11 --x11-display :0` 等を明示。
-   - `portal` テスト時は `--capture-backend real --allow-real-capture --capture-method portal --allow-portal-capture` を明示。
+   - `portal` テスト時は `--capture-backend real --allow-real-capture --capture-method portal --allow-portal-capture --allow-portal-dialog` を明示。
 
 3. **Screenshot App Connection**:
    - `target/debug/xwin-screenshot --backend isolated-displayd --displayd-socket <PATH> --artifact-root <PATH> ...` を実行。
@@ -67,3 +67,15 @@
 - グローバルホットキー、システムトレイの有効化。
 - 実ブラウザプロセスとの連携。
 - 自動起動の設定。
+
+## Phase 2-I: Explicit Portal User-Mediated Capture Verification
+
+- **Case 11: Real Portal Capture (User-Mediated)** を preflight スクリプトに追加。
+- デフォルト実行時は SKIP され、`--allow-portal-real-capture` オプションが指定された時のみ対話的テストが動作する。
+- ユーザーによるダイアログでのキャプチャ許可後、`PortalCaptureBackend` が以下を達成：
+  - `Screencast` ポータルプロキシ作成成功
+  - セッションの作成完了
+  - 画面/ウィンドウ選択ソースの要求
+  - `Screencast::start` 成功（セッション開始）
+  - `open_pipe_wire_remote` による PipeWire FD のオープン成功
+  - PipeWire フレーム取得は行わず、明示的エラーを返して fail-closed することを確認（`FAIL-CLOSED (Session established, ingestion stubbed - SUCCESS)`）。

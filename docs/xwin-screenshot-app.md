@@ -139,6 +139,15 @@ PNG は圧縮レベルを持つ。JPEG は quality を持つ。
 ## Phase 2-H
 
 - Wayland 環境での実画面取得に向け、PipeWire / xdg-desktop-portal 経由のキャプチャ手法を選択可能にする足場（Scaffold）を導入した。
-- Portal キャプチャは、`--capture-backend real`, `--allow-real-capture`, `--capture-method portal`, `--allow-portal-capture` の 4 つが揃った場合のみ有効になる（四重の opt-in）。
+- Portal キャプチャは、`--capture-backend real`, `--allow-real-capture`, `--capture-method portal`, `--allow-portal-capture` の 4 つが揃った場合のみ有効になる（四重 of opt-in）。
 - 現時点の `PortalCaptureBackendStub` は NotImplemented / Unsupported として fail-closed し、ダイアログの自動承認や未許可の接続を防止している。
 - Xwayland 環境での X11 `BadMatch` を「正しく拒否された状態（fail-closed）」として定義し、予期せぬ fallback がないことを保証している。
+
+## Phase 2-I
+
+- `xdg-desktop-portal` を用いた Wayland 実画面キャプチャの対話的検証経路を実装した。
+- ポータル接続の保護のため、従来の四重 opt-in に加えて、GUIダイアログ表示を許可する明示的フラグ `--allow-portal-dialog` の指定を必須とした。
+- `PortalCaptureBackend` により、セッション確立からポータル経由での `open_pipe_wire_remote` (PipeWire FD取得) までの接続シーケンスを実装。
+- PipeWire 自体のフレーム取得ライブラリ（libpipewire等）がない環境でも安全に動作させるため、セッション成立後に明示的に fail-closed (Ingestion stubbed) とする動作を固定。
+- キャプチャの成否によらず `fake` への自動 fallback は行わず、安全に処理を打ち切る。
+- 対話的 preflight テスト（Case 11）により、ユーザーの対話操作に基づく検証シーケンスを実証可能にした。
