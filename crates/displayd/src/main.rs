@@ -2036,4 +2036,115 @@ mod tests {
             assert!(res.unwrap_err().to_string().contains("Unsupported"));
         }
     }
+
+    #[cfg(test)]
+    mod launcher_and_binding_tests {
+        use std::path::PathBuf;
+        use std::process::Command;
+
+        fn get_scripts_dir() -> PathBuf {
+            let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            path.pop(); // pop displayd
+            path.pop(); // pop crates
+            path.push("scripts");
+            path
+        }
+
+        #[test]
+        fn test_launcher_refuses_to_run_without_explicit_real_portal_flags() {
+            let scripts_dir = get_scripts_dir();
+            let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
+            let output =
+                Command::new("bash").arg(&launcher).output().expect("failed to execute launcher");
+            assert_ne!(output.status.code(), Some(0));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("refuses to run without the explicit '--portal-real-capture' flag")
+            );
+        }
+
+        #[test]
+        fn test_launcher_records_run_root_and_report_path() {
+            let scripts_dir = get_scripts_dir();
+            let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
+            let output = Command::new("bash")
+                .arg(&launcher)
+                .arg("--portal-real-capture")
+                .output()
+                .expect("failed to execute launcher");
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+
+            assert!(stdout.contains("run_root="));
+
+            let run_root_line = stdout.lines().find(|l| l.contains("run_root=")).unwrap_or("");
+            let run_root_part = run_root_line
+                .split(" ")
+                .find(|p| p.starts_with("run_root="))
+                .unwrap_or("run_root=");
+            let run_root_path = run_root_part.trim_start_matches("run_root=");
+
+            if !run_root_path.is_empty() {
+                let run_root = PathBuf::from(run_root_path);
+                assert!(run_root.exists());
+                let report = run_root.join("report.md");
+                assert!(report.exists());
+                let _ = std::fs::remove_dir_all(run_root);
+            }
+        }
+
+        #[test]
+        fn test_launcher_fails_closed_if_displayd_exits_before_capture() {
+            let scripts_dir = get_scripts_dir();
+            let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
+            let output = Command::new("bash")
+                .arg(&launcher)
+                .arg("--portal-real-capture")
+                .arg("--save-dir")
+                .arg("/nonexistent/directory/path/that/fails")
+                .output()
+                .expect("failed to execute launcher");
+            assert_eq!(output.status.code(), Some(1));
+        }
+
+        #[test]
+        fn test_unknown_de_path_refuses_mutation() {
+            let scripts_dir = get_scripts_dir();
+            let installer = scripts_dir.join("install-user-prtsc-tuff-capture-binding.sh");
+            let output = Command::new("bash")
+                .env("XDG_CURRENT_DESKTOP", "UNKNOWN")
+                .arg(&installer)
+                .output()
+                .expect("failed to execute installer");
+            assert_eq!(output.status.code(), Some(2));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("not supported"));
+        }
+
+        #[test]
+        fn test_hotkey_detection_handles_flameshot_binding_without_modifying_it_in_dry_detection_mode()
+         {
+            let scripts_dir = get_scripts_dir();
+            let installer = scripts_dir.join("install-user-prtsc-tuff-capture-binding.sh");
+            let output = Command::new("bash")
+                .env("XDG_CURRENT_DESKTOP", "GNOME")
+                .arg(&installer)
+                .output()
+                .expect("failed to execute installer");
+            assert_eq!(output.status.code(), Some(2));
+        }
+
+        #[test]
+        fn test_rollback_script_is_generated_before_binding_mutation() {
+            let scripts_dir = get_scripts_dir();
+            let installer = scripts_dir.join("install-user-prtsc-tuff-capture-binding.sh");
+            let content = std::fs::read_to_string(&installer).expect("failed to read installer");
+
+            let rollback_gen_idx = content.find("Generate rollback script").unwrap_or(usize::MAX);
+            let mutation_idx =
+                content.find("Modify settings in kglobalshortcutsrc").unwrap_or(usize::MAX);
+
+            assert!(rollback_gen_idx < mutation_idx);
+        }
+    }
 }
