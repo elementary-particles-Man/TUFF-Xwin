@@ -534,7 +534,7 @@ impl PortalCaptureBackend {
 #[cfg(feature = "real-portal")]
 #[async_trait::async_trait]
 impl CaptureBackend for PortalCaptureBackend {
-    async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
+    async fn capture(&self, output: &str) -> Result<(u32, u32, Vec<u32>)> {
         use ashpd::WindowIdentifier;
         use ashpd::desktop::PersistMode;
         use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
@@ -569,12 +569,18 @@ impl CaptureBackend for PortalCaptureBackend {
 
             let persist_mode = PersistMode::DoNot;
 
+            let source_types = if output == "fullscreen" {
+                SourceType::Monitor.into()
+            } else {
+                SourceType::Monitor | SourceType::Window
+            };
+
             let res: Result<_, anyhow::Error> = async {
                 proxy
                     .select_sources(
                         &session,
                         CursorMode::Metadata,
-                        SourceType::Monitor | SourceType::Window,
+                        source_types,
                         false,
                         restore_token_to_use.as_deref(),
                         persist_mode,
