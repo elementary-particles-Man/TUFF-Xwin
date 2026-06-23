@@ -559,8 +559,10 @@ impl CaptureBackend for PortalCaptureBackend {
         let mut restore_token_to_use = restore_token.clone();
 
         let (session, response) = loop {
-            let session =
-                proxy.create_session().await.context("failed to create portal screencast session")?;
+            let session = proxy
+                .create_session()
+                .await
+                .context("failed to create portal screencast session")?;
 
             println!(
                 "service=displayd op=portal_capture event=select_sources_begin has_restore_token={}",
@@ -569,11 +571,7 @@ impl CaptureBackend for PortalCaptureBackend {
 
             let persist_mode = PersistMode::DoNot;
 
-            let source_types = if output == "fullscreen" {
-                SourceType::Monitor.into()
-            } else {
-                SourceType::Monitor | SourceType::Window
-            };
+            let source_types = SourceType::Monitor | SourceType::Window;
 
             let res: Result<_, anyhow::Error> = async {
                 proxy
@@ -588,10 +586,8 @@ impl CaptureBackend for PortalCaptureBackend {
                     .await?;
 
                 println!("service=displayd op=portal_capture event=start_begin");
-                let response = proxy
-                    .start(&session, &WindowIdentifier::default())
-                    .await?
-                    .response()?;
+                let response =
+                    proxy.start(&session, &WindowIdentifier::default()).await?.response()?;
 
                 Ok(response)
             }

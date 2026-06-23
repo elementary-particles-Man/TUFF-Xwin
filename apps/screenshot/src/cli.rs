@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use crate::{
     artifact::{DisplaydArtifactCaptureClient, FileCaptureArtifactReader},
     capture::{CaptureClient, FakeCaptureClient},
-    config::{CaptureTarget, JpegOptions, PngOptions, ScreenshotConfig, ScreenshotFormat, FilenameTemplate},
+    config::{
+        CaptureTarget, FilenameTemplate, JpegOptions, PngOptions, ScreenshotConfig,
+        ScreenshotFormat,
+    },
     config_file::ScreenshotConfigFile,
     displayd_ipc::{
         DisplaydIpcCaptureClient, DisplaydUnixSocketTransport, screenshot_user_policy_context,
