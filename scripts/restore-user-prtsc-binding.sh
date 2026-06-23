@@ -18,12 +18,12 @@ qdbus6 org.kde.KWin /KWin org.kde.KWin.reconfigure || true
 dbus-send --session --type=signal /KGlobalSettings org.kde.KGlobalSettings.notifyChange int32:3 int32:5 || true
 
 # Restore shortcut to original in kglobalshortcutsrc
-kwriteconfig6 --file kglobalshortcutsrc --group "org.flameshot.Flameshot.desktop" --key "Capture" "none"
-kwriteconfig6 --file kglobalshortcutsrc --group "services" --group "org.flameshot.Flameshot.desktop" --key "Capture" "none"
+kwriteconfig6 --file kglobalshortcutsrc --group "org.flameshot.Flameshot.desktop" --key "Capture" "Print"
+kwriteconfig6 --file kglobalshortcutsrc --group "services" --group "org.flameshot.Flameshot.desktop" --key "Capture" "Print"
 
 # Revert systemd user PATH
-if [[ -n "/home/flux/.local/bin:/home/flux/.local/bin:/home/flux/.bun/bin:/home/flux/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games" ]]; then
-    systemctl --user set-environment PATH="/home/flux/.local/bin:/home/flux/.local/bin:/home/flux/.bun/bin:/home/flux/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games" || true
+if [[ -n "/home/flux/.local/bin:/home/flux/.local/bin:/home/flux/.local/bin:/home/flux/.bun/bin:/home/flux/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games" ]]; then
+    systemctl --user set-environment PATH="/home/flux/.local/bin:/home/flux/.local/bin:/home/flux/.local/bin:/home/flux/.bun/bin:/home/flux/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games" || true
 fi
 
 # Restart Flameshot daemon if it was running previously

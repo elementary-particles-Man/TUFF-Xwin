@@ -60,10 +60,10 @@ rm -f "$socket_env"
 mkdir -p "$bin_dir" "$user_bin_dir" "$config_dir" "$unit_dir"
 
 cd "$repo_root"
-cargo build --workspace --release
+cargo build --workspace --release --features real-x11,real-portal
 
 release_dir="${CARGO_TARGET_DIR:-/home/flux/.cache/tuff-xwin-target}/release"
-for bin in compd displayd lockd sessiond watchdog waylandd x11bridge; do
+for bin in compd displayd lockd sessiond watchdog waylandd x11bridge xwin-screenshot; do
   install -m 0755 "$release_dir/$bin" "$bin_dir/$bin"
 done
 

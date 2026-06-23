@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::{
     artifact::{DisplaydArtifactCaptureClient, FileCaptureArtifactReader},
     capture::{CaptureClient, FakeCaptureClient},
-    config::{CaptureTarget, JpegOptions, PngOptions, ScreenshotConfig, ScreenshotFormat},
+    config::{CaptureTarget, JpegOptions, PngOptions, ScreenshotConfig, ScreenshotFormat, FilenameTemplate},
     config_file::ScreenshotConfigFile,
     displayd_ipc::{
         DisplaydIpcCaptureClient, DisplaydUnixSocketTransport, screenshot_user_policy_context,
@@ -48,6 +48,7 @@ pub struct CliOptions {
     pub save_dir: PathBuf,
     pub png_compression: u8,
     pub jpeg_quality: u8,
+    pub filename_template: Option<String>,
     pub help: bool,
 }
 
@@ -63,6 +64,7 @@ impl Default for CliOptions {
             save_dir: PathBuf::from("screenshots"),
             png_compression: PngOptions::default().compression_level,
             jpeg_quality: JpegOptions::default().quality,
+            filename_template: None,
             help: false,
         }
     }
@@ -79,6 +81,7 @@ struct CliOverrides {
     save_dir: Option<PathBuf>,
     png_compression: Option<u8>,
     jpeg_quality: Option<u8>,
+    filename_template: Option<String>,
     help: bool,
 }
 
@@ -132,7 +135,7 @@ impl CliOptions {
     }
 
     pub fn usage() -> &'static str {
-        "Usage: xwin-screenshot [--config PATH] [--backend fake|isolated-displayd] [--displayd-socket PATH] [--artifact-root PATH] [--target fullscreen|active-window] [--format png|jpeg] [--save-dir PATH] [--png-compression 0..9] [--jpeg-quality 1..100] [--help]"
+        "Usage: xwin-screenshot [--config PATH] [--backend fake|isolated-displayd] [--displayd-socket PATH] [--artifact-root PATH] [--target fullscreen|active-window] [--format png|jpeg] [--save-dir PATH] [--png-compression 0..9] [--jpeg-quality 1..100] [--filename-template TEMPLATE] [--help]"
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -174,7 +177,11 @@ impl CliOptions {
             format: self.format,
             png: PngOptions { compression_level: self.png_compression },
             jpeg: JpegOptions { quality: self.jpeg_quality },
-            filename_template: ScreenshotConfig::default().filename_template,
+            filename_template: self
+                .filename_template
+                .as_ref()
+                .map(|t| FilenameTemplate(t.clone()))
+                .unwrap_or_else(|| ScreenshotConfig::default().filename_template),
         };
         config.validate()?;
         Ok(config)
@@ -277,6 +284,10 @@ impl CliOverrides {
                     options.jpeg_quality =
                         Some(parse_u8_in_range(&value, 1..=100, "--jpeg-quality")?);
                 }
+                "--filename-template" => {
+                    let value = next_value(&mut iter, "--filename-template")?;
+                    options.filename_template = Some(value);
+                }
                 other if other.starts_with('-') => {
                     bail!("unknown option: {other}");
                 }
@@ -316,6 +327,9 @@ impl CliOverrides {
         }
         if let Some(jpeg_quality) = self.jpeg_quality {
             options.jpeg_quality = jpeg_quality;
+        }
+        if let Some(filename_template) = &self.filename_template {
+            options.filename_template = Some(filename_template.clone());
         }
     }
 }

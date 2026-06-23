@@ -37,11 +37,18 @@ if [[ -f "$REPO_ROOT/.cargo/config.toml" ]]; then
 fi
 
 TARGET_DIR_BASE="${CARGO_TARGET_DIR:-${CARGO_TARGET_DIR_CONF:-$REPO_ROOT/target}}"
-TARGET_DIR="$TARGET_DIR_BASE/debug"
+PREFIX_BIN_DIR="$HOME/.local/share/tuff-xwin/bin"
 
-if [[ ! -f "$TARGET_DIR/displayd" || ! -f "$TARGET_DIR/xwin-screenshot" ]]; then
-    echo "Warning: binaries not found in debug target. Rebuilding workspace..." >&2
-    cargo build --workspace --features real-x11,real-portal
+if [[ -f "$PREFIX_BIN_DIR/displayd" && -f "$PREFIX_BIN_DIR/xwin-screenshot" ]]; then
+    TARGET_DIR="$PREFIX_BIN_DIR"
+elif [[ -f "$TARGET_DIR_BASE/release/displayd" && -f "$TARGET_DIR_BASE/release/xwin-screenshot" ]]; then
+    TARGET_DIR="$TARGET_DIR_BASE/release"
+else
+    TARGET_DIR="$TARGET_DIR_BASE/debug"
+    if [[ ! -f "$TARGET_DIR/displayd" || ! -f "$TARGET_DIR/xwin-screenshot" ]]; then
+        echo "Warning: binaries not found in target. Rebuilding workspace..." >&2
+        cargo build --workspace --features real-x11,real-portal
+    fi
 fi
 
 # Determine default save directory

@@ -551,32 +551,95 @@ impl CaptureBackend for PortalCaptureBackend {
 
         println!("service=displayd op=portal_capture event=initiation");
 
+        let token_path = std::env::var("HOME").ok().map(|h| {
+            std::path::PathBuf::from(h).join(".config/tuff-xwin/screencast_restore_token.txt")
+        });
+
+        let mut restore_token = None;
+        if let Some(ref path) = token_path {
+            if path.exists() {
+                if let Ok(tok) = std::fs::read_to_string(path) {
+                    let tok = tok.trim().to_owned();
+                    if !tok.is_empty() {
+                        restore_token = Some(tok);
+                    }
+                }
+            }
+        }
+
         let proxy = Screencast::new().await.context("failed to create Screencast portal proxy")?;
-        let session =
-            proxy.create_session().await.context("failed to create portal screencast session")?;
 
-        println!("service=displayd op=portal_capture event=select_sources_begin");
-        proxy
-            .select_sources(
-                &session,
-                CursorMode::Metadata,
-                SourceType::Monitor | SourceType::Window,
-                false,
-                None,
-                PersistMode::DoNot,
-            )
-            .await
-            .context("failed to select sources in portal")?;
+        let mut retry_count = 0;
+        let mut restore_token_to_use = restore_token.clone();
 
-        println!("service=displayd op=portal_capture event=start_begin");
-        let response = proxy
-            .start(&session, &WindowIdentifier::default())
-            .await
-            .context("failed to start portal screencast")?
-            .response()
-            .context("portal start request was cancelled or failed")?;
+        let (session, response) = loop {
+            let session =
+                proxy.create_session().await.context("failed to create portal screencast session")?;
+
+            println!(
+                "service=displayd op=portal_capture event=select_sources_begin has_restore_token={}",
+                restore_token_to_use.is_some()
+            );
+
+            let persist_mode = PersistMode::ExplicitlyRevoked;
+
+            let res: Result<_, anyhow::Error> = async {
+                proxy
+                    .select_sources(
+                        &session,
+                        CursorMode::Metadata,
+                        SourceType::Monitor | SourceType::Window,
+                        false,
+                        restore_token_to_use.as_deref(),
+                        persist_mode,
+                    )
+                    .await?;
+
+                println!("service=displayd op=portal_capture event=start_begin");
+                let response = proxy
+                    .start(&session, &WindowIdentifier::default())
+                    .await?
+                    .response()?;
+
+                Ok(response)
+            }
+            .await;
+
+            match res {
+                Ok(response) => {
+                    break (session, response);
+                }
+                Err(e) => {
+                    if restore_token_to_use.is_some() && retry_count == 0 {
+                        println!(
+                            "service=displayd op=portal_capture event=restore_failed error={:#} retrying_without_token",
+                            e
+                        );
+                        if let Some(ref path) = token_path {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        restore_token_to_use = None;
+                        retry_count += 1;
+                        continue;
+                    } else {
+                        return Err(e).context("failed to establish portal session");
+                    }
+                }
+            }
+        };
 
         println!("service=displayd op=portal_capture event=session_started");
+
+        // Save new restore token for the next run
+        if let Some(new_token) = response.restore_token() {
+            println!("service=displayd op=portal_capture event=new_restore_token_received");
+            if let Some(ref path) = token_path {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(path, new_token);
+            }
+        }
 
         let streams = response.streams();
         if streams.is_empty() {
@@ -1316,9 +1379,9 @@ fn validate_capture_pixel_count(width: u32, height: u32, pixel_len: usize) -> Re
 }
 
 fn u32_to_rgba8888(pixel: u32) -> [u8; 4] {
-    let r = ((pixel >> 16) & 0xFF) as u8;
+    let r = (pixel & 0xFF) as u8;
     let g = ((pixel >> 8) & 0xFF) as u8;
-    let b = (pixel & 0xFF) as u8;
+    let b = ((pixel >> 16) & 0xFF) as u8;
     let a = ((pixel >> 24) & 0xFF) as u8;
     [r, g, b, a]
 }
@@ -1569,9 +1632,9 @@ mod tests {
     #[test]
     fn u32_to_rgba8888_is_endianness_independent() {
         let expected = [0x11, 0x22, 0x33, 0xAA];
-        assert_eq!(u32_to_rgba8888(0xAA112233), expected);
-        assert_eq!(u32_to_rgba8888(u32::from_be_bytes([0xAA, 0x11, 0x22, 0x33])), expected);
-        assert_eq!(u32_to_rgba8888(u32::from_le_bytes([0x33, 0x22, 0x11, 0xAA])), expected);
+        assert_eq!(u32_to_rgba8888(0xAA332211), expected);
+        assert_eq!(u32_to_rgba8888(u32::from_be_bytes([0xAA, 0x33, 0x22, 0x11])), expected);
+        assert_eq!(u32_to_rgba8888(u32::from_le_bytes([0x11, 0x22, 0x33, 0xAA])), expected);
     }
 
     #[test]
@@ -1579,7 +1642,7 @@ mod tests {
         let bytes = encode_rgba8888_artifact_bytes(
             1,
             1,
-            &[((0xAAu32) << 24) | ((0x11u32) << 16) | ((0x22u32) << 8) | 0x33],
+            &[((0xAAu32) << 24) | ((0x33u32) << 16) | ((0x22u32) << 8) | 0x11],
         )
         .unwrap();
         assert_eq!(bytes, vec![0x11, 0x22, 0x33, 0xAA]);

@@ -96,7 +96,7 @@ pub struct FilenameTemplate(pub String);
 
 impl Default for FilenameTemplate {
     fn default() -> Self {
-        Self("xwin-{target}-{sequence}".to_owned())
+        Self("xwin-{target}-{timestamp}".to_owned())
     }
 }
 
@@ -112,11 +112,16 @@ impl FilenameTemplate {
         sequence: u64,
     ) -> Result<String> {
         self.validate()?;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
         let rendered = self
             .0
             .replace("{target}", target.as_str())
             .replace("{format}", format.as_str())
-            .replace("{sequence}", &sequence.to_string());
+            .replace("{sequence}", &sequence.to_string())
+            .replace("{timestamp}", &timestamp.to_string());
         validate_filename_component(&rendered)?;
         Ok(rendered)
     }
