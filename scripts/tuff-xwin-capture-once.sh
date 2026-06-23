@@ -121,22 +121,64 @@ if "$TARGET_DIR/xwin-screenshot" \
     --backend isolated-displayd \
     --displayd-socket "$SOCKET_PATH" \
     --artifact-root "$ARTIFACT_ROOT" \
-    --save-dir "$SAVE_DIR" \
+    --save-dir "$ARTIFACT_ROOT" \
     --format png > "$LOG_DIR/screenshot.log" 2>&1; then
     
-    # Locate PNG in SAVE_DIR
-    PNG_ART=$(find "$SAVE_DIR" -name "*.png" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d" " || true)
+    # Locate PNG in ARTIFACT_ROOT
+    PNG_ART=$(find "$ARTIFACT_ROOT" -name "*.png" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d" " || true)
     if [[ -n "$PNG_ART" && -f "$PNG_ART" ]]; then
-        echo "tuff-xwin-capture event=success png_path=$PNG_ART size=$(stat -c%s "$PNG_ART")"
+        # Ask user for action
+        ACTION=""
+        if command -v kdialog >/dev/null 2>&1; then
+            if kdialog --yesno "スクリーンショットを撮影しました。\nクリップボードにコピーしますか？\n(いいえ を選択するとフォルダへ保存します)" --title "TUFF-Xwin Capture" --yes-label "コピー" --no-label "保存"; then
+                ACTION="copy"
+            else
+                ACTION="save"
+            fi
+        elif command -v zenity >/dev/null 2>&1; then
+            if zenity --question --text="スクリーンショットを撮影しました。クリップボードにコピーしますか？" --title="TUFF-Xwin Capture" --ok-label="コピー" --cancel-label="保存" 2>/dev/null; then
+                ACTION="copy"
+            else
+                ACTION="save"
+            fi
+        else
+            # Fallback if no GUI dialog tool found
+            ACTION="save"
+        fi
+
+        FINAL_PNG=""
+        if [[ "$ACTION" == "copy" ]]; then
+            if command -v wl-copy >/dev/null 2>&1; then
+                wl-copy < "$PNG_ART"
+                echo "tuff-xwin-capture event=success_copy png_path=$PNG_ART"
+                FINAL_PNG="$PNG_ART"
+            elif command -v xclip >/dev/null 2>&1; then
+                xclip -selection clipboard -t image/png -i "$PNG_ART"
+                echo "tuff-xwin-capture event=success_copy_xclip png_path=$PNG_ART"
+                FINAL_PNG="$PNG_ART"
+            else
+                # Fallback to save if no clipboard tools
+                mv "$PNG_ART" "$SAVE_DIR/"
+                FINAL_PNG="$SAVE_DIR/$(basename "$PNG_ART")"
+                echo "tuff-xwin-capture event=success_save_fallback png_path=$FINAL_PNG"
+            fi
+        else
+            # Save to target directory
+            mv "$PNG_ART" "$SAVE_DIR/"
+            FINAL_PNG="$SAVE_DIR/$(basename "$PNG_ART")"
+            echo "tuff-xwin-capture event=success_save png_path=$FINAL_PNG"
+        fi
+
         cat <<EOF > "$RUN_ROOT/report.md"
 # TUFF-Xwin Capture Success Report
 - status: SUCCESS
 - run_root: $RUN_ROOT
-- png_path: $PNG_ART
-- png_size: $(stat -c%s "$PNG_ART") bytes
+- action: $ACTION
+- png_path: $FINAL_PNG
+- png_size: $(stat -c%s "$FINAL_PNG") bytes
 EOF
     else
-        echo "Error: xwin-screenshot succeeded but no PNG file found in $SAVE_DIR" >&2
+        echo "Error: xwin-screenshot succeeded but no PNG file found in $ARTIFACT_ROOT" >&2
         exit 1
     fi
 else

@@ -551,21 +551,7 @@ impl CaptureBackend for PortalCaptureBackend {
 
         println!("service=displayd op=portal_capture event=initiation");
 
-        let token_path = std::env::var("HOME").ok().map(|h| {
-            std::path::PathBuf::from(h).join(".config/tuff-xwin/screencast_restore_token.txt")
-        });
-
-        let mut restore_token = None;
-        if let Some(ref path) = token_path {
-            if path.exists() {
-                if let Ok(tok) = std::fs::read_to_string(path) {
-                    let tok = tok.trim().to_owned();
-                    if !tok.is_empty() {
-                        restore_token = Some(tok);
-                    }
-                }
-            }
-        }
+        let mut restore_token: Option<String> = None;
 
         let proxy = Screencast::new().await.context("failed to create Screencast portal proxy")?;
 
@@ -581,7 +567,7 @@ impl CaptureBackend for PortalCaptureBackend {
                 restore_token_to_use.is_some()
             );
 
-            let persist_mode = PersistMode::ExplicitlyRevoked;
+            let persist_mode = PersistMode::DoNot;
 
             let res: Result<_, anyhow::Error> = async {
                 proxy
@@ -615,9 +601,6 @@ impl CaptureBackend for PortalCaptureBackend {
                             "service=displayd op=portal_capture event=restore_failed error={:#} retrying_without_token",
                             e
                         );
-                        if let Some(ref path) = token_path {
-                            let _ = std::fs::remove_file(path);
-                        }
                         restore_token_to_use = None;
                         retry_count += 1;
                         continue;
@@ -630,16 +613,7 @@ impl CaptureBackend for PortalCaptureBackend {
 
         println!("service=displayd op=portal_capture event=session_started");
 
-        // Save new restore token for the next run
-        if let Some(new_token) = response.restore_token() {
-            println!("service=displayd op=portal_capture event=new_restore_token_received");
-            if let Some(ref path) = token_path {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::write(path, new_token);
-            }
-        }
+        // Save new restore token for the next run (disabled)
 
         let streams = response.streams();
         if streams.is_empty() {
