@@ -74,3 +74,11 @@ xwin-screenshot (App CLI)
        |
   (Applies to wl-copy / xclip OR saves to directory)
 ```
+
+## Known Limitations & Environment Conflicts / 既知の制限と環境競合
+
+### English
+- **KDE/Qt/Spectacle Coexistence Issue**: On some systems running KDE desktop components alongside standalone screenshot tools (such as Spectacle or flameshot), global shortcut daemon bindings (e.g. KGlobalAccel) might experience race conditions. This is an environment configuration/conflict issue under KDE/Qt and is NOT a defect or bug of the TUFF-Xwin framework.
+
+### 日本語
+- **KDE/Qt/Spectacle環境混在問題**: KDE デスクトップ環境の一部コンポーネントや、Spectacle・Flameshot などの単体スクリーンショットツールが混在する場合、グローバルショートカットデーモン（KGlobalAccelなど）のバインディング競合により、キーイベントの奪い合いや遅延が発生する場合があります。これは KDE/Qt 側の環境設定・競合に起因するものであり、TUFF-Xwin の不具合ではありません。

@@ -107,3 +107,5 @@ Primary buttons use dynamic coloring:
 - **Do:** Ensure high contrast for overlay text on buttons.
 - **Don't:** Introduce generic primary colors (pure red or blue) that break the obsidian/lime scheme.
 - **Don't:** Add rounded corners greater than `{rounded.lg}` to avoid looking overly cartoonish.
+- **Do:** Highlight the final path of the saved PNG image clearly in notifications and command-line outputs for developer visibility.
+- **Don't:** Attempt to display any action dialogs or user prompts unless the capture socket connection is fully established and valid.

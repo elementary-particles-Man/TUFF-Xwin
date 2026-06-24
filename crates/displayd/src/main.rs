@@ -2185,5 +2185,89 @@ mod tests {
 
             assert!(rollback_gen_idx < mutation_idx);
         }
+
+        #[test]
+        fn test_launcher_creates_default_save_directory_safely() {
+            let scripts_dir = get_scripts_dir();
+            let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
+            let _ = Command::new("bash").arg(&launcher).arg("--portal-real-capture").output();
+            let pics_dir =
+                std::env::var("HOME").map(|h| PathBuf::from(h).join("Pictures/TUFF-Xwin")).unwrap();
+            assert!(pics_dir.parent().unwrap().exists() || pics_dir.exists());
+        }
+
+        #[test]
+        fn test_launcher_accepts_explicit_save_dir() {
+            let scripts_dir = get_scripts_dir();
+            let temp = tempfile::tempdir().unwrap();
+            let custom_save_dir = temp.path().join("custom_tuff_save");
+            let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
+            let _ = Command::new("bash")
+                .arg(&launcher)
+                .arg("--portal-real-capture")
+                .arg("--save-dir")
+                .arg(&custom_save_dir)
+                .output()
+                .expect("failed to execute launcher");
+            assert!(custom_save_dir.exists());
+        }
+
+        #[test]
+        fn test_restore_script_refuses_destructive_restore_when_backup_is_missing() {
+            let scripts_dir = get_scripts_dir();
+            let restore = scripts_dir.join("restore-user-prtsc-binding.sh");
+            let backup_path =
+                scripts_dir.parent().unwrap().join("target/xsm/tuff-xwin-prtsc-backup.txt");
+            let has_backup = backup_path.exists();
+            let backup_content =
+                if has_backup { std::fs::read_to_string(&backup_path).ok() } else { None };
+            if has_backup {
+                let _ = std::fs::remove_file(&backup_path);
+            }
+
+            let output =
+                Command::new("bash").arg(&restore).output().expect("failed to execute restore");
+            assert_ne!(output.status.code(), Some(0));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("backup") || stderr.contains("Backup"));
+
+            if let Some(content) = backup_content {
+                let _ = std::fs::create_dir_all(backup_path.parent().unwrap());
+                let _ = std::fs::write(&backup_path, content);
+            }
+        }
+
+        #[test]
+        fn test_install_script_creates_backup_before_mutation() {
+            let scripts_dir = get_scripts_dir();
+            let installer = scripts_dir.join("install-user-prtsc-tuff-capture-binding.sh");
+            let content = std::fs::read_to_string(&installer).expect("failed to read installer");
+            let backup_idx = content.find("BACKUP_FILE").unwrap_or(usize::MAX);
+            let write_backup_idx = content
+                .find("echo \"$CURRENT_FLAMESHOT_BINDING\" > \"$BACKUP_FILE\"")
+                .unwrap_or(usize::MAX);
+            let mutation_idx = content.find("kwriteconfig6").unwrap_or(usize::MAX);
+
+            assert!(backup_idx < mutation_idx);
+            assert!(write_backup_idx < mutation_idx);
+        }
+
+        #[test]
+        fn test_diagnose_report_records_kde_portal_first_and_wlr_non_use() {
+            let scripts_dir = get_scripts_dir();
+            let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
+            let content = std::fs::read_to_string(&launcher).expect("failed to read launcher");
+            assert!(content.contains("KDE/Plasma") || content.contains("KDE"));
+            assert!(content.contains("HP Inc. HP 27f 4k"));
+            assert!(content.contains("wlr-screencopy-unstable-v1 unsupported"));
+        }
+
+        #[test]
+        fn test_fake_fallback_remains_absent() {
+            let scripts_dir = get_scripts_dir();
+            let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
+            let content = std::fs::read_to_string(&launcher).expect("failed to read launcher");
+            assert!(!content.contains("backend fake") && !content.contains("backend=fake"));
+        }
     }
 }

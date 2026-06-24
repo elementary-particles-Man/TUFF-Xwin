@@ -48,6 +48,10 @@ fi
 
 echo "Current Flameshot shortcut binding: '$CURRENT_FLAMESHOT_BINDING'"
 echo "$CURRENT_FLAMESHOT_BINDING" > "$BACKUP_FILE"
+if [[ ! -f "$BACKUP_FILE" ]]; then
+    echo "Error: Failed to create hotkey backup file at $BACKUP_FILE" >&2
+    exit 4
+fi
 echo "Saved backup of current binding to $BACKUP_FILE"
 
 # Capture original systemd PATH
@@ -64,7 +68,20 @@ cat <<EOF > "$ROLLBACK_SCRIPT"
 #!/bin/bash
 set -euo pipefail
 
-echo "Rolling back PrintScreen hotkey binding to original configuration..."
+# Safely check backup before doing any destructive rollback actions
+if [[ ! -f "$BACKUP_FILE" ]]; then
+    echo "Error: Hotkey backup file not found at $BACKUP_FILE" >&2
+    echo "Aborting rollback to prevent destructive actions." >&2
+    exit 1
+fi
+
+ORIGINAL_BINDING=\$(cat "$BACKUP_FILE")
+if [[ -z "\$ORIGINAL_BINDING" ]]; then
+    echo "Error: Hotkey backup file is empty." >&2
+    exit 1
+fi
+
+echo "Rolling back PrintScreen hotkey binding to original configuration: '\$ORIGINAL_BINDING'..."
 
 # Remove local override desktop entry, binary wrapper, and config files
 rm -f "$DESKTOP_FILE"
@@ -81,8 +98,8 @@ qdbus6 org.kde.KWin /KWin org.kde.KWin.reconfigure || true
 dbus-send --session --type=signal /KGlobalSettings org.kde.KGlobalSettings.notifyChange int32:3 int32:5 || true
 
 # Restore shortcut to original in kglobalshortcutsrc
-kwriteconfig6 --file kglobalshortcutsrc --group "org.flameshot.Flameshot.desktop" --key "Capture" "$CURRENT_FLAMESHOT_BINDING"
-kwriteconfig6 --file kglobalshortcutsrc --group "services" --group "org.flameshot.Flameshot.desktop" --key "Capture" "$CURRENT_FLAMESHOT_BINDING"
+kwriteconfig6 --file kglobalshortcutsrc --group "org.flameshot.Flameshot.desktop" --key "Capture" "\$ORIGINAL_BINDING"
+kwriteconfig6 --file kglobalshortcutsrc --group "services" --group "org.flameshot.Flameshot.desktop" --key "Capture" "\$ORIGINAL_BINDING"
 
 # Revert systemd user PATH
 if [[ -n "$ORIGINAL_SYSTEMD_PATH" ]]; then

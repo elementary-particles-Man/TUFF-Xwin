@@ -207,3 +207,23 @@
 - Real Capture Backend 選択は fail-closed である
 - X11 Real Capture は明示 opt-in 時のみ動作し、Xwayland では BadMatch fail-closed する
 - Portal Real Capture は明示 opt-in 時のみ動作し、ユーザー許可ダイアログを経て PipeWire リモート確立を確認し、現在は fail-closed (Ingestion stubbed) する
+
+## Phase 2-L Added: Dogfood Capture Boundary Lock
+
+### English
+- **Save Directory Fixation**: Default save directory is locked to `$HOME/Pictures/TUFF-Xwin` (created automatically if missing) and can be overridden via `--save-dir`.
+- **Unique Naming Pattern**: Output filenames strictly use `tuff-xwin-{mode}-{source}-{timestamp}.png` format where `timestamp` holds millisecond precision to prevent collision during rapid consecutive clicks.
+- **Diagnostics and expected Fail-Closed**:
+  - **Portal Cancel**: User cancellation in the KDE portal is detected dynamically from logs and handled as an expected `portal_cancel` (Expected fail-closed, exiting with code 0).
+  - **wlr-screencopy non-use**: 'wlr-screencopy-unstable-v1 unsupported' warning messages are related to standard compositor fallback checks and are NOT failures of the TUFF-Xwin system.
+  - **KDE portal-first**: In the KDE Portal dialog, the top-left monitor device tile (e.g. 'HP Inc. HP 27f 4k') acts as the Fullscreen monitor capture option. Selecting this and clicking 'Share' is the correct procedure. Blank/white preview tiles are expected security isolation behavior, not a failure.
+- **Hotkey Binding Safety**: Backup validation is enforced in both `install-user-prtsc-tuff-capture-binding.sh` and `restore-user-prtsc-binding.sh`. Rollback dynamically retrieves the backed-up shortcut instead of hardcoded values, and immediately aborts if no backup exists, preventing any destructive overrides.
+
+### 日本語
+- **保存先の固定と上書き**: デフォルトの保存先を `$HOME/Pictures/TUFF-Xwin` に固定（存在しない場合は自動生成）し、`--save-dir` による上書きに対応しました。
+- **ユニークな命名規則**: 出力ファイル名は `tuff-xwin-{mode}-${source}-{timestamp}.png` 形式とし、ミリ秒精度のタイムスタンプを含めることで、連打時の上書き・競合を防止しました。
+- **環境診断と期待される Fail-Closed 処理**:
+  - **ポータルのキャンセル検知**: KDEポータル上でユーザーがキャンセルした場合をログから動的に検知し、期待される動作として `portal_cancel` (Expected fail-closed) 扱いにして正常終了（終了コード `0`）とします。
+  - **wlr-screencopy 非依存**: `wlr-screencopy-unstable-v1 unsupported` は標準コンポジタ用の代替検証メッセージであり、TUFF-Xwin システム自体のエラーではありません。
+  - **KDEポータルの操作**: KDE画面共有ポータルで表示される左上のモニター型番タイル（例: `HP Inc. HP 27f 4k`）が「全画面」キャプチャ用ボタンです。これを選択して「共有」を押すのが正しい操作です。プレビュー画像が白く抜けるのはセキュリティ隔離のための正常な動作です。
+- **ホットキーバインド変更の安全化**: `install-user-prtsc-tuff-capture-binding.sh` 和 `restore-user-prtsc-binding.sh` の双方でバックアップ存在チェックを強制。ロールバック時はハードコード値ではなくバックアップファイルから動的に元のキー設定を読み込み、バックアップがない場合は処理を安全に中断します。

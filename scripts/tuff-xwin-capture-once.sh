@@ -53,17 +53,9 @@ fi
 
 # Determine default save directory
 if [[ -z "$SAVE_DIR" ]]; then
-    if [[ -d "$HOME/Pictures/Screenshots" ]]; then
-        SAVE_DIR="$HOME/Pictures/Screenshots"
-    elif [[ -d "$HOME/Screenshots" ]]; then
-        SAVE_DIR="$HOME/Screenshots"
-    else
-        SAVE_DIR="$HOME/Pictures/Screenshots"
-        mkdir -p "$SAVE_DIR"
-    fi
-else
-    mkdir -p "$SAVE_DIR"
+    SAVE_DIR="$HOME/Pictures/TUFF-Xwin"
 fi
+mkdir -p "$SAVE_DIR"
 
 # Create a temporary run directory
 RUN_ROOT=$(mktemp -d -t tuff-capture-run-XXXXXX)
@@ -107,14 +99,32 @@ if [[ "$SOCKET_TIMEOUT" == "true" || ! -S "$SOCKET_PATH" ]]; then
     echo "Error: Timeout or launch failure waiting for displayd socket." >&2
     kill "$DISPLAYD_PID" 2>/dev/null || true
     wait "$DISPLAYD_PID" 2>/dev/null || true
+
     # Write report.md before exiting
     cat <<EOF > "$RUN_ROOT/report.md"
 # TUFF-Xwin Capture Failure Report
 - status: FAILED (socket timeout or launch failure)
 - run_root: $RUN_ROOT
+- notice: 'wlr-screencopy-unstable-v1 unsupported' errors are related to standard compositor fallback checks and are NOT failures in the TUFF-Xwin system.
+- preview_notice: White/blank previews in the portal are expected security isolation behavior and not a failure.
 EOF
+
+    echo "=== TUFF-Xwin Capture Failure Details ===" >&2
+    echo "RUN_ROOT: $RUN_ROOT" >&2
+    echo "Report Path: $RUN_ROOT/report.md" >&2
+    echo "--- displayd.log ---" >&2
+    cat "$LOG_DIR/displayd.log" >&2
+    echo "=========================================" >&2
     exit 1
 fi
+
+echo "================================================================="
+echo "TUFF-Xwin Capture: Starting screen capture sequence..."
+echo "Note (KDE/Plasma):"
+echo "  - The monitor device tile (e.g. 'HP Inc. HP 27f 4k') represents the Fullscreen capture option."
+echo "  - Please click that tile and then click 'Share' to capture the full screen."
+echo "  - White/blank preview tiles in the portal are expected security isolation behavior and not a failure."
+echo "================================================================="
 
 # Perform capture
 if "$TARGET_DIR/xwin-screenshot" \
@@ -123,7 +133,7 @@ if "$TARGET_DIR/xwin-screenshot" \
     --artifact-root "$ARTIFACT_ROOT" \
     --save-dir "$ARTIFACT_ROOT" \
     --format png > "$LOG_DIR/screenshot.log" 2>&1; then
-    
+
     # Locate PNG in ARTIFACT_ROOT
     PNG_ART=$(find "$ARTIFACT_ROOT" -name "*.png" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d" " || true)
     if [[ -n "$PNG_ART" && -f "$PNG_ART" ]]; then
@@ -146,27 +156,43 @@ if "$TARGET_DIR/xwin-screenshot" \
             ACTION="save"
         fi
 
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S_%3N)
+        MODE="fullscreen"
+        SOURCE="portal"
+        NEW_NAME="tuff-xwin-${MODE}-${SOURCE}-${TIMESTAMP}.png"
+
         FINAL_PNG=""
         if [[ "$ACTION" == "copy" ]]; then
+            mv "$PNG_ART" "$ARTIFACT_ROOT/$NEW_NAME"
+            FINAL_PNG="$ARTIFACT_ROOT/$NEW_NAME"
             if command -v wl-copy >/dev/null 2>&1; then
-                wl-copy < "$PNG_ART"
-                echo "tuff-xwin-capture event=success_copy png_path=$PNG_ART"
-                FINAL_PNG="$PNG_ART"
+                wl-copy < "$FINAL_PNG"
+                echo "tuff-xwin-capture event=success_copy png_path=$FINAL_PNG"
             elif command -v xclip >/dev/null 2>&1; then
-                xclip -selection clipboard -t image/png -i "$PNG_ART"
-                echo "tuff-xwin-capture event=success_copy_xclip png_path=$PNG_ART"
-                FINAL_PNG="$PNG_ART"
+                xclip -selection clipboard -t image/png -i "$FINAL_PNG"
+                echo "tuff-xwin-capture event=success_copy_xclip png_path=$FINAL_PNG"
             else
                 # Fallback to save if no clipboard tools
-                mv "$PNG_ART" "$SAVE_DIR/"
-                FINAL_PNG="$SAVE_DIR/$(basename "$PNG_ART")"
+                mv "$FINAL_PNG" "$SAVE_DIR/"
+                FINAL_PNG="$SAVE_DIR/$NEW_NAME"
                 echo "tuff-xwin-capture event=success_save_fallback png_path=$FINAL_PNG"
             fi
         else
             # Save to target directory
-            mv "$PNG_ART" "$SAVE_DIR/"
-            FINAL_PNG="$SAVE_DIR/$(basename "$PNG_ART")"
+            mv "$PNG_ART" "$SAVE_DIR/$NEW_NAME"
+            FINAL_PNG="$SAVE_DIR/$NEW_NAME"
             echo "tuff-xwin-capture event=success_save png_path=$FINAL_PNG"
+        fi
+
+        PNG_SIZE=$(stat -c%s "$FINAL_PNG" 2>/dev/null || echo "0")
+        echo "CAPTURED_PNG_PATH: $FINAL_PNG SIZE: $PNG_SIZE bytes"
+
+        if command -v notify-send >/dev/null 2>&1; then
+            if [[ "$ACTION" == "copy" ]]; then
+                notify-send "TUFF-Xwin Capture" "スクリーンショットをクリップボードにコピーしました (サイズ: $PNG_SIZE バイト)" -i "$FINAL_PNG" || true
+            else
+                notify-send "TUFF-Xwin Capture" "スクリーンショットを保存しました\n$FINAL_PNG\n(サイズ: $PNG_SIZE バイト)" -i "$FINAL_PNG" || true
+            fi
         fi
 
         cat <<EOF > "$RUN_ROOT/report.md"
@@ -175,7 +201,9 @@ if "$TARGET_DIR/xwin-screenshot" \
 - run_root: $RUN_ROOT
 - action: $ACTION
 - png_path: $FINAL_PNG
-- png_size: $(stat -c%s "$FINAL_PNG") bytes
+- png_size: $PNG_SIZE bytes
+- notice: 'wlr-screencopy-unstable-v1 unsupported' errors are related to standard compositor fallback checks and are NOT failures in the TUFF-Xwin system.
+- preview_notice: White/blank previews in the portal are expected security isolation behavior and not a failure.
 EOF
     else
         echo "Error: xwin-screenshot succeeded but no PNG file found in $ARTIFACT_ROOT" >&2
@@ -183,14 +211,43 @@ EOF
     fi
 else
     RC=$?
-    echo "Error: xwin-screenshot failed with exit code $RC" >&2
-    # Write report.md
-    cat <<EOF > "$RUN_ROOT/report.md"
+    if grep -E -q -i "cancelled|response\(cancelled\)|the request was cancelled" "$LOG_DIR/screenshot.log" 2>/dev/null; then
+        echo "tuff-xwin-capture event=portal_cancel"
+        echo "Expected fail-closed: screen capture was cancelled by the user."
+
+        cat <<EOF > "$RUN_ROOT/report.md"
+# TUFF-Xwin Capture Cancel Report
+- status: CANCELLED (expected fail-closed)
+- run_root: $RUN_ROOT
+- notice: 'wlr-screencopy-unstable-v1 unsupported' errors are related to standard compositor fallback checks and are NOT failures in the TUFF-Xwin system.
+- preview_notice: White/blank previews in the portal are expected security isolation behavior and not a failure.
+EOF
+        exit 0
+    else
+        echo "Error: xwin-screenshot failed with exit code $RC" >&2
+
+        cat <<EOF > "$RUN_ROOT/report.md"
 # TUFF-Xwin Capture Failure Report
 - status: FAILED (exit $RC)
 - run_root: $RUN_ROOT
+- notice: 'wlr-screencopy-unstable-v1 unsupported' errors are related to standard compositor fallback checks and are NOT failures in the TUFF-Xwin system.
+- preview_notice: White/blank previews in the portal are expected security isolation behavior and not a failure.
 EOF
-    exit "$RC"
+
+        echo "=== TUFF-Xwin Capture Failure Details ===" >&2
+        echo "RUN_ROOT: $RUN_ROOT" >&2
+        echo "Report Path: $RUN_ROOT/report.md" >&2
+        echo "--- displayd.log ---" >&2
+        cat "$LOG_DIR/displayd.log" >&2
+        echo "--- screenshot.log ---" >&2
+        if [[ -f "$LOG_DIR/screenshot.log" ]]; then
+            cat "$LOG_DIR/screenshot.log" >&2
+        else
+            echo "(screenshot.log not found)" >&2
+        fi
+        echo "=========================================" >&2
+        exit "$RC"
+    fi
 fi
 
 wait "$DISPLAYD_PID" || true
