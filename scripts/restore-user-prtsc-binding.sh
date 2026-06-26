@@ -105,7 +105,7 @@ rm -f "$LATEST_LINK"
 # Restart Flameshot daemon if it was running previously
 if which flameshot >/dev/null 2>&1; then
     echo "Starting Flameshot daemon..."
-    flameshot &
+    flameshot >/dev/null 2>&1 &
 fi
 
 echo "Rollback completed. Original shortcut binding and user-local environment restored."
