@@ -2236,11 +2236,24 @@ mod tests {
                 std::fs::create_dir_all(&bin_dir).unwrap();
 
                 // Create mock systemctl, kwriteconfig6, etc. to avoid system dbus delays
-                std::fs::write(
-                    bin_dir.join("systemctl"),
-                    "#!/bin/bash\necho PATH=/mocked/bin\nexit 0",
-                )
-                .unwrap();
+                let systemctl_mock = r#"#!/bin/bash
+ENV_FILE="$HOME/.systemd_path_mock"
+if [[ "$1" == "--user" && "$2" == "show-environment" ]]; then
+    if [[ -f "$ENV_FILE" ]]; then
+        cat "$ENV_FILE"
+    else
+        echo "PATH=/mocked/bin"
+    fi
+elif [[ "$1" == "--user" && "$2" == "set-environment" ]]; then
+    echo "$3" > "$ENV_FILE"
+elif [[ "$1" == "--user" && "$2" == "unset-environment" ]]; then
+    if [[ "$3" == "PATH" ]]; then
+        echo "PATH=" > "$ENV_FILE"
+    fi
+fi
+exit 0
+"#;
+                std::fs::write(bin_dir.join("systemctl"), systemctl_mock).unwrap();
                 std::fs::write(bin_dir.join("kwriteconfig6"), "#!/bin/bash\nexit 0").unwrap();
                 std::fs::write(bin_dir.join("kreadconfig6"), "#!/bin/bash\necho Print\nexit 0")
                     .unwrap();
@@ -2513,6 +2526,140 @@ mod tests {
             // Verify unrelated file was preserved
             assert!(unrelated_conf.exists());
             assert_eq!(std::fs::read_to_string(&unrelated_conf).unwrap(), "SOME_VAR=1");
+        }
+
+        #[test]
+        fn test_restore_preserves_preexisting_systemd_user_path_containing_home_local_bin() {
+            let env = TestEnv::new();
+
+            // Set initial state containing HOME local bin
+            let env_file = env.home_dir.join(".systemd_path_mock");
+            let local_bin = env.home_dir.join(".local/bin");
+            let initial_path = format!("PATH={}:/usr/bin", local_bin.display());
+            std::fs::write(&env_file, &initial_path).unwrap();
+
+            // Run install
+            let output_install = env.run_script("install-user-prtsc-tuff-capture-binding.sh", &[]);
+            assert_eq!(output_install.status.code(), Some(0));
+
+            // Run restore
+            let output_restore = env.run_script("restore-user-prtsc-binding.sh", &[]);
+            assert_eq!(output_restore.status.code(), Some(0));
+
+            // PATH should be preserved as-is, not stripped by sed
+            let final_path = std::fs::read_to_string(&env_file).unwrap();
+            assert_eq!(final_path.trim(), initial_path);
+        }
+
+        #[test]
+        fn test_restore_restores_original_systemd_user_path_from_backup() {
+            let env = TestEnv::new();
+
+            let env_file = env.home_dir.join(".systemd_path_mock");
+            std::fs::write(&env_file, "PATH=/usr/bin:/bin").unwrap();
+
+            // Run install
+            let output_install = env.run_script("install-user-prtsc-tuff-capture-binding.sh", &[]);
+            assert_eq!(output_install.status.code(), Some(0));
+
+            // Verify path was modified
+            let modified_path = std::fs::read_to_string(&env_file).unwrap();
+            assert!(modified_path.contains(".local/bin"));
+
+            // Run restore
+            let output_restore = env.run_script("restore-user-prtsc-binding.sh", &[]);
+            assert_eq!(output_restore.status.code(), Some(0));
+
+            // Verify original path restored
+            let final_path = std::fs::read_to_string(&env_file).unwrap();
+            assert_eq!(final_path.trim(), "PATH=/usr/bin:/bin");
+        }
+
+        #[test]
+        fn test_restore_does_not_delete_existed_false_file_without_tuff_marker() {
+            let env = TestEnv::new();
+
+            // Run install to create files with existed=false
+            let output_install = env.run_script("install-user-prtsc-tuff-capture-binding.sh", &[]);
+            assert_eq!(output_install.status.code(), Some(0));
+
+            let wrapper = env.home_dir.join(".local/bin/flameshot");
+            let path_conf = env.home_dir.join(".config/environment.d/tuff-xwin-path.conf");
+            let desktop =
+                env.home_dir.join(".local/share/applications/org.flameshot.Flameshot.desktop");
+
+            // Overwrite them with content lacking TUFF markers
+            std::fs::write(&wrapper, "user custom script").unwrap();
+            std::fs::write(&path_conf, "user custom env").unwrap();
+            std::fs::write(&desktop, "user custom desktop").unwrap();
+
+            // Run restore
+            let output_restore = env.run_script("restore-user-prtsc-binding.sh", &[]);
+            assert_eq!(output_restore.status.code(), Some(0));
+
+            // They must NOT be deleted
+            assert!(wrapper.exists());
+            assert!(path_conf.exists());
+            assert!(desktop.exists());
+        }
+
+        #[test]
+        fn test_restore_deletes_existed_false_tuff_wrapper_only_when_marker_matches() {
+            let env = TestEnv::new();
+
+            // Run install
+            let output_install = env.run_script("install-user-prtsc-tuff-capture-binding.sh", &[]);
+            assert_eq!(output_install.status.code(), Some(0));
+
+            let wrapper = env.home_dir.join(".local/bin/flameshot");
+            assert!(wrapper.exists());
+
+            // Run restore
+            let output_restore = env.run_script("restore-user-prtsc-binding.sh", &[]);
+            assert_eq!(output_restore.status.code(), Some(0));
+
+            // Should be deleted because it has the marker
+            assert!(!wrapper.exists());
+        }
+
+        #[test]
+        fn test_restore_deletes_existed_false_tuff_environment_file_only_when_marker_matches() {
+            let env = TestEnv::new();
+
+            // Run install
+            let output_install = env.run_script("install-user-prtsc-tuff-capture-binding.sh", &[]);
+            assert_eq!(output_install.status.code(), Some(0));
+
+            let path_conf = env.home_dir.join(".config/environment.d/tuff-xwin-path.conf");
+            assert!(path_conf.exists());
+
+            // Run restore
+            let output_restore = env.run_script("restore-user-prtsc-binding.sh", &[]);
+            assert_eq!(output_restore.status.code(), Some(0));
+
+            // Should be deleted because it has the marker
+            assert!(!path_conf.exists());
+        }
+
+        #[test]
+        fn test_restore_deletes_existed_false_tuff_desktop_override_only_when_marker_or_exec_matches()
+         {
+            let env = TestEnv::new();
+
+            // Run install
+            let output_install = env.run_script("install-user-prtsc-tuff-capture-binding.sh", &[]);
+            assert_eq!(output_install.status.code(), Some(0));
+
+            let desktop =
+                env.home_dir.join(".local/share/applications/org.flameshot.Flameshot.desktop");
+            assert!(desktop.exists());
+
+            // Run restore
+            let output_restore = env.run_script("restore-user-prtsc-binding.sh", &[]);
+            assert_eq!(output_restore.status.code(), Some(0));
+
+            // Should be deleted because it has the marker
+            assert!(!desktop.exists());
         }
     }
 }

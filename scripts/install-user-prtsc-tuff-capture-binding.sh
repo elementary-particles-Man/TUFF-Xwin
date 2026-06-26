@@ -65,6 +65,8 @@ MANIFEST_CONTENT+="binding	true	kglobalshortcutsrc	binding.txt"$'\n'
 
 # Capture original systemd PATH
 ORIGINAL_SYSTEMD_PATH=$(systemctl --user show-environment 2>/dev/null | grep "^PATH=" | cut -d'=' -f2- || echo "")
+echo -n "$ORIGINAL_SYSTEMD_PATH" > "$BACKUP_DIR/systemd-user-path.txt"
+MANIFEST_CONTENT+="systemd_path	true	systemd-user-environment	systemd-user-path.txt"$'\n'
 
 # Kill running Flameshot process
 if killall flameshot 2>/dev/null; then
@@ -146,6 +148,7 @@ chmod +x "$LOCAL_FLAMESHOT"
 echo "Creating systemd environment config at $ENV_CONF_FILE..."
 mkdir -p "$ENV_CONF_DIR"
 cat <<EOF > "$ENV_CONF_FILE"
+# TUFF-Xwin environment override
 PATH=\$HOME/.local/bin:\$PATH
 EOF
 
@@ -177,6 +180,8 @@ else
         exit 3
     fi
 fi
+# Add marker comment to local desktop file for safe rollback verification
+echo "# TUFF-Xwin desktop override" >> "$DESKTOP_FILE"
 
 # Clean up any leftover custom desktop files to avoid conflict
 rm -f "$HOME/.local/share/applications/org.tuff.xwin.capture.desktop"

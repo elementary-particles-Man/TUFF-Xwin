@@ -61,6 +61,21 @@ while IFS=$'\t' read -r file_id existed dest_path backup_file || [[ -n "$file_id
                 kwriteconfig6 --file kglobalshortcutsrc --group "services" --group "org.flameshot.Flameshot.desktop" --key "Capture" "$ORIGINAL_BINDING" || true
             fi
         fi
+    elif [[ "$file_id" == "systemd_path" ]]; then
+        # Handle systemd PATH restoration
+        PATH_BAK_FILE="$BACKUP_DIR/$backup_file"
+        if [[ -f "$PATH_BAK_FILE" ]]; then
+            ORIGINAL_PATH=$(cat "$PATH_BAK_FILE" || echo "")
+            if [[ -n "$ORIGINAL_PATH" ]]; then
+                echo "Restoring systemd user PATH to: '$ORIGINAL_PATH'"
+                systemctl --user set-environment PATH="$ORIGINAL_PATH" || true
+            else
+                echo "Restoring systemd user PATH by unsetting PATH environment variable"
+                systemctl --user unset-environment PATH || true
+            fi
+        else
+            echo "Warning: Backup systemd path file $backup_file not found." >&2
+        fi
     else
         # Handle file restoration or deletion
         if [[ "$existed" == "true" ]]; then
@@ -74,8 +89,28 @@ while IFS=$'\t' read -r file_id existed dest_path backup_file || [[ -n "$file_id
             fi
         else
             if [[ -f "$dest_path" ]]; then
-                echo "Removing TUFF-generated file at $dest_path..."
-                rm -f "$dest_path"
+                # Perform marker inspection before deleting existed=false files
+                IS_TUFF_GENERATED=false
+                if [[ "$dest_path" =~ flameshot$ ]]; then
+                    if grep -q "# TUFF-Xwin Flameshot wrapper override" "$dest_path"; then
+                        IS_TUFF_GENERATED=true
+                    fi
+                elif [[ "$dest_path" =~ tuff-xwin-path\.conf$ ]]; then
+                    if grep -q "# TUFF-Xwin environment override" "$dest_path"; then
+                        IS_TUFF_GENERATED=true
+                    fi
+                elif [[ "$dest_path" =~ \.desktop$ ]]; then
+                    if grep -q "# TUFF-Xwin desktop override" "$dest_path" || grep -q "tuff-xwin-capture-once\.sh" "$dest_path"; then
+                        IS_TUFF_GENERATED=true
+                    fi
+                fi
+
+                if [ "$IS_TUFF_GENERATED" = true ]; then
+                    echo "Removing TUFF-generated file at $dest_path..."
+                    rm -f "$dest_path"
+                else
+                    echo "Warning: File $dest_path was created or modified by user (no TUFF marker found). Skipping deletion to preserve user data." >&2
+                fi
             else
                 echo "File $dest_path does not exist, nothing to delete."
             fi
@@ -91,13 +126,6 @@ qdbus6 org.kde.KWin /KWin org.kde.KWin.reconfigure || true
 
 # Notify global settings
 dbus-send --session --type=signal /KGlobalSettings org.kde.KGlobalSettings.notifyChange int32:3 int32:5 || true
-
-# Revert systemd user PATH by dynamically removing $HOME/.local/bin from environment
-CURRENT_PATH=$(systemctl --user show-environment 2>/dev/null | grep "^PATH=" | cut -d'=' -f2- || echo "")
-if [[ -n "$CURRENT_PATH" ]]; then
-    NEW_PATH=$(echo "$CURRENT_PATH" | sed -E "s|($HOME/.local/bin:?)||g" | sed -E "s|(:?$HOME/.local/bin)||g" || echo "$CURRENT_PATH")
-    systemctl --user set-environment PATH="$NEW_PATH" || true
-fi
 
 # Clean up latest symlink
 rm -f "$LATEST_LINK"
