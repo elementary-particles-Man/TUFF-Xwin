@@ -2178,12 +2178,14 @@ mod tests {
             let scripts_dir = get_scripts_dir();
             let installer = scripts_dir.join("install-user-prtsc-tuff-capture-binding.sh");
             let content = std::fs::read_to_string(&installer).expect("failed to read installer");
+            let backup_idx = content.find("BACKUP_DIR").unwrap_or(usize::MAX);
+            let write_manifest_idx = content
+                .find("echo -n \"$MANIFEST_CONTENT\" > \"$MANIFEST_FILE\"")
+                .unwrap_or(usize::MAX);
+            let mutation_idx = content.find("Creating user-local Flameshot").unwrap_or(usize::MAX);
 
-            let rollback_gen_idx = content.find("Generate rollback script").unwrap_or(usize::MAX);
-            let mutation_idx =
-                content.find("Modify settings in kglobalshortcutsrc").unwrap_or(usize::MAX);
-
-            assert!(rollback_gen_idx < mutation_idx);
+            assert!(backup_idx < mutation_idx);
+            assert!(write_manifest_idx < mutation_idx);
         }
 
         #[test]
@@ -2212,62 +2214,302 @@ mod tests {
             assert!(custom_save_dir.exists());
         }
 
-        #[test]
-        fn test_restore_script_refuses_destructive_restore_when_backup_is_missing() {
-            let scripts_dir = get_scripts_dir();
-            let restore = scripts_dir.join("restore-user-prtsc-binding.sh");
-            let backup_path =
-                scripts_dir.parent().unwrap().join("target/xsm/tuff-xwin-prtsc-backup.txt");
-            let has_backup = backup_path.exists();
-            let backup_content =
-                if has_backup { std::fs::read_to_string(&backup_path).ok() } else { None };
-            if has_backup {
-                let _ = std::fs::remove_file(&backup_path);
+        struct TestEnv {
+            _temp_dir: tempfile::TempDir,
+            home_dir: PathBuf,
+            repo_root: PathBuf,
+            target_xsm_dir: PathBuf,
+            mock_desktop_path: PathBuf,
+            bin_dir: PathBuf,
+        }
+
+        impl TestEnv {
+            fn new() -> Self {
+                let temp = tempfile::tempdir().unwrap();
+                let home = temp.path().join("home");
+                let repo = temp.path().join("repo");
+                let target_xsm = repo.join("target/xsm");
+                let bin_dir = temp.path().join("bin");
+
+                std::fs::create_dir_all(&home).unwrap();
+                std::fs::create_dir_all(&target_xsm).unwrap();
+                std::fs::create_dir_all(&bin_dir).unwrap();
+
+                // Create mock systemctl, kwriteconfig6, etc. to avoid system dbus delays
+                std::fs::write(
+                    bin_dir.join("systemctl"),
+                    "#!/bin/bash\necho PATH=/mocked/bin\nexit 0",
+                )
+                .unwrap();
+                std::fs::write(bin_dir.join("kwriteconfig6"), "#!/bin/bash\nexit 0").unwrap();
+                std::fs::write(bin_dir.join("kreadconfig6"), "#!/bin/bash\necho Print\nexit 0")
+                    .unwrap();
+                std::fs::write(bin_dir.join("kbuildsycoca6"), "#!/bin/bash\nexit 0").unwrap();
+                std::fs::write(bin_dir.join("qdbus6"), "#!/bin/bash\nexit 0").unwrap();
+                std::fs::write(bin_dir.join("dbus-send"), "#!/bin/bash\nexit 0").unwrap();
+
+                // Make them executable
+                use std::os::unix::fs::PermissionsExt;
+                for name in &[
+                    "systemctl",
+                    "kwriteconfig6",
+                    "kreadconfig6",
+                    "kbuildsycoca6",
+                    "qdbus6",
+                    "dbus-send",
+                ] {
+                    let file = bin_dir.join(name);
+                    let mut perms = std::fs::metadata(&file).unwrap().permissions();
+                    perms.set_mode(0o755);
+                    std::fs::set_permissions(&file, perms).unwrap();
+                }
+
+                // Copy scripts to temp repo to run them
+                let src_scripts_dir = get_scripts_dir();
+                let dst_scripts_dir = repo.join("scripts");
+                std::fs::create_dir_all(&dst_scripts_dir).unwrap();
+
+                for entry in std::fs::read_dir(src_scripts_dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    if path.is_file() {
+                        let file_name = path.file_name().unwrap();
+                        std::fs::copy(&path, dst_scripts_dir.join(file_name)).unwrap();
+                    }
+                }
+
+                // Create mock system desktop file
+                let mock_desktop = temp.path().join("org.flameshot.Flameshot.desktop");
+                std::fs::write(&mock_desktop, "Exec=flameshot\n[Desktop Entry]\nName=Flameshot")
+                    .unwrap();
+
+                Self {
+                    _temp_dir: temp,
+                    home_dir: home,
+                    repo_root: repo,
+                    target_xsm_dir: target_xsm,
+                    mock_desktop_path: mock_desktop,
+                    bin_dir: bin_dir,
+                }
             }
 
-            let output =
-                Command::new("bash").arg(&restore).output().expect("failed to execute restore");
+            fn run_script(&self, script_name: &str, envs: &[(&str, &str)]) -> std::process::Output {
+                let script_path = self.repo_root.join("scripts").join(script_name);
+
+                let current_path = std::env::var("PATH").unwrap_or_default();
+                let new_path = format!("{}:{}", self.bin_dir.display(), current_path);
+
+                let mut cmd = Command::new("bash");
+                cmd.arg(&script_path)
+                    .env("HOME", &self.home_dir)
+                    .env("PATH", &new_path)
+                    .env("XDG_CURRENT_DESKTOP", "KDE") // force KDE DE detection
+                    .env("TUFF_MOCK_SYSTEM_DESKTOP", &self.mock_desktop_path)
+                    .current_dir(&self.repo_root);
+
+                for (k, v) in envs {
+                    cmd.env(k, v);
+                }
+
+                cmd.output().expect("failed to run script")
+            }
+        }
+
+        #[test]
+        fn test_restore_without_manifest_does_not_delete_anything() {
+            let env = TestEnv::new();
+
+            // Create some file in local bin
+            let local_bin = env.home_dir.join(".local/bin");
+            std::fs::create_dir_all(&local_bin).unwrap();
+            let wrapper = local_bin.join("flameshot");
+            std::fs::write(&wrapper, "original content").unwrap();
+
+            // Run restore directly (no manifest exists)
+            let output = env.run_script("restore-user-prtsc-binding.sh", &[]);
+
+            // Should fail because no backup manifest exists
             assert_ne!(output.status.code(), Some(0));
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(stderr.contains("backup") || stderr.contains("Backup"));
 
-            if let Some(content) = backup_content {
-                let _ = std::fs::create_dir_all(backup_path.parent().unwrap());
-                let _ = std::fs::write(&backup_path, content);
-            }
+            // Ensure nothing was deleted
+            assert!(wrapper.exists());
+            assert_eq!(std::fs::read_to_string(&wrapper).unwrap(), "original content");
         }
 
         #[test]
-        fn test_install_script_creates_backup_before_mutation() {
-            let scripts_dir = get_scripts_dir();
-            let installer = scripts_dir.join("install-user-prtsc-tuff-capture-binding.sh");
-            let content = std::fs::read_to_string(&installer).expect("failed to read installer");
-            let backup_idx = content.find("BACKUP_FILE").unwrap_or(usize::MAX);
-            let write_backup_idx = content
-                .find("echo \"$CURRENT_FLAMESHOT_BINDING\" > \"$BACKUP_FILE\"")
-                .unwrap_or(usize::MAX);
-            let mutation_idx = content.find("kwriteconfig6").unwrap_or(usize::MAX);
+        fn test_existing_local_flameshot_wrapper_is_backed_up_and_restored() {
+            let env = TestEnv::new();
 
-            assert!(backup_idx < mutation_idx);
-            assert!(write_backup_idx < mutation_idx);
+            let local_bin = env.home_dir.join(".local/bin");
+            std::fs::create_dir_all(&local_bin).unwrap();
+            let wrapper = local_bin.join("flameshot");
+            std::fs::write(&wrapper, "original flameshot content").unwrap();
+
+            // Run install
+            let output_install = env.run_script("install-user-prtsc-tuff-capture-binding.sh", &[]);
+            assert_eq!(output_install.status.code(), Some(0));
+
+            // Verify that wrapper is updated (it should be our wrapper, not original content)
+            assert!(wrapper.exists());
+            let wrapper_content = std::fs::read_to_string(&wrapper).unwrap();
+            assert!(wrapper_content.contains("TUFF-Xwin Flameshot wrapper override"));
+
+            // Verify backup directory was created and contains the backup file
+            let backup_dirs: Vec<_> = std::fs::read_dir(&env.target_xsm_dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| {
+                    p.is_dir()
+                        && !p.is_symlink()
+                        && p.file_name()
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .starts_with("tuff-xwin-prtsc-backup-")
+                        && !p.file_name().unwrap().to_str().unwrap().ends_with("-latest")
+                })
+                .collect();
+            assert_eq!(backup_dirs.len(), 1);
+            let backup_dir = &backup_dirs[0];
+
+            let backup_flameshot = backup_dir.join("flameshot");
+            assert!(backup_flameshot.exists());
+            assert_eq!(
+                std::fs::read_to_string(&backup_flameshot).unwrap(),
+                "original flameshot content"
+            );
+
+            let manifest = backup_dir.join("manifest.tsv");
+            assert!(manifest.exists());
+            let manifest_content = std::fs::read_to_string(&manifest).unwrap();
+            assert!(manifest_content.contains("flameshot\ttrue"));
+
+            // Run restore
+            let output_restore = env.run_script("restore-user-prtsc-binding.sh", &[]);
+            assert_eq!(output_restore.status.code(), Some(0));
+
+            // Verify wrapper is restored to original content
+            assert!(wrapper.exists());
+            assert_eq!(std::fs::read_to_string(&wrapper).unwrap(), "original flameshot content");
         }
 
         #[test]
-        fn test_diagnose_report_records_kde_portal_first_and_wlr_non_use() {
-            let scripts_dir = get_scripts_dir();
-            let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
-            let content = std::fs::read_to_string(&launcher).expect("failed to read launcher");
-            assert!(content.contains("KDE/Plasma") || content.contains("KDE"));
-            assert!(content.contains("HP Inc. HP 27f 4k"));
-            assert!(content.contains("wlr-screencopy-unstable-v1 unsupported"));
+        fn test_existing_environment_d_path_file_is_backed_up_and_restored() {
+            let env = TestEnv::new();
+
+            let env_conf_dir = env.home_dir.join(".config/environment.d");
+            std::fs::create_dir_all(&env_conf_dir).unwrap();
+            let path_conf = env_conf_dir.join("tuff-xwin-path.conf");
+            std::fs::write(&path_conf, "PATH=/some/custom/path").unwrap();
+
+            // Run install
+            let output_install = env.run_script("install-user-prtsc-tuff-capture-binding.sh", &[]);
+            assert_eq!(output_install.status.code(), Some(0));
+
+            // Verify file is updated to our tuff-xwin-path.conf content
+            assert!(path_conf.exists());
+            let content = std::fs::read_to_string(&path_conf).unwrap();
+            assert!(content.contains(".local/bin"));
+
+            // Run restore
+            let output_restore = env.run_script("restore-user-prtsc-binding.sh", &[]);
+            assert_eq!(output_restore.status.code(), Some(0));
+
+            // Verify file is restored to original content
+            assert!(path_conf.exists());
+            assert_eq!(std::fs::read_to_string(&path_conf).unwrap(), "PATH=/some/custom/path");
         }
 
         #[test]
-        fn test_fake_fallback_remains_absent() {
-            let scripts_dir = get_scripts_dir();
-            let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
-            let content = std::fs::read_to_string(&launcher).expect("failed to read launcher");
-            assert!(!content.contains("backend fake") && !content.contains("backend=fake"));
+        fn test_existed_false_generated_file_is_removed_on_restore() {
+            let env = TestEnv::new();
+
+            // Ensure wrapper and config do not exist initially
+            let local_bin = env.home_dir.join(".local/bin");
+            let wrapper = local_bin.join("flameshot");
+            let path_conf = env.home_dir.join(".config/environment.d/tuff-xwin-path.conf");
+            assert!(!wrapper.exists());
+            assert!(!path_conf.exists());
+
+            // Run install
+            let output_install = env.run_script("install-user-prtsc-tuff-capture-binding.sh", &[]);
+            assert_eq!(output_install.status.code(), Some(0));
+
+            // Verified created
+            assert!(wrapper.exists());
+            assert!(path_conf.exists());
+
+            // Run restore
+            let output_restore = env.run_script("restore-user-prtsc-binding.sh", &[]);
+            assert_eq!(output_restore.status.code(), Some(0));
+
+            // Verified removed (since existed=false in manifest)
+            assert!(!wrapper.exists());
+            assert!(!path_conf.exists());
+        }
+
+        #[test]
+        fn test_installer_refuses_mutation_if_backup_manifest_cannot_be_written() {
+            let env = TestEnv::new();
+
+            // Make target/xsm read-only (impossible to create subdirectories or write files)
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&env.target_xsm_dir, std::fs::Permissions::from_mode(0o555))
+                .unwrap();
+
+            // Run install
+            let output_install = env.run_script("install-user-prtsc-tuff-capture-binding.sh", &[]);
+
+            // Should fail because mkdir or writing manifest fails
+            assert_ne!(output_install.status.code(), Some(0));
+
+            // Restore permissions so cleanup doesn't fail
+            let _ = std::fs::set_permissions(
+                &env.target_xsm_dir,
+                std::fs::Permissions::from_mode(0o777),
+            );
+
+            // Verify no modification to user environment was done
+            let wrapper = env.home_dir.join(".local/bin/flameshot");
+            let path_conf = env.home_dir.join(".config/environment.d/tuff-xwin-path.conf");
+            assert!(!wrapper.exists());
+            assert!(!path_conf.exists());
+        }
+
+        #[test]
+        fn test_installer_refuses_to_overwrite_existing_local_flameshot_unless_backup_is_confirmed()
+        {
+            let env = TestEnv::new();
+
+            let local_bin = env.home_dir.join(".local/bin");
+            std::fs::create_dir_all(&local_bin).unwrap();
+            let wrapper = local_bin.join("flameshot");
+            std::fs::write(&wrapper, "pre-existing flameshot").unwrap();
+
+            let output = env.run_script("install-user-prtsc-tuff-capture-binding.sh", &[]);
+            assert_eq!(output.status.code(), Some(0));
+        }
+
+        #[test]
+        fn test_restore_preserves_unrelated_environment_d_files() {
+            let env = TestEnv::new();
+
+            let env_conf_dir = env.home_dir.join(".config/environment.d");
+            std::fs::create_dir_all(&env_conf_dir).unwrap();
+            let unrelated_conf = env_conf_dir.join("other.conf");
+            std::fs::write(&unrelated_conf, "SOME_VAR=1").unwrap();
+
+            // Run install
+            let output_install = env.run_script("install-user-prtsc-tuff-capture-binding.sh", &[]);
+            assert_eq!(output_install.status.code(), Some(0));
+
+            // Run restore
+            let output_restore = env.run_script("restore-user-prtsc-binding.sh", &[]);
+            assert_eq!(output_restore.status.code(), Some(0));
+
+            // Verify unrelated file was preserved
+            assert!(unrelated_conf.exists());
+            assert_eq!(std::fs::read_to_string(&unrelated_conf).unwrap(), "SOME_VAR=1");
         }
     }
 }

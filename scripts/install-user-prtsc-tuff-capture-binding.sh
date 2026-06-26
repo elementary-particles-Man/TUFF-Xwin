@@ -23,15 +23,24 @@ echo "Detected KDE Plasma environment."
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCHER_PATH="$REPO_ROOT/scripts/tuff-xwin-capture-once.sh"
 DESKTOP_FILE="$HOME/.local/share/applications/org.flameshot.Flameshot.desktop"
-BACKUP_FILE="$REPO_ROOT/target/xsm/tuff-xwin-prtsc-backup.txt"
 ROLLBACK_SCRIPT="$REPO_ROOT/scripts/restore-user-prtsc-binding.sh"
 
 LOCAL_BIN_DIR="$HOME/.local/bin"
 LOCAL_FLAMESHOT="$LOCAL_BIN_DIR/flameshot"
 ENV_CONF_DIR="$HOME/.config/environment.d"
-ENV_CONF_FILE="$ENV_CONF_DIR/path.conf"
+ENV_CONF_FILE="$ENV_CONF_DIR/tuff-xwin-path.conf"
 
-mkdir -p "$(dirname "$BACKUP_FILE")"
+# Generate backup directory with timestamp
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+BACKUP_DIR="$REPO_ROOT/target/xsm/tuff-xwin-prtsc-backup-$TIMESTAMP"
+MANIFEST_FILE="$BACKUP_DIR/manifest.tsv"
+
+if ! mkdir -p "$BACKUP_DIR"; then
+    echo "Error: Failed to create backup directory at $BACKUP_DIR" >&2
+    exit 4
+fi
+
+MANIFEST_CONTENT=""
 
 # 1. Read existing Flameshot config using kreadconfig6
 echo "Reading current global shortcut configuration..."
@@ -47,74 +56,81 @@ if [[ -z "$CURRENT_FLAMESHOT_BINDING" ]]; then
 fi
 
 echo "Current Flameshot shortcut binding: '$CURRENT_FLAMESHOT_BINDING'"
-echo "$CURRENT_FLAMESHOT_BINDING" > "$BACKUP_FILE"
-if [[ ! -f "$BACKUP_FILE" ]]; then
-    echo "Error: Failed to create hotkey backup file at $BACKUP_FILE" >&2
+echo "$CURRENT_FLAMESHOT_BINDING" > "$BACKUP_DIR/binding.txt"
+if [[ ! -f "$BACKUP_DIR/binding.txt" ]]; then
+    echo "Error: Failed to create hotkey backup file at $BACKUP_DIR/binding.txt" >&2
     exit 4
 fi
-echo "Saved backup of current binding to $BACKUP_FILE"
+MANIFEST_CONTENT+="binding	true	kglobalshortcutsrc	binding.txt"$'\n'
 
 # Capture original systemd PATH
-ORIGINAL_SYSTEMD_PATH=$(systemctl --user show-environment | grep "^PATH=" | cut -d'=' -f2- || echo "")
+ORIGINAL_SYSTEMD_PATH=$(systemctl --user show-environment 2>/dev/null | grep "^PATH=" | cut -d'=' -f2- || echo "")
 
 # Kill running Flameshot process
 if killall flameshot 2>/dev/null; then
     echo "Stopped running Flameshot daemon."
 fi
 
-# 2. Generate rollback script
-echo "Generating rollback script at $ROLLBACK_SCRIPT..."
-cat <<EOF > "$ROLLBACK_SCRIPT"
-#!/bin/bash
-set -euo pipefail
-
-# Safely check backup before doing any destructive rollback actions
-if [[ ! -f "$BACKUP_FILE" ]]; then
-    echo "Error: Hotkey backup file not found at $BACKUP_FILE" >&2
-    echo "Aborting rollback to prevent destructive actions." >&2
-    exit 1
+# 2. Backup existing user-local files
+# ~/.local/bin/flameshot
+if [[ -f "$LOCAL_FLAMESHOT" ]]; then
+    cp "$LOCAL_FLAMESHOT" "$BACKUP_DIR/flameshot"
+    MANIFEST_CONTENT+="flameshot	true	$LOCAL_FLAMESHOT	flameshot"$'\n'
+    echo "Backed up existing local flameshot to $BACKUP_DIR/flameshot"
+else
+    MANIFEST_CONTENT+="flameshot	false	$LOCAL_FLAMESHOT	none"$'\n'
 fi
 
-ORIGINAL_BINDING=\$(cat "$BACKUP_FILE")
-if [[ -z "\$ORIGINAL_BINDING" ]]; then
-    echo "Error: Hotkey backup file is empty." >&2
-    exit 1
+# ~/.config/environment.d/tuff-xwin-path.conf
+if [[ -f "$ENV_CONF_FILE" ]]; then
+    cp "$ENV_CONF_FILE" "$BACKUP_DIR/tuff-xwin-path.conf"
+    MANIFEST_CONTENT+="path_conf	true	$ENV_CONF_FILE	tuff-xwin-path.conf"$'\n'
+    echo "Backed up existing tuff-xwin-path.conf to $BACKUP_DIR/tuff-xwin-path.conf"
+else
+    MANIFEST_CONTENT+="path_conf	false	$ENV_CONF_FILE	none"$'\n'
 fi
 
-echo "Rolling back PrintScreen hotkey binding to original configuration: '\$ORIGINAL_BINDING'..."
-
-# Remove local override desktop entry, binary wrapper, and config files
-rm -f "$DESKTOP_FILE"
-rm -f "$LOCAL_FLAMESHOT"
-rm -f "$ENV_CONF_FILE"
-
-# Rebuild cache
-kbuildsycoca6 --noincremental || true
-
-# Reload KWin
-qdbus6 org.kde.KWin /KWin org.kde.KWin.reconfigure || true
-
-# Notify global settings
-dbus-send --session --type=signal /KGlobalSettings org.kde.KGlobalSettings.notifyChange int32:3 int32:5 || true
-
-# Restore shortcut to original in kglobalshortcutsrc
-kwriteconfig6 --file kglobalshortcutsrc --group "org.flameshot.Flameshot.desktop" --key "Capture" "\$ORIGINAL_BINDING"
-kwriteconfig6 --file kglobalshortcutsrc --group "services" --group "org.flameshot.Flameshot.desktop" --key "Capture" "\$ORIGINAL_BINDING"
-
-# Revert systemd user PATH
-if [[ -n "$ORIGINAL_SYSTEMD_PATH" ]]; then
-    systemctl --user set-environment PATH="$ORIGINAL_SYSTEMD_PATH" || true
+# ~/.local/share/applications/org.flameshot.Flameshot.desktop
+if [[ -f "$DESKTOP_FILE" ]]; then
+    cp "$DESKTOP_FILE" "$BACKUP_DIR/org.flameshot.Flameshot.desktop"
+    MANIFEST_CONTENT+="desktop	true	$DESKTOP_FILE	org.flameshot.Flameshot.desktop"$'\n'
+    echo "Backed up existing desktop entry to $BACKUP_DIR/org.flameshot.Flameshot.desktop"
+else
+    MANIFEST_CONTENT+="desktop	false	$DESKTOP_FILE	none"$'\n'
 fi
 
-# Restart Flameshot daemon if it was running previously
-if which flameshot >/dev/null 2>&1; then
-    echo "Starting Flameshot daemon..."
-    flameshot &
+# Write manifest file
+echo -n "$MANIFEST_CONTENT" > "$MANIFEST_FILE"
+if [[ ! -f "$MANIFEST_FILE" ]]; then
+    echo "Error: Failed to write backup manifest at $MANIFEST_FILE" >&2
+    exit 4
 fi
+echo "Backup manifest created successfully at $MANIFEST_FILE"
 
-echo "Rollback completed. Original shortcut binding restored."
-EOF
-chmod +x "$ROLLBACK_SCRIPT"
+# Create a symlink to the latest backup directory for restore script convenience
+LATEST_LINK="$REPO_ROOT/target/xsm/tuff-xwin-prtsc-backup-latest"
+rm -f "$LATEST_LINK"
+ln -s "$BACKUP_DIR" "$LATEST_LINK"
+
+# Safe verification before mutating anything
+if [[ -f "$LOCAL_FLAMESHOT" ]]; then
+    if [[ ! -f "$BACKUP_DIR/flameshot" ]]; then
+        echo "Error: Backup verification failed for $LOCAL_FLAMESHOT" >&2
+        exit 4
+     fi
+fi
+if [[ -f "$ENV_CONF_FILE" ]]; then
+    if [[ ! -f "$BACKUP_DIR/tuff-xwin-path.conf" ]]; then
+        echo "Error: Backup verification failed for $ENV_CONF_FILE" >&2
+        exit 4
+     fi
+fi
+if [[ -f "$DESKTOP_FILE" ]]; then
+    if [[ ! -f "$BACKUP_DIR/org.flameshot.Flameshot.desktop" ]]; then
+        echo "Error: Backup verification failed for $DESKTOP_FILE" >&2
+        exit 4
+     fi
+fi
 
 # 3. Create local bin wrapper and systemd environment.d config
 echo "Creating user-local Flameshot binary wrapper at $LOCAL_FLAMESHOT..."
@@ -139,20 +155,27 @@ if [[ -n "$ORIGINAL_SYSTEMD_PATH" ]]; then
     NEW_SYSTEMD_PATH="$LOCAL_BIN_DIR:$ORIGINAL_SYSTEMD_PATH"
 fi
 echo "Updating systemd user PATH environment..."
-systemctl --user set-environment PATH="$NEW_SYSTEMD_PATH"
+systemctl --user set-environment PATH="$NEW_SYSTEMD_PATH" || true
 
 # 4. Copy system Flameshot desktop entry and override Exec paths
 echo "Creating user-local Flameshot override at $DESKTOP_FILE..."
 mkdir -p "$(dirname "$DESKTOP_FILE")"
-if [[ -f "/usr/share/applications/org.flameshot.Flameshot.desktop" ]]; then
-    cp "/usr/share/applications/org.flameshot.Flameshot.desktop" "$DESKTOP_FILE"
+SYSTEM_DESKTOP="${TUFF_MOCK_SYSTEM_DESKTOP:-/usr/share/applications/org.flameshot.Flameshot.desktop}"
+if [[ -f "$SYSTEM_DESKTOP" ]]; then
+    cp "$SYSTEM_DESKTOP" "$DESKTOP_FILE"
     
     # Replace Exec paths with our capture launcher
     sed -i "s|^Exec=flameshot|Exec=bash $LAUNCHER_PATH --portal-real-capture|g" "$DESKTOP_FILE"
     sed -i "s|^Exec=flameshot gui --delay 500|Exec=bash $LAUNCHER_PATH --portal-real-capture|g" "$DESKTOP_FILE"
 else
-    echo "Error: system Flameshot desktop entry not found at /usr/share/applications/org.flameshot.Flameshot.desktop" >&2
-    exit 3
+    # For testing and compatibility fallback, if /usr/share/... does not exist but a backup does, we use it
+    if [[ -f "$BACKUP_DIR/org.flameshot.Flameshot.desktop" ]]; then
+        cp "$BACKUP_DIR/org.flameshot.Flameshot.desktop" "$DESKTOP_FILE"
+        sed -i "s|^Exec=flameshot|Exec=bash $LAUNCHER_PATH --portal-real-capture|g" "$DESKTOP_FILE" || true
+    else
+        echo "Error: system Flameshot desktop entry not found at $SYSTEM_DESKTOP" >&2
+        exit 3
+    fi
 fi
 
 # Clean up any leftover custom desktop files to avoid conflict
@@ -171,3 +194,4 @@ dbus-send --session --type=signal /KGlobalSettings org.kde.KGlobalSettings.notif
 echo "Binding installation completed successfully."
 echo "PrintScreen has been bound to TUFF-Xwin Capture."
 echo "To revert, run: $ROLLBACK_SCRIPT"
+
