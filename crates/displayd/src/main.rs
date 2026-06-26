@@ -2264,17 +2264,20 @@ mod tests {
                     std::fs::set_permissions(&file, perms).unwrap();
                 }
 
-                // Copy scripts to temp repo to run them
+                // Copy only required scripts to temp repo to reduce CIFS I/O latency
                 let src_scripts_dir = get_scripts_dir();
                 let dst_scripts_dir = repo.join("scripts");
                 std::fs::create_dir_all(&dst_scripts_dir).unwrap();
 
-                for entry in std::fs::read_dir(src_scripts_dir).unwrap() {
-                    let entry = entry.unwrap();
-                    let path = entry.path();
-                    if path.is_file() {
-                        let file_name = path.file_name().unwrap();
-                        std::fs::copy(&path, dst_scripts_dir.join(file_name)).unwrap();
+                let needed_scripts = &[
+                    "install-user-prtsc-tuff-capture-binding.sh",
+                    "restore-user-prtsc-binding.sh",
+                    "tuff-xwin-capture-once.sh",
+                ];
+                for name in needed_scripts {
+                    let src = src_scripts_dir.join(name);
+                    if src.exists() {
+                        std::fs::copy(&src, dst_scripts_dir.join(name)).unwrap();
                     }
                 }
 
