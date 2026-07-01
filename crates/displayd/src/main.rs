@@ -2078,6 +2078,7 @@ mod tests {
 
     #[cfg(test)]
     mod launcher_and_binding_tests {
+        // Phase 2-M: Verification tests for launcher scripts and PrtSc key binding installation/restoration behaviors.
         use std::path::PathBuf;
         use std::process::Command;
 

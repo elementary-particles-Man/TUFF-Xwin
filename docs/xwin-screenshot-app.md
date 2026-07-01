@@ -82,3 +82,21 @@ xwin-screenshot (App CLI)
 
 ### 日本語
 - **KDE/Qt/Spectacle環境混在問題**: KDE デスクトップ環境の一部コンポーネントや、Spectacle・Flameshot などの単体スクリーンショットツールが混在する場合、グローバルショートカットデーモン（KGlobalAccelなど）のバインディング競合により、キーイベントの奪い合いや遅延が発生する場合があります。これは KDE/Qt 側の環境設定・競合に起因するものであり、TUFF-Xwin の不具合ではありません。
+
+---
+
+## PrtSc Shortcut Integration & Rollback / PrtSc ショートカットの統合と復元
+
+### English
+- **Backup Manifest & Rollback**:
+  - The installation script (`install-user-prtsc-tuff-capture-binding.sh`) creates a timestamped backup directory at `target/xsm/tuff-xwin-prtsc-backup-{timestamp}` along with `manifest.tsv`.
+  - The restore script (`restore-user-prtsc-binding.sh`) parses this manifest to recover original hotkey bindings, copy back modified files, and restore the systemd user `PATH` environment variable.
+- **Marker-Gated Cleanup**:
+  - For files that did not exist prior to installation (`existed=false`), the rollback script checks for specific TUFF markers (e.g. `# TUFF-Xwin Flameshot wrapper override` or `# TUFF-Xwin environment override`) before deleting them. This prevents accidental loss of user-created configurations.
+
+### 日本語
+- **バックアップマニフェストと復元 (Rollback)**:
+  - インストールスクリプト（`install-user-prtsc-tuff-capture-binding.sh`）は、`target/xsm/tuff-xwin-prtsc-backup-{timestamp}` にタイムスタンプ付きの退避先を作成し、バックアップしたファイルのメタデータを記録した `manifest.tsv` を生成します。
+  - 復元スクリプト（`restore-user-prtsc-binding.sh`）はこのマニフェストをパースし、元のグローバルホットキー、退避ファイル、および systemd ユーザー環境変数 `PATH` を正確に復元します。
+- **マーカーベースの安全な削除 (Marker-Gated Cleanup)**:
+  - インストール時に新規生成されたファイル（`existed=false`）については、復元スクリプトが TUFF の専用マーカー（例: `# TUFF-Xwin Flameshot wrapper override` や `# TUFF-Xwin environment override` など）の存在を確認した上で削除します。マーカーのないユーザー独自のカスタムファイルは安全のため削除せず保護します。

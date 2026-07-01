@@ -101,7 +101,8 @@ else
     MANIFEST_CONTENT+="desktop	false	$DESKTOP_FILE	none"$'\n'
 fi
 
-# Write manifest file
+# Write backup manifest
+# Schema: file_id <tab> existed <tab> dest_path <tab> backup_file
 echo -n "$MANIFEST_CONTENT" > "$MANIFEST_FILE"
 if [[ ! -f "$MANIFEST_FILE" ]]; then
     echo "Error: Failed to write backup manifest at $MANIFEST_FILE" >&2

@@ -109,3 +109,6 @@ Primary buttons use dynamic coloring:
 - **Don't:** Add rounded corners greater than `{rounded.lg}` to avoid looking overly cartoonish.
 - **Do:** Highlight the final path of the saved PNG image clearly in notifications and command-line outputs for developer visibility.
 - **Don't:** Attempt to display any action dialogs or user prompts unless the capture socket connection is fully established and valid.
+
+## Development Milestones
+- **Phase 2-L Fixed Point:** Dogfood capture boundary lock has been fully implemented and verified, securing stable, robust shortcut interception and rollback behaviors.

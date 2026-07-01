@@ -2,10 +2,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BACKUP_FILE="$REPO_ROOT/target/xsm/tuff-xwin-prtsc-backup.txt"
 
-# Find backup directory. We first look for target/xsm/tuff-xwin-prtsc-backup-latest symlink,
-# if not found, we look for the newest backup directory.
+# Find backup directory using target/xsm/tuff-xwin-prtsc-backup-latest symlink or selecting the newest backup directory.
 BACKUP_DIR=""
 LATEST_LINK="$REPO_ROOT/target/xsm/tuff-xwin-prtsc-backup-latest"
 
@@ -40,7 +38,7 @@ fi
 
 echo "Using backup manifest from $MANIFEST_FILE"
 
-# Parse manifest and restore or delete files
+# Parse backup manifest
 # Schema: file_id <tab> existed <tab> dest_path <tab> backup_file
 while IFS=$'\t' read -r file_id existed dest_path backup_file || [[ -n "$file_id" ]]; do
     # Skip empty lines

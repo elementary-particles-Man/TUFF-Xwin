@@ -227,3 +227,4 @@
   - **wlr-screencopy 非依存**: `wlr-screencopy-unstable-v1 unsupported` は標準コンポジタ用の代替検証メッセージであり、TUFF-Xwin システム自体のエラーではありません。
   - **KDEポータルの操作**: KDE画面共有ポータルで表示される左上のモニター型番タイル（例: `HP Inc. HP 27f 4k`）が「全画面」キャプチャ用ボタンです。これを選択して「共有」を押すのが正しい操作です。プレビュー画像が白く抜けるのはセキュリティ隔離のための正常な動作です。
 - **ホットキーバインド変更の安全化**: `install-user-prtsc-tuff-capture-binding.sh` 和 `restore-user-prtsc-binding.sh` の双方でバックアップ存在チェックを強制。ロールバック時はハードコード値ではなくバックアップファイルから動的に元のキー設定を読み込み、バックアップがない場合は処理を安全に中断します。
+- **Phase 2-L Main Fixed HEAD**: Locked dogfood capture boundary at HEAD `9ea8e3452952d969f469b21d603b6d1db7fd7a41`. (`9ea8e3452952d969f469b21d603b6d1db7fd7a41` を Phase 2-L の固定HEADとして確定しました。)
