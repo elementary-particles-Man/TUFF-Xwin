@@ -112,3 +112,4 @@ Primary buttons use dynamic coloring:
 
 ## Development Milestones
 - **Phase 2-L Fixed Point:** Dogfood capture boundary lock has been fully implemented and verified, securing stable, robust shortcut interception and rollback behaviors.
+- **Phase 2-N Fixed Point:** Normalized screenshot checkpoint status chronology, separating historical milestones from current fixed states.
