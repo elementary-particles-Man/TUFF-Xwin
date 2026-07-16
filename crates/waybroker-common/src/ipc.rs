@@ -104,6 +104,8 @@ pub enum DisplayCommand {
         selection: WaylandSelectionState,
         surfaces: Vec<SurfaceSnapshot>,
         #[serde(default)]
+        scene_epoch: u64,
+        #[serde(default)]
         scene_generation: u64,
     },
     GetSceneSnapshot {
@@ -429,6 +431,11 @@ pub struct CommittedSceneState {
     #[serde(default)]
     pub selection: WaylandSelectionState,
     pub surfaces: Vec<SurfaceSnapshot>,
+    #[serde(default)]
+    pub scene_epoch: u64,
+    #[serde(default)]
+    pub scene_generation: u64,
+    #[serde(default)]
     pub commit_id: u64,
     pub unix_timestamp: u64,
 }

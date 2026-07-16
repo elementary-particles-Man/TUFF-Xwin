@@ -131,6 +131,7 @@ mod tests {
                         ..Default::default()
                     },
                 ],
+                scene_epoch: 42,
                 scene_generation: 1,
             }),
         );
@@ -209,6 +210,8 @@ mod tests {
                         },
                         ..Default::default()
                     }],
+                    scene_epoch: 42,
+                    scene_generation: 1,
                     commit_id: 7,
                     unix_timestamp: 1_778_000_001,
                 }),

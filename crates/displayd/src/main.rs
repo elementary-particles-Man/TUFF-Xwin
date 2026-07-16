@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::HashMap,
     env, fs,
@@ -20,7 +19,6 @@ use waybroker_common::{
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
-static LAST_SCENE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -336,18 +334,39 @@ async fn handle_display_command(
             println!("service=displayd op=set_mode event=success output={output} mode={:?}", mode);
             Ok(DisplayEvent::ModeApplied { output, mode })
         }
-        DisplayCommand::CommitScene { target, focus, selection, surfaces, scene_generation } => {
-            let last_generation = LAST_SCENE_GENERATION.load(Ordering::Acquire);
-            if scene_generation_is_stale(last_generation, scene_generation) {
+        DisplayCommand::CommitScene {
+            target,
+            focus,
+            selection,
+            surfaces,
+            scene_epoch,
+            scene_generation,
+        } => {
+            if scene_generation_is_stale(
+                state.last_scene_epoch,
+                state.last_scene_generation,
+                scene_epoch,
+                scene_generation,
+            ) {
                 return Ok(DisplayEvent::Rejected {
                     reason: format!(
-                        "stale scene generation {}; latest is {}",
-                        scene_generation, last_generation
+                        "stale scene epoch {} generation {}; latest is epoch {} generation {}",
+                        scene_epoch,
+                        scene_generation,
+                        state.last_scene_epoch,
+                        state.last_scene_generation
                     ),
                 });
             }
-            if scene_generation > last_generation {
-                LAST_SCENE_GENERATION.store(scene_generation, Ordering::Release);
+            if scene_generation != 0 {
+                if scene_epoch > state.last_scene_epoch {
+                    state.last_scene_epoch = scene_epoch;
+                    state.last_scene_generation = scene_generation;
+                } else if scene_epoch == state.last_scene_epoch
+                    && scene_generation > state.last_scene_generation
+                {
+                    state.last_scene_generation = scene_generation;
+                }
             }
             let start_time = std::time::Instant::now();
             let mut skipped = false;
@@ -539,6 +558,8 @@ async fn handle_display_command(
                 focus: focus.clone(),
                 selection: selection.clone(),
                 surfaces: surfaces.clone(),
+                scene_epoch,
+                scene_generation,
                 commit_id,
                 unix_timestamp: now_unix_timestamp(),
             };
@@ -659,13 +680,22 @@ async fn handle_display_command(
     }
 }
 
-fn scene_generation_is_stale(last_generation: u64, incoming_generation: u64) -> bool {
-    incoming_generation != 0 && incoming_generation < last_generation
+fn scene_generation_is_stale(
+    last_epoch: u64,
+    last_generation: u64,
+    incoming_epoch: u64,
+    incoming_generation: u64,
+) -> bool {
+    incoming_generation != 0
+        && (incoming_epoch < last_epoch
+            || (incoming_epoch == last_epoch && incoming_generation < last_generation))
 }
 
 #[derive(Debug)]
 struct DisplayState {
     last_scene: Option<CommittedSceneState>,
+    last_scene_epoch: u64,
+    last_scene_generation: u64,
     next_commit_id: u64,
     snapshot_path: PathBuf,
     active_recordings: HashMap<String, RecordingState>,
@@ -1372,6 +1402,10 @@ impl DisplayState {
         let _ = ensure_runtime_dir()?;
         let snapshot_path = session_artifact_path(session_instance_id, "scene-snapshot");
         let last_scene = load_scene_snapshot(&snapshot_path)?;
+        let (last_scene_epoch, last_scene_generation) = last_scene
+            .as_ref()
+            .map(|scene| (scene.scene_epoch, scene.scene_generation))
+            .unwrap_or((0, 0));
         let next_commit_id =
             last_scene.as_ref().map(|scene| scene.commit_id.saturating_add(1)).unwrap_or(1);
 
@@ -1397,6 +1431,8 @@ impl DisplayState {
 
         Ok(Self {
             last_scene,
+            last_scene_epoch,
+            last_scene_generation,
             next_commit_id,
             snapshot_path,
             active_recordings: HashMap::new(),
@@ -1420,6 +1456,10 @@ impl DisplayState {
             format!("failed to write scene snapshot {}", self.snapshot_path.display())
         })?;
         self.next_commit_id = scene.commit_id.saturating_add(1);
+        if scene.scene_generation != 0 {
+            self.last_scene_epoch = scene.scene_epoch;
+            self.last_scene_generation = scene.scene_generation;
+        }
         self.last_scene = Some(scene);
         Ok(())
     }
@@ -1437,6 +1477,8 @@ impl DisplayState {
     fn new_test() -> Self {
         Self {
             last_scene: None,
+            last_scene_epoch: 0,
+            last_scene_generation: 0,
             next_commit_id: 1,
             snapshot_path: std::env::temp_dir().join("scene-snapshot"),
             active_recordings: HashMap::new(),
@@ -1711,10 +1753,16 @@ mod tests {
 
     #[test]
     fn rejects_only_older_nonzero_scene_generations() {
-        assert!(scene_generation_is_stale(8, 7));
-        assert!(!scene_generation_is_stale(8, 8));
-        assert!(!scene_generation_is_stale(8, 9));
-        assert!(!scene_generation_is_stale(8, 0));
+        assert!(scene_generation_is_stale(2, 8, 1, 7));
+        assert!(!scene_generation_is_stale(2, 8, 2, 8));
+        assert!(!scene_generation_is_stale(2, 8, 2, 9));
+        assert!(!scene_generation_is_stale(2, 8, 2, 0));
+        assert!(!scene_generation_is_stale(2, 8, 3, 1));
+    }
+
+    #[test]
+    fn accepts_newer_epoch_after_restart() {
+        assert!(!scene_generation_is_stale(10, 100, 11, 1));
     }
 
     #[tokio::test]
@@ -1767,6 +1815,7 @@ mod tests {
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![],
+                scene_epoch: 0,
                 scene_generation: 0,
             },
             ServiceRole::Compd,
@@ -2926,6 +2975,7 @@ exit 0
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![surf1.clone()],
+                scene_epoch: 0,
                 scene_generation: 0,
             },
             ServiceRole::Compd,
@@ -2949,6 +2999,7 @@ exit 0
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![surf1],
+                scene_epoch: 0,
                 scene_generation: 0,
             },
             ServiceRole::Compd,
@@ -2995,6 +3046,7 @@ exit 0
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![fullscreen_surf],
+                scene_epoch: 0,
                 scene_generation: 0,
             },
             ServiceRole::Compd,

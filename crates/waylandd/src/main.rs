@@ -3,7 +3,7 @@ use std::{
     io::{BufReader, Read, Write},
     path::{Path, PathBuf},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
@@ -307,6 +307,7 @@ struct Config {
     bind_wayland_display: Option<String>,
     use_vulkan: bool,
     session_instance_id: String,
+    scene_epoch: u64,
     wire_headless_test: bool,
     wire_test_socket: Option<PathBuf>,
     diagnostic_only: bool,
@@ -322,6 +323,7 @@ impl Config {
         // waylandd currently tracks protocol/state; GPU scene work is owned by
         // compd/displayd until a real buffer import path is available here.
         config.session_instance_id = DEFAULT_SESSION_INSTANCE_ID.to_string();
+        config.scene_epoch = generate_scene_epoch();
         config.diagnostic_only = true; // default behavior for safety
 
         while let Some(arg) = args.next() {
@@ -401,9 +403,9 @@ async fn serve_ipc(
     vulkan: Option<&VulkanBackend>,
 ) -> Result<()> {
     let _wayland_display = if let Some(name) = config.bind_wayland_display.as_deref() {
-        Some(bind_wayland_display_socket_ext(name, config.production)?)
+        Some(bind_wayland_display_socket_ext(name, config.production, config.scene_epoch)?)
     } else if let Some(path) = config.headless_socket.as_ref() {
-        Some(bind_wayland_display_socket_absolute(path, config.production)?)
+        Some(bind_wayland_display_socket_absolute(path, config.production, config.scene_epoch)?)
     } else {
         None
     };
@@ -1017,7 +1019,11 @@ fn format_outputs(outputs: &[OutputMode]) -> String {
 }
 
 #[cfg(unix)]
-fn bind_wayland_display_socket_ext(name: &str, production: bool) -> Result<WaylandDisplaySocket> {
+fn bind_wayland_display_socket_ext(
+    name: &str,
+    production: bool,
+    scene_epoch: u64,
+) -> Result<WaylandDisplaySocket> {
     let mut candidates = vec![name.to_string()];
     if let Some((prefix, display_num)) = split_wayland_display_name(name) {
         candidates.push(format!("{prefix}{}", display_num + 1));
@@ -1028,7 +1034,7 @@ fn bind_wayland_display_socket_ext(name: &str, production: bool) -> Result<Wayla
     for candidate in candidates {
         let path = resolve_wayland_display_path(&candidate)?;
         let lock_path = wayland_lock_path(&path);
-        match bind_single_wayland_display_socket_ext(&path, &lock_path, production) {
+        match bind_single_wayland_display_socket_ext(&path, &lock_path, production, scene_epoch) {
             Ok(socket) => return Ok(socket),
             Err(err) => {
                 println!(
@@ -1049,9 +1055,10 @@ fn bind_wayland_display_socket_ext(name: &str, production: bool) -> Result<Wayla
 fn bind_wayland_display_socket_absolute(
     path: &Path,
     production: bool,
+    scene_epoch: u64,
 ) -> Result<WaylandDisplaySocket> {
     let lock_path = wayland_lock_path(path);
-    bind_single_wayland_display_socket_ext(path, &lock_path, production)
+    bind_single_wayland_display_socket_ext(path, &lock_path, production, scene_epoch)
 }
 
 #[cfg(unix)]
@@ -1059,6 +1066,7 @@ fn bind_single_wayland_display_socket_ext(
     path: &Path,
     lock_path: &Path,
     production: bool,
+    scene_epoch: u64,
 ) -> Result<WaylandDisplaySocket> {
     if path.exists() {
         bail!("Wayland display socket already exists: {}", path.display());
@@ -1097,7 +1105,7 @@ fn bind_single_wayland_display_socket_ext(
                             );
                             let client_path = log_path.clone();
                             thread::spawn(move || {
-                                if let Err(err) = handle_production_client(stream) {
+                                if let Err(err) = handle_production_client(stream, scene_epoch) {
                                     eprintln!(
                                         "service=waylandd op=wayland_display event=production_client_error path={} reason={:?}",
                                         client_path.display(),
@@ -1139,7 +1147,7 @@ fn bind_single_wayland_display_socket_ext(
     Ok(WaylandDisplaySocket { path: path.to_path_buf(), lock_path: lock_path.to_path_buf() })
 }
 
-fn handle_production_client(stream: UnixStream) -> Result<()> {
+fn handle_production_client(stream: UnixStream, scene_epoch: u64) -> Result<()> {
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let mut core = wayland_wire::core::HeadlessWireCore::default();
     core.set_defer_frame_callbacks(true);
@@ -1149,7 +1157,7 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
         bail!("production Wayland requires at least one real displayd output");
     }
     let mut registry_guard =
-        ClientRegistryGuard { client_id, outputs: outputs.clone(), finalized: false };
+        ClientRegistryGuard { client_id, outputs: outputs.clone(), scene_epoch, finalized: false };
     {
         for output in &outputs {
             core.add_real_output(&output.name, output.width as i32, output.height as i32);
@@ -1199,7 +1207,7 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
                     }
                     if is_commit {
                         upsert_client_scene(client_id, &core);
-                        let _presented = commit_canonical_scene(&outputs)?;
+                        let _presented = commit_canonical_scene(&outputs, scene_epoch)?;
                         let callbacks = core.take_frame_callbacks(committed_surface);
                         for callback_id in callbacks {
                             let mut payload = vec![0u8; 4];
@@ -1231,6 +1239,7 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
 struct ClientRegistryGuard {
     client_id: u64,
     outputs: Vec<OutputMode>,
+    scene_epoch: u64,
     finalized: bool,
 }
 
@@ -1242,7 +1251,7 @@ impl ClientRegistryGuard {
         remove_client_from_global_registry(self.client_id);
         remove_client_scene(self.client_id);
         self.finalized = true;
-        commit_canonical_scene(&self.outputs).map(|_| ()).map_err(|err| {
+        commit_canonical_scene(&self.outputs, self.scene_epoch).map(|_| ()).map_err(|err| {
             eprintln!(
                 "service=waylandd op=canonical_recommit event=failed client_id={} reason={:?}",
                 self.client_id, err
@@ -1347,6 +1356,10 @@ struct SceneOrderKey {
 
 fn canonical_scene_surfaces() -> (u64, Vec<SurfaceSnapshot>) {
     let scene = CANONICAL_SCENE.lock().unwrap();
+    canonical_scene_surfaces_from(&scene)
+}
+
+fn canonical_scene_surfaces_from(scene: &CanonicalSceneState) -> (u64, Vec<SurfaceSnapshot>) {
     let surfaces: Vec<_> = scene.clients.values().flat_map(|items| items.iter().cloned()).collect();
     (scene.generation, order_scene_surfaces(surfaces))
 }
@@ -1364,7 +1377,7 @@ fn order_scene_surfaces(mut surfaces: Vec<SurfaceSnapshot>) -> Vec<SurfaceSnapsh
     surfaces
 }
 
-fn commit_canonical_scene(outputs: &[OutputMode]) -> Result<DisplayEvent> {
+fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<DisplayEvent> {
     let (generation, surfaces) = {
         let scene = CANONICAL_SCENE.lock().unwrap();
         match scene.pending.as_ref() {
@@ -1375,27 +1388,55 @@ fn commit_canonical_scene(outputs: &[OutputMode]) -> Result<DisplayEvent> {
                 );
                 (pending.generation, pending.surfaces.clone())
             }
-            _ => {
-                drop(scene);
-                canonical_scene_surfaces()
-            }
+            _ => canonical_scene_surfaces_from(&scene),
         }
     };
-    match commit_production_scene(&surfaces, generation, outputs) {
+    match commit_production_scene(&surfaces, generation, scene_epoch, outputs) {
         Ok(event) => {
             let mut scene = CANONICAL_SCENE.lock().unwrap();
-            if scene.pending.as_ref().map(|pending| pending.generation) == Some(generation) {
+            if scene
+                .pending
+                .as_ref()
+                .map(|pending| should_clear_pending_commit(generation, pending.generation))
+                .unwrap_or(false)
+            {
                 scene.pending = None;
             }
             Ok(event)
         }
         Err(err) => {
             let mut scene = CANONICAL_SCENE.lock().unwrap();
-            scene.pending =
-                Some(PendingCanonicalCommit { generation, surfaces, reason: err.to_string() });
+            let current_generation = scene.generation;
+            let current_pending_generation =
+                scene.pending.as_ref().map(|pending| pending.generation).unwrap_or(0);
+            if should_store_pending_commit(
+                generation,
+                current_generation,
+                current_pending_generation,
+            ) {
+                scene.pending =
+                    Some(PendingCanonicalCommit { generation, surfaces, reason: err.to_string() });
+            }
             Err(err)
         }
     }
+}
+
+fn should_store_pending_commit(
+    failed_generation: u64,
+    current_generation: u64,
+    current_pending_generation: u64,
+) -> bool {
+    failed_generation >= current_generation && failed_generation >= current_pending_generation
+}
+
+fn should_clear_pending_commit(success_generation: u64, pending_generation: u64) -> bool {
+    pending_generation <= success_generation
+}
+
+fn generate_scene_epoch() -> u64 {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
+    nanos ^ ((std::process::id() as u64) << 32)
 }
 
 fn read_shm_buffer(
@@ -1430,6 +1471,7 @@ fn read_shm_buffer(
 fn commit_production_scene(
     surfaces: &[SurfaceSnapshot],
     scene_generation: u64,
+    scene_epoch: u64,
     outputs: &[OutputMode],
 ) -> Result<DisplayEvent> {
     let mut stream =
@@ -1443,6 +1485,7 @@ fn commit_production_scene(
             focus: FocusTarget::None,
             selection: WaylandSelectionState::default(),
             surfaces: surfaces.to_vec(),
+            scene_epoch,
             scene_generation,
         }),
     );
@@ -1843,7 +1886,7 @@ fn run_smoke_check() -> Result<()> {
     // Start production server in background
     let s_path = socket_path.clone();
     let handle = thread::spawn(move || {
-        let display = bind_wayland_display_socket_absolute(&s_path, true).unwrap();
+        let display = bind_wayland_display_socket_absolute(&s_path, true, 0).unwrap();
         // Keep the lock alive for the duration of the test
         std::thread::sleep(std::time::Duration::from_secs(5));
         drop(display);
@@ -1876,7 +1919,11 @@ fn run_smoke_check() -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn bind_wayland_display_socket_ext(_name: &str, _production: bool) -> Result<WaylandDisplaySocket> {
+fn bind_wayland_display_socket_ext(
+    _name: &str,
+    _production: bool,
+    _scene_epoch: u64,
+) -> Result<WaylandDisplaySocket> {
     bail!("--bind-wayland-display is supported only on Unix platforms")
 }
 
@@ -1950,7 +1997,10 @@ impl Drop for WaylandDisplaySocket {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_wayland_command, mock_surface_registry, socket_lock_is_stale};
+    use super::{
+        handle_wayland_command, mock_surface_registry, should_clear_pending_commit,
+        should_store_pending_commit, socket_lock_is_stale,
+    };
     use std::fs;
     use waybroker_common::{
         FocusTarget, SurfacePlacement, SurfaceSnapshot, WaylandCommand, WaylandEvent,
@@ -2014,6 +2064,16 @@ mod tests {
             Some("konsole-primary-v1")
         );
         assert_eq!(registry.selection.primary_selection_source_serial, Some(13));
+    }
+
+    #[test]
+    fn pending_replay_only_tracks_latest_generation() {
+        assert!(should_store_pending_commit(11, 11, 10));
+        assert!(!should_store_pending_commit(10, 11, 10));
+        assert!(!should_store_pending_commit(11, 12, 10));
+        assert!(!should_store_pending_commit(10, 10, 11));
+        assert!(should_clear_pending_commit(11, 10));
+        assert!(!should_clear_pending_commit(10, 11));
     }
 
     #[test]

@@ -549,6 +549,7 @@ fn commit_scene_to_displayd(scene: &CompdScene) -> Result<SceneCommitReceipt> {
             focus: scene.focus.clone(),
             selection: scene.selection.clone(),
             surfaces: scene.surfaces.clone(),
+            scene_epoch: 0,
             scene_generation: 0,
         }),
     );
@@ -1064,6 +1065,8 @@ mod tests {
                 },
                 ..Default::default()
             }],
+            scene_epoch: 0,
+            scene_generation: 0,
             commit_id: 3,
             unix_timestamp: 1_778_000_100,
         });
@@ -1411,6 +1414,8 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            scene_epoch: 0,
+            scene_generation: 0,
             commit_id: 10,
             unix_timestamp: 1234567,
         };
