@@ -202,7 +202,31 @@ mod tests {
             selection: super::X11SelectionState::default(),
             windows: vec![],
         };
-
         assert_eq!(scene.focus_target(), FocusTarget::None);
+    }
+
+    #[test]
+    fn test_phase4_x11_clipboard_and_selection_mapping() {
+        let scene = sample_rootless_scene();
+        let selection = scene.selection_state();
+
+        assert_eq!(selection.clipboard_owner.as_deref(), Some("xterm-1"));
+        assert_eq!(selection.clipboard_payload_id.as_deref(), Some("x11-clipboard-v1"));
+        assert_eq!(selection.clipboard_source_serial, Some(101));
+        assert_eq!(selection.primary_selection_owner.as_deref(), Some("xterm-1"));
+        assert_eq!(selection.primary_selection_payload_id.as_deref(), Some("x11-primary-v1"));
+        assert_eq!(selection.primary_selection_source_serial, Some(102));
+    }
+
+    #[test]
+    fn test_phase4_x11_window_properties_and_ewmh() {
+        let scene = sample_rootless_scene();
+        let snapshots = scene.to_surface_snapshots();
+
+        let dock_snap =
+            snapshots.iter().find(|s| s.id == "dock-1").expect("dock window exists");
+        assert!(dock_snap.placement.visible);
+        assert_eq!(dock_snap.placement.width, 1920);
+        assert_eq!(dock_snap.placement.height, 32);
     }
 }
