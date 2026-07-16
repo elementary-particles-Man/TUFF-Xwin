@@ -944,7 +944,7 @@ mod tests {
         let mut p1 = vec![0u8; 8];
         LittleEndian::write_u32(&mut p1[0..4], 12); // xdg_surface id
         LittleEndian::write_u32(&mut p1[4..8], 10); // wl_surface id
-        core.dispatch(WaylandMessage::new(WaylandObjectId(11), WaylandOpcode(3), p1)).unwrap();
+        core.dispatch(WaylandMessage::new(WaylandObjectId(11), WaylandOpcode(2), p1)).unwrap();
 
         // 2. Get toplevel
         let mut p2 = vec![0u8; 4];

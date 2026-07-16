@@ -131,6 +131,7 @@ mod tests {
                         ..Default::default()
                     },
                 ],
+                scene_generation: 1,
             }),
         );
 

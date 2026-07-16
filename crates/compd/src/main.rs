@@ -549,6 +549,7 @@ fn commit_scene_to_displayd(scene: &CompdScene) -> Result<SceneCommitReceipt> {
             focus: scene.focus.clone(),
             selection: scene.selection.clone(),
             surfaces: scene.surfaces.clone(),
+            scene_generation: 0,
         }),
     );
     send_json_line(&mut stream, &request).context("failed to send commit-scene to displayd")?;

@@ -103,6 +103,8 @@ pub enum DisplayCommand {
         #[serde(default)]
         selection: WaylandSelectionState,
         surfaces: Vec<SurfaceSnapshot>,
+        #[serde(default)]
+        scene_generation: u64,
     },
     GetSceneSnapshot {
         output: Option<String>,
@@ -551,6 +553,10 @@ pub struct SurfaceSnapshot {
     pub buffer_stride: u32,
     #[serde(default)]
     pub buffer_format: u32,
+    #[serde(default)]
+    pub layer_class: u32,
+    #[serde(default)]
+    pub creation_sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

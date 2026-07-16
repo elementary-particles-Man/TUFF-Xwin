@@ -17,8 +17,8 @@ use byteorder::ByteOrder;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 static GLOBAL_REGISTRY: Mutex<Option<SurfaceRegistrySnapshot>> = Mutex::new(None);
-static CANONICAL_SCENE: LazyLock<Mutex<std::collections::HashMap<u64, Vec<SurfaceSnapshot>>>> =
-    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+static CANONICAL_SCENE: LazyLock<Mutex<CanonicalSceneState>> =
+    LazyLock::new(|| Mutex::new(CanonicalSceneState::default()));
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
@@ -1148,7 +1148,8 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
     if outputs.is_empty() {
         bail!("production Wayland requires at least one real displayd output");
     }
-    let _registry_guard = ClientRegistryGuard { client_id, outputs: outputs.clone() };
+    let mut registry_guard =
+        ClientRegistryGuard { client_id, outputs: outputs.clone(), finalized: false };
     {
         for output in &outputs {
             core.add_real_output(&output.name, output.width as i32, output.height as i32);
@@ -1198,8 +1199,7 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
                     }
                     if is_commit {
                         upsert_client_scene(client_id, &core);
-                        let _presented =
-                            commit_production_scene(&canonical_scene_surfaces(), &outputs)?;
+                        let _presented = commit_canonical_scene(&outputs)?;
                         let callbacks = core.take_frame_callbacks(committed_surface);
                         for callback_id in callbacks {
                             let mut payload = vec![0u8; 4];
@@ -1224,19 +1224,44 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
             sync_core_to_global_registry(&core, client_id);
         }
     }
+    registry_guard.finalize()?;
     Ok(())
 }
 
 struct ClientRegistryGuard {
     client_id: u64,
     outputs: Vec<OutputMode>,
+    finalized: bool,
+}
+
+impl ClientRegistryGuard {
+    fn finalize(&mut self) -> Result<()> {
+        if self.finalized {
+            return Ok(());
+        }
+        remove_client_from_global_registry(self.client_id);
+        remove_client_scene(self.client_id);
+        self.finalized = true;
+        commit_canonical_scene(&self.outputs).map(|_| ()).map_err(|err| {
+            eprintln!(
+                "service=waylandd op=canonical_recommit event=failed client_id={} reason={:?}",
+                self.client_id, err
+            );
+            err
+        })
+    }
 }
 
 impl Drop for ClientRegistryGuard {
     fn drop(&mut self) {
-        remove_client_from_global_registry(self.client_id);
-        CANONICAL_SCENE.lock().unwrap().remove(&self.client_id);
-        let _ = commit_production_scene(&canonical_scene_surfaces(), &self.outputs);
+        if !self.finalized {
+            if let Err(err) = self.finalize() {
+                eprintln!(
+                    "service=waylandd op=canonical_recommit event=aborted_disconnect_failed client_id={} reason={:?}",
+                    self.client_id, err
+                );
+            }
+        }
     }
 }
 
@@ -1279,17 +1304,98 @@ fn production_scene_surfaces(
                 buffer_height: buffer.height.max(0) as u32,
                 buffer_stride: buffer.stride.max(0) as u32,
                 buffer_format: buffer.format,
+                layer_class: 0,
+                creation_sequence: id.0 as u64,
             })
         })
         .collect()
 }
 
 fn upsert_client_scene(client_id: u64, core: &wayland_wire::core::HeadlessWireCore) {
-    CANONICAL_SCENE.lock().unwrap().insert(client_id, production_scene_surfaces(client_id, core));
+    let mut scene = CANONICAL_SCENE.lock().unwrap();
+    scene.generation = scene.generation.saturating_add(1);
+    scene.clients.insert(client_id, production_scene_surfaces(client_id, core));
 }
 
-fn canonical_scene_surfaces() -> Vec<SurfaceSnapshot> {
-    CANONICAL_SCENE.lock().unwrap().values().flat_map(|surfaces| surfaces.iter().cloned()).collect()
+fn remove_client_scene(client_id: u64) {
+    let mut scene = CANONICAL_SCENE.lock().unwrap();
+    if scene.clients.remove(&client_id).is_some() {
+        scene.generation = scene.generation.saturating_add(1);
+    }
+}
+
+#[derive(Default)]
+struct CanonicalSceneState {
+    generation: u64,
+    clients: std::collections::BTreeMap<u64, Vec<SurfaceSnapshot>>,
+    pending: Option<PendingCanonicalCommit>,
+}
+
+struct PendingCanonicalCommit {
+    generation: u64,
+    surfaces: Vec<SurfaceSnapshot>,
+    reason: String,
+}
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct SceneOrderKey {
+    layer_class: u32,
+    z_index: i32,
+    creation_sequence: u64,
+    stable_surface_id: String,
+}
+
+fn canonical_scene_surfaces() -> (u64, Vec<SurfaceSnapshot>) {
+    let scene = CANONICAL_SCENE.lock().unwrap();
+    let surfaces: Vec<_> = scene.clients.values().flat_map(|items| items.iter().cloned()).collect();
+    (scene.generation, order_scene_surfaces(surfaces))
+}
+
+fn order_scene_surfaces(mut surfaces: Vec<SurfaceSnapshot>) -> Vec<SurfaceSnapshot> {
+    surfaces.sort_by_key(|surface| SceneOrderKey {
+        layer_class: surface.layer_class,
+        z_index: surface.placement.z,
+        creation_sequence: surface.creation_sequence,
+        stable_surface_id: surface.id.clone(),
+    });
+    for (z, surface) in surfaces.iter_mut().enumerate() {
+        surface.placement.z = z as i32;
+    }
+    surfaces
+}
+
+fn commit_canonical_scene(outputs: &[OutputMode]) -> Result<DisplayEvent> {
+    let (generation, surfaces) = {
+        let scene = CANONICAL_SCENE.lock().unwrap();
+        match scene.pending.as_ref() {
+            Some(pending) if pending.generation >= scene.generation => {
+                eprintln!(
+                    "service=waylandd op=canonical_recommit event=retry generation={} reason={}",
+                    pending.generation, pending.reason
+                );
+                (pending.generation, pending.surfaces.clone())
+            }
+            _ => {
+                drop(scene);
+                canonical_scene_surfaces()
+            }
+        }
+    };
+    match commit_production_scene(&surfaces, generation, outputs) {
+        Ok(event) => {
+            let mut scene = CANONICAL_SCENE.lock().unwrap();
+            if scene.pending.as_ref().map(|pending| pending.generation) == Some(generation) {
+                scene.pending = None;
+            }
+            Ok(event)
+        }
+        Err(err) => {
+            let mut scene = CANONICAL_SCENE.lock().unwrap();
+            scene.pending =
+                Some(PendingCanonicalCommit { generation, surfaces, reason: err.to_string() });
+            Err(err)
+        }
+    }
 }
 
 fn read_shm_buffer(
@@ -1323,6 +1429,7 @@ fn read_shm_buffer(
 
 fn commit_production_scene(
     surfaces: &[SurfaceSnapshot],
+    scene_generation: u64,
     outputs: &[OutputMode],
 ) -> Result<DisplayEvent> {
     let mut stream =
@@ -1336,6 +1443,7 @@ fn commit_production_scene(
             focus: FocusTarget::None,
             selection: WaylandSelectionState::default(),
             surfaces: surfaces.to_vec(),
+            scene_generation,
         }),
     );
     send_json_line(&mut stream, &request)?;
@@ -1845,8 +1953,8 @@ mod tests {
     use super::{handle_wayland_command, mock_surface_registry, socket_lock_is_stale};
     use std::fs;
     use waybroker_common::{
-        FocusTarget, WaylandCommand, WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState,
-        WaylandSurfaceRole,
+        FocusTarget, SurfacePlacement, SurfaceSnapshot, WaylandCommand, WaylandEvent,
+        WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
     };
 
     #[test]
@@ -2183,5 +2291,34 @@ mod tests {
             "/tmp/test.sock".to_string(),
         ];
         assert!(Config::from_args(args2.into_iter().skip(1)).is_ok());
+    }
+
+    #[test]
+    fn canonical_scene_order_is_deterministic_and_assigns_z_order() {
+        let make_surface = |id: &str, creation_sequence: u64| SurfaceSnapshot {
+            id: id.into(),
+            placement: SurfacePlacement { z: 0, visible: true, ..Default::default() },
+            creation_sequence,
+            ..Default::default()
+        };
+        let ordered = super::order_scene_surfaces(vec![
+            make_surface("client-2-surface-4", 2),
+            make_surface("client-1-surface-7", 1),
+        ]);
+        assert_eq!(
+            ordered.iter().map(|surface| surface.id.as_str()).collect::<Vec<_>>(),
+            vec!["client-1-surface-7", "client-2-surface-4"]
+        );
+        assert_eq!(ordered[0].placement.z, 0);
+        assert_eq!(ordered[1].placement.z, 1);
+
+        let reversed = super::order_scene_surfaces(vec![
+            make_surface("client-1-surface-7", 1),
+            make_surface("client-2-surface-4", 2),
+        ]);
+        assert_eq!(
+            reversed.iter().map(|surface| surface.id.as_str()).collect::<Vec<_>>(),
+            ordered.iter().map(|surface| surface.id.as_str()).collect::<Vec<_>>()
+        );
     }
 }

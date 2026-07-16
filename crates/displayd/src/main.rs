@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::HashMap,
     env, fs,
@@ -19,6 +20,7 @@ use waybroker_common::{
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
+static LAST_SCENE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -334,7 +336,19 @@ async fn handle_display_command(
             println!("service=displayd op=set_mode event=success output={output} mode={:?}", mode);
             Ok(DisplayEvent::ModeApplied { output, mode })
         }
-        DisplayCommand::CommitScene { target, focus, selection, surfaces } => {
+        DisplayCommand::CommitScene { target, focus, selection, surfaces, scene_generation } => {
+            let last_generation = LAST_SCENE_GENERATION.load(Ordering::Acquire);
+            if scene_generation_is_stale(last_generation, scene_generation) {
+                return Ok(DisplayEvent::Rejected {
+                    reason: format!(
+                        "stale scene generation {}; latest is {}",
+                        scene_generation, last_generation
+                    ),
+                });
+            }
+            if scene_generation > last_generation {
+                LAST_SCENE_GENERATION.store(scene_generation, Ordering::Release);
+            }
             let start_time = std::time::Instant::now();
             let mut skipped = false;
             let mut is_direct_scanout = false;
@@ -643,6 +657,10 @@ async fn handle_display_command(
             }
         }
     }
+}
+
+fn scene_generation_is_stale(last_generation: u64, incoming_generation: u64) -> bool {
+    incoming_generation != 0 && incoming_generation < last_generation
 }
 
 #[derive(Debug)]
@@ -1690,7 +1708,14 @@ impl Drop for SocketGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+
+    #[test]
+    fn rejects_only_older_nonzero_scene_generations() {
+        assert!(scene_generation_is_stale(8, 7));
+        assert!(!scene_generation_is_stale(8, 8));
+        assert!(!scene_generation_is_stale(8, 9));
+        assert!(!scene_generation_is_stale(8, 0));
+    }
 
     #[tokio::test]
     async fn test_handle_capture_output() {
@@ -1742,6 +1767,7 @@ mod tests {
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![],
+                scene_generation: 0,
             },
             ServiceRole::Compd,
             &config,
@@ -2900,6 +2926,7 @@ exit 0
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![surf1.clone()],
+                scene_generation: 0,
             },
             ServiceRole::Compd,
             &config,
@@ -2922,6 +2949,7 @@ exit 0
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![surf1],
+                scene_generation: 0,
             },
             ServiceRole::Compd,
             &config,
@@ -2967,6 +2995,7 @@ exit 0
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![fullscreen_surf],
+                scene_generation: 0,
             },
             ServiceRole::Compd,
             &config,
