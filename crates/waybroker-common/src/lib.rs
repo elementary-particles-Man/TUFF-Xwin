@@ -115,6 +115,7 @@ mod tests {
                             z: 10,
                             visible: true,
                         },
+                        ..Default::default()
                     },
                     SurfaceSnapshot {
                         id: "panel-1".into(),
@@ -127,6 +128,7 @@ mod tests {
                             z: 100,
                             visible: true,
                         },
+                        ..Default::default()
                     },
                 ],
             }),
@@ -204,6 +206,7 @@ mod tests {
                             z: 5,
                             visible: true,
                         },
+                        ..Default::default()
                     }],
                     commit_id: 7,
                     unix_timestamp: 1_778_000_001,
@@ -234,6 +237,7 @@ mod tests {
                             role: WaylandSurfaceRole::Toplevel,
                             mapped: true,
                             buffer_attached: true,
+                            ..Default::default()
                         },
                         WaylandSurfaceState {
                             id: "panel-1".into(),
@@ -241,6 +245,7 @@ mod tests {
                             role: WaylandSurfaceRole::Layer(super::LayerMetadata::default()),
                             mapped: false,
                             buffer_attached: false,
+                            ..Default::default()
                         },
                     ],
                     foreign_toplevels: vec![],

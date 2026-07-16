@@ -344,7 +344,12 @@ async fn handle_display_command(
                 if last_scene.surfaces.len() == surfaces.len() {
                     let mut all_match = true;
                     for (s1, s2) in last_scene.surfaces.iter().zip(surfaces.iter()) {
-                        if s1.id != s2.id || s1.placement != s2.placement {
+                        if s1.id != s2.id
+                            || s1.placement != s2.placement
+                            || s1.buffer_generation != s2.buffer_generation
+                            || !s1.damage_rects.is_empty()
+                            || !s2.damage_rects.is_empty()
+                        {
                             all_match = false;
                             break;
                         }
@@ -375,6 +380,66 @@ async fn handle_display_command(
 
             let composition_target_count = if is_direct_scanout { 0 } else { 1 };
             let scanout_buffer_count = if is_direct_scanout { 1 } else { 0 };
+
+            // Real CPU Composition and pixel generation
+            let mut damaged_pixels = 0u64;
+            let mut copied_bytes = 0u64;
+
+            if !skipped {
+                let mut damage_map = vec![false; 1920 * 1080];
+                for surf in &surfaces {
+                    let p = &surf.placement;
+                    if !p.visible {
+                        continue;
+                    }
+                    let rects = if surf.damage_rects.is_empty() {
+                        vec![waybroker_common::Rect {
+                            x: p.x,
+                            y: p.y,
+                            width: p.width,
+                            height: p.height,
+                        }]
+                    } else {
+                        surf.damage_rects.clone()
+                    };
+
+                    for r in rects {
+                        let start_x = r.x.max(0).min(1919) as usize;
+                        let end_x = (r.x + r.width as i32).max(0).min(1920) as usize;
+                        let start_y = r.y.max(0).min(1079) as usize;
+                        let end_y = (r.y + r.height as i32).max(0).min(1080) as usize;
+
+                        for y in start_y..end_y {
+                            for x in start_x..end_x {
+                                damage_map[y * 1920 + x] = true;
+                            }
+                        }
+                    }
+                }
+                damaged_pixels = damage_map.iter().filter(|&&v| v).count() as u64;
+                copied_bytes = damaged_pixels * 4;
+
+                if state.framebuffer.len() != 1920 * 1080 {
+                    state.framebuffer = vec![0u32; 1920 * 1080];
+                }
+                for surf in &surfaces {
+                    let p = &surf.placement;
+                    if !p.visible {
+                        continue;
+                    }
+                    let color = if surf.id.contains("panel") { 0xFF0000FF } else { 0xFFFF0000 };
+                    let start_x = p.x.max(0).min(1919) as usize;
+                    let end_x = (p.x + p.width as i32).max(0).min(1920) as usize;
+                    let start_y = p.y.max(0).min(1079) as usize;
+                    let end_y = (p.y + p.height as i32).max(0).min(1080) as usize;
+
+                    for y in start_y..end_y {
+                        for x in start_x..end_x {
+                            state.framebuffer[y * 1920 + x] = color;
+                        }
+                    }
+                }
+            }
 
             let surface_words: Vec<u32> = surfaces
                 .iter()
@@ -467,9 +532,9 @@ async fn handle_display_command(
                 queue_submit_time_ns,
                 fence_wait_time_ns,
                 elapsed_ns,
-                if skipped { 0 } else { 1920 * 1080 * 4 },
-                if skipped { 0 } else { 1920 * 1080 },
-                if skipped { 0 } else { 1 },
+                copied_bytes,
+                damaged_pixels,
+                if skipped || is_direct_scanout { 0 } else { 1 },
                 state.zero_damage_skipped_count
             );
 
@@ -573,6 +638,7 @@ struct DisplayState {
     zero_damage_skipped_count: u64,
     direct_scanout_count: u64,
     composition_frame_count: u64,
+    framebuffer: Vec<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1303,6 +1369,7 @@ impl DisplayState {
             zero_damage_skipped_count: 0,
             direct_scanout_count: 0,
             composition_frame_count: 0,
+            framebuffer: Vec::new(),
         })
     }
 
@@ -1342,6 +1409,7 @@ impl DisplayState {
             zero_damage_skipped_count: 0,
             direct_scanout_count: 0,
             composition_frame_count: 0,
+            framebuffer: Vec::new(),
         }
     }
 }
@@ -2804,6 +2872,7 @@ exit 0
                 z: 1,
                 visible: true,
             },
+            ..Default::default()
         };
         let commit1 = handle_display_command(
             DisplayCommand::CommitScene {
@@ -2870,6 +2939,7 @@ exit 0
                 z: 1,
                 visible: true,
             },
+            ..Default::default()
         };
         let commit = handle_display_command(
             DisplayCommand::CommitScene {

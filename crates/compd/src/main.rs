@@ -488,6 +488,7 @@ fn mock_demo_scene() -> CompdScene {
                     z: 10,
                     visible: true,
                 },
+                ..Default::default()
             },
             SurfaceSnapshot {
                 id: "background-1".into(),
@@ -500,6 +501,7 @@ fn mock_demo_scene() -> CompdScene {
                     z: 0,
                     visible: true,
                 },
+                ..Default::default()
             },
         ],
     }
@@ -726,6 +728,9 @@ fn reconcile_scene_with_registry(
                     surface.app_id = registry_surface.app_id.clone();
                     updated_app_ids += 1;
                 }
+                surface.buffer_handle = registry_surface.buffer_handle.clone();
+                surface.buffer_generation = registry_surface.buffer_generation;
+                surface.damage_rects = registry_surface.damage_rects.clone();
                 kept_surfaces.push(surface);
             }
             None => dropped_surface_ids.push(surface.id),
@@ -993,6 +998,7 @@ mod tests {
                         z: 1,
                         visible: true,
                     },
+                    ..Default::default()
                 },
                 SurfaceSnapshot {
                     id: "s2".into(),
@@ -1005,6 +1011,7 @@ mod tests {
                         z: 2,
                         visible: true,
                     },
+                    ..Default::default()
                 },
             ],
         };
@@ -1029,6 +1036,7 @@ mod tests {
                     z: 7,
                     visible: true,
                 },
+                ..Default::default()
             }],
             commit_id: 3,
             unix_timestamp: 1_778_000_100,
@@ -1073,6 +1081,7 @@ mod tests {
                             z: 5,
                             visible: true,
                         },
+                        ..Default::default()
                     },
                     SurfaceSnapshot {
                         id: "panel-1".into(),
@@ -1085,6 +1094,7 @@ mod tests {
                             z: 10,
                             visible: true,
                         },
+                        ..Default::default()
                     },
                 ],
             },
@@ -1096,6 +1106,7 @@ mod tests {
                     role: WaylandSurfaceRole::Toplevel,
                     mapped: true,
                     buffer_attached: true,
+                    ..Default::default()
                 }],
                 foreign_toplevels: vec![],
                 selection: WaylandSelectionState {
@@ -1167,6 +1178,7 @@ mod tests {
                         z: 0,
                         visible: true,
                     },
+                    ..Default::default()
                 }],
             },
             &SurfaceRegistrySnapshot {
@@ -1177,6 +1189,7 @@ mod tests {
                     role: WaylandSurfaceRole::Background,
                     mapped: true,
                     buffer_attached: true,
+                    ..Default::default()
                 }],
                 foreign_toplevels: vec![],
                 selection: WaylandSelectionState {
@@ -1225,6 +1238,7 @@ mod tests {
                 z: 5,
                 visible: true,
             },
+            ..Default::default()
         };
         apply_role_based_layout(&mut bg, &WaylandSurfaceRole::Background, &output);
         assert_eq!(bg.placement.x, 0);
@@ -1237,6 +1251,7 @@ mod tests {
             id: "panel".into(),
             app_id: "panel".into(),
             placement: SurfacePlacement { x: 0, y: 0, width: 0, height: 0, z: 0, visible: true },
+            ..Default::default()
         };
         let metadata = waybroker_common::LayerMetadata {
             layer: 2,          // Top
@@ -1259,6 +1274,7 @@ mod tests {
             id: "overlay".into(),
             app_id: "overlay".into(),
             placement: SurfacePlacement { x: 0, y: 0, width: 0, height: 0, z: 0, visible: true },
+            ..Default::default()
         };
         let overlay_metadata = waybroker_common::LayerMetadata {
             layer: 3,  // Overlay
@@ -1297,6 +1313,7 @@ mod tests {
                         z: 1,
                         visible: true,
                     },
+                    ..Default::default()
                 },
                 SurfaceSnapshot {
                     id: "win2".into(),
@@ -1309,6 +1326,7 @@ mod tests {
                         z: 2,
                         visible: true,
                     },
+                    ..Default::default()
                 },
             ],
         };
@@ -1351,6 +1369,7 @@ mod tests {
                         z: 1,
                         visible: true,
                     },
+                    ..Default::default()
                 },
                 SurfaceSnapshot {
                     id: "surviving-app".into(),
@@ -1363,6 +1382,7 @@ mod tests {
                         z: 2,
                         visible: true,
                     },
+                    ..Default::default()
                 },
             ],
             commit_id: 10,
@@ -1377,6 +1397,7 @@ mod tests {
                 role: WaylandSurfaceRole::Toplevel,
                 mapped: true,
                 buffer_attached: true,
+                ..Default::default()
             }],
             foreign_toplevels: vec![],
             selection: WaylandSelectionState::default(),

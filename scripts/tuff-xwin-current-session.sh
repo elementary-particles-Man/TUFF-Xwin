@@ -104,7 +104,7 @@ Environment=PATH=$bin_path
 EnvironmentFile=-%h/.config/tuff-xwin/session.env
 Environment=WAYBROKER_RUNTIME_DIR=$runtime_dir
 Environment=TUFF_XWIN_SESSION_INSTANCE_ID=$session_id
-ExecStart=/usr/bin/env waylandd --serve-ipc --require-displayd \$TUFF_XWIN_WAYLANDD_ARGS --session-instance-id \${TUFF_XWIN_SESSION_INSTANCE_ID}
+ExecStart=/usr/bin/env waylandd --serve-ipc --require-displayd --production --bind-wayland-display \$WAYBROKER_RUNTIME_DIR/wayland-tuff \$TUFF_XWIN_WAYLANDD_ARGS --session-instance-id \${TUFF_XWIN_SESSION_INSTANCE_ID}
 Restart=on-failure
 RestartSec=1
 "
@@ -214,10 +214,7 @@ assert_tuff_active() {
 
   # Perform real compositor readiness check
   log "running real compositor readiness check..."
-  local target_socket="wayland-0"
-  if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
-    target_socket="$WAYLAND_DISPLAY"
-  fi
+  local target_socket="$runtime_dir/wayland-tuff"
 
   local waylandd_bin
   waylandd_bin="$(PATH="$bin_path" which waylandd 2>/dev/null || true)"

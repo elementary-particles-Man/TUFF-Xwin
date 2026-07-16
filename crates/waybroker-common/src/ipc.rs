@@ -489,13 +489,19 @@ pub struct WaylandSelectionHandoff {
     pub selection: WaylandSelectionState,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct WaylandSurfaceState {
     pub id: String,
     pub app_id: String,
     pub role: WaylandSurfaceRole,
     pub mapped: bool,
     pub buffer_attached: bool,
+    #[serde(default)]
+    pub buffer_handle: Option<String>,
+    #[serde(default)]
+    pub buffer_generation: u64,
+    #[serde(default)]
+    pub damage_rects: Vec<Rect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -510,9 +516,10 @@ pub struct LayerMetadata {
     pub keyboard_interactivity: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum WaylandSurfaceRole {
+    #[default]
     Toplevel,
     Popup,
     Layer(LayerMetadata),
@@ -521,14 +528,20 @@ pub enum WaylandSurfaceRole {
     Cursor,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SurfaceSnapshot {
     pub id: String,
     pub app_id: String,
     pub placement: SurfacePlacement,
+    #[serde(default)]
+    pub buffer_handle: Option<String>,
+    #[serde(default)]
+    pub buffer_generation: u64,
+    #[serde(default)]
+    pub damage_rects: Vec<Rect>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SurfacePlacement {
     pub x: i32,
     pub y: i32,

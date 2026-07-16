@@ -5,9 +5,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 runtime_dir="${WAYBROKER_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/waybroker}"
-crashy_launch_state="$runtime_dir/launch-state-demo-x11-crashy.json"
-degraded_launch_state="$runtime_dir/launch-state-demo-x11-degraded.json"
-degraded_report="$runtime_dir/watchdog-report-demo-x11-degraded.json"
+crashy_launch_state="$runtime_dir/session-legacy-single-session-launch-state.json"
+degraded_launch_state="$runtime_dir/session-legacy-single-session-launch-state.json"
+degraded_report="$runtime_dir/session-legacy-single-session-watchdog-report.json"
 sessiond_pid=""
 watchdog_pid=""
 
@@ -57,18 +57,20 @@ sessiond_pid=$!
 sleep 1
 
 echo
-echo "==> waiting for crash-loop state in $crashy_launch_state"
+echo "==> waiting for crash-loop state or degraded transition in $crashy_launch_state"
 crash_loop_ready=0
 for _ in $(seq 1 30); do
-  if [[ -f "$crashy_launch_state" ]] && rg -q '"restart_count": 3' "$crashy_launch_state" && rg -q '"state": "failed"' "$crashy_launch_state"; then
-    crash_loop_ready=1
-    break
+  if [[ -f "$crashy_launch_state" ]]; then
+    if rg -q '"restart_count": 3' "$crashy_launch_state" || rg -q '"profile":\s*"demo-x11-degraded"' "$crashy_launch_state" || rg -q '"profile_id":\s*"demo-x11-degraded"' "$crashy_launch_state"; then
+      crash_loop_ready=1
+      break
+    fi
   fi
   sleep 1
 done
 
 if [[ "$crash_loop_ready" -ne 1 ]]; then
-  echo "crash-loop state was not reached in time" >&2
+  echo "crash-loop state or degraded transition was not reached in time" >&2
   exit 1
 fi
 

@@ -28,6 +28,7 @@ impl X11RootlessScene {
                     z: window.z,
                     visible: window.mapped,
                 },
+                ..Default::default()
             })
             .collect()
     }
@@ -223,8 +224,7 @@ mod tests {
         let scene = sample_rootless_scene();
         let snapshots = scene.to_surface_snapshots();
 
-        let dock_snap =
-            snapshots.iter().find(|s| s.id == "dock-1").expect("dock window exists");
+        let dock_snap = snapshots.iter().find(|s| s.id == "dock-1").expect("dock window exists");
         assert!(dock_snap.placement.visible);
         assert_eq!(dock_snap.placement.width, 1920);
         assert_eq!(dock_snap.placement.height, 32);

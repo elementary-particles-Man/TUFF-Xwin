@@ -165,7 +165,6 @@ impl Default for HeadlessWireCore {
             interface: "zwp_pointer_constraints_v1".into(),
             version: 1,
         });
-        core.globals.push(WireGlobal { name: 21, interface: "wl_output".into(), version: 4 });
 
         core
     }
@@ -175,6 +174,15 @@ pub struct DispatchResult {
 }
 
 impl HeadlessWireCore {
+    pub fn add_real_output(&mut self, _name: &str, _width: i32, _height: i32) {
+        let global_name = (self.globals.len() as u32) + 1;
+        self.globals.push(WireGlobal {
+            name: global_name,
+            interface: "wl_output".into(),
+            version: 4,
+        });
+    }
+
     pub fn dispatch(&mut self, message: WaylandMessage) -> Result<DispatchResult> {
         self.dispatch_with_fds(message, &mut Vec::new())
     }
