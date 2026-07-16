@@ -139,7 +139,7 @@ impl WireFakeClient {
         let mut p = vec![0u8; 8];
         byteorder::LittleEndian::write_u32(&mut p[0..4], new_id);
         byteorder::LittleEndian::write_u32(&mut p[4..8], wl_surf_id);
-        let msg = WaylandMessage::new(WaylandObjectId(wm_base_id), WaylandOpcode(3), p);
+        let msg = WaylandMessage::new(WaylandObjectId(wm_base_id), WaylandOpcode(2), p);
         self.send_message(&msg)
     }
 
@@ -153,7 +153,7 @@ impl WireFakeClient {
     pub fn xdg_surface_ack_configure(&mut self, xdg_surf_id: u32, serial: u32) -> Result<()> {
         let mut p = vec![0u8; 4];
         byteorder::LittleEndian::write_u32(&mut p, serial);
-        let msg = WaylandMessage::new(WaylandObjectId(xdg_surf_id), WaylandOpcode(4), p);
+        let msg = WaylandMessage::new(WaylandObjectId(xdg_surf_id), WaylandOpcode(3), p);
         self.send_message(&msg)
     }
 

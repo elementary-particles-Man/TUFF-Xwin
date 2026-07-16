@@ -1,27 +1,33 @@
 use std::{
     env, fs,
-    io::BufReader,
+    io::{BufReader, Read, Write},
     path::{Path, PathBuf},
     thread,
     time::Duration,
 };
 
 #[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::{
+    io::AsRawFd,
+    net::{UnixListener, UnixStream},
+};
 
 use anyhow::{Context, Result, bail};
+use byteorder::ByteOrder;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 static GLOBAL_REGISTRY: Mutex<Option<SurfaceRegistrySnapshot>> = Mutex::new(None);
+static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
 };
 use waybroker_common::{
-    DisplayCommand, DisplayEvent, FocusTarget, ImeBridgeMode, ImeCommand, ImeEvent, ImeStatus,
-    IpcEnvelope, MessageKind, OutputMode, ServiceBanner, ServiceEndpoint, ServiceRole,
-    ServiceStream, SurfaceRegistrySnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff,
-    WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState, accel::global_accel_policy,
-    bind_service_socket, connect_service_socket, ensure_runtime_dir, now_unix_timestamp,
-    read_json_line, send_json_line, session_artifact_path,
+    CommitTarget, DisplayCommand, DisplayEvent, FocusTarget, ImeBridgeMode, ImeCommand, ImeEvent,
+    ImeStatus, IpcEnvelope, MessageKind, OutputMode, ServiceBanner, ServiceEndpoint, ServiceRole,
+    ServiceStream, SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand,
+    WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
+    WaylandSurfaceState, accel::global_accel_policy, bind_service_socket, connect_service_socket,
+    ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
 };
 
 fn run_wire_headless_test() -> Result<()> {
@@ -1133,13 +1139,19 @@ fn bind_single_wayland_display_socket_ext(
 
 fn handle_production_client(stream: UnixStream) -> Result<()> {
     use std::time::Duration;
+    let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+    let _registry_guard = ClientRegistryGuard(client_id);
     let mut core = wayland_wire::core::HeadlessWireCore::default();
-    if let Ok(outputs) = query_output_inventory() {
+    core.set_defer_frame_callbacks(true);
+    let outputs = query_output_inventory()
+        .context("production Wayland requires displayd output inventory")?;
+    if outputs.is_empty() {
+        bail!("production Wayland requires at least one real displayd output");
+    }
+    {
         for output in &outputs {
             core.add_real_output(&output.name, output.width as i32, output.height as i32);
         }
-    } else {
-        core.add_real_output("fallback-output", 1920, 1080);
     }
     let mut received_fds = Vec::new();
     let mut buffer = Vec::with_capacity(4096);
@@ -1166,6 +1178,13 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
                 Ok(msg) => {
                     let size = msg.header.size as usize;
                     consumed += size;
+                    let is_commit = msg.header.opcode.0 == 6
+                        && core
+                            .registry
+                            .get_object(msg.header.object_id)
+                            .map(|object| object.interface == "wl_surface")
+                            .unwrap_or(false);
+                    let committed_surface = msg.header.object_id;
 
                     let result = core.dispatch_with_fds(msg, &mut received_fds)?;
                     for ev in result.events {
@@ -1173,6 +1192,23 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
                         use std::io::Write;
                         let mut s = &stream;
                         s.write_all(&encoded)?;
+                    }
+                    if is_commit {
+                        let callbacks = core.take_frame_callbacks(committed_surface);
+                        if !callbacks.is_empty() {
+                            let _presented = commit_production_scene(&core, &outputs)?;
+                            for callback_id in callbacks {
+                                let mut payload = vec![0u8; 4];
+                                byteorder::LittleEndian::write_u32(&mut payload, 0);
+                                let event = wayland_wire::WaylandMessage::new(
+                                    callback_id,
+                                    wayland_wire::WaylandOpcode(0),
+                                    payload,
+                                );
+                                let mut s = &stream;
+                                s.write_all(&wayland_wire::codec::encode_message(&event)?)?;
+                            }
+                        }
                     }
                 }
                 Err(wayland_wire::WireError::Incomplete) => break,
@@ -1182,16 +1218,135 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
 
         if consumed > 0 {
             buffer.drain(0..consumed);
-            sync_core_to_global_registry(&core);
+            sync_core_to_global_registry(&core, client_id);
         }
     }
     Ok(())
 }
 
-fn sync_core_to_global_registry(core: &wayland_wire::core::HeadlessWireCore) {
+struct ClientRegistryGuard(u64);
+
+impl Drop for ClientRegistryGuard {
+    fn drop(&mut self) {
+        remove_client_from_global_registry(self.0);
+    }
+}
+
+fn production_scene_surfaces(core: &wayland_wire::core::HeadlessWireCore) -> Vec<SurfaceSnapshot> {
+    core.surfaces
+        .surfaces
+        .iter()
+        .filter_map(|(id, surface)| {
+            let buffer_id = surface.current.buffer_id?;
+            let buffer = core.shm.buffers.get(&buffer_id)?;
+            Some(SurfaceSnapshot {
+                id: format!("wayland-surface-{}", id.0),
+                app_id: "production-app".into(),
+                placement: SurfacePlacement {
+                    x: surface.current.offset_x,
+                    y: surface.current.offset_y,
+                    width: buffer.width.max(0) as u32,
+                    height: buffer.height.max(0) as u32,
+                    z: 0,
+                    visible: true,
+                },
+                buffer_handle: Some(buffer_id.0.to_string()),
+                buffer_generation: buffer_id.0 as u64,
+                damage_rects: surface
+                    .current
+                    .damage
+                    .iter()
+                    .map(|r| waybroker_common::Rect {
+                        x: r.x + surface.current.offset_x,
+                        y: r.y + surface.current.offset_y,
+                        width: r.width,
+                        height: r.height,
+                    })
+                    .collect(),
+                buffer_pixels: read_shm_buffer(core, buffer),
+                buffer_width: buffer.width.max(0) as u32,
+                buffer_height: buffer.height.max(0) as u32,
+                buffer_stride: buffer.stride.max(0) as u32,
+                buffer_format: buffer.format,
+            })
+        })
+        .collect()
+}
+
+fn read_shm_buffer(
+    core: &wayland_wire::core::HeadlessWireCore,
+    buffer: &wayland_wire::shm::ShmBuffer,
+) -> Vec<u8> {
+    let Some(pool) = core.shm.pools.get(&buffer.pool_id) else { return Vec::new() };
+    let len = buffer.byte_len().unwrap_or(0);
+    if len == 0 {
+        return Vec::new();
+    }
+    match &pool.storage {
+        wayland_wire::shm::ShmPoolStorage::FakeMemory(bytes) => {
+            let start = buffer.offset.max(0) as usize;
+            bytes.get(start..start.saturating_add(len)).unwrap_or(&[]).to_vec()
+        }
+        wayland_wire::shm::ShmPoolStorage::ReceivedFd(fd) => {
+            let mut pixels = vec![0u8; len];
+            let read = unsafe {
+                libc::pread(
+                    fd.0.as_raw_fd(),
+                    pixels.as_mut_ptr().cast(),
+                    pixels.len(),
+                    buffer.offset.max(0) as libc::off_t,
+                )
+            };
+            if read == len as isize { pixels } else { Vec::new() }
+        }
+    }
+}
+
+fn commit_production_scene(
+    core: &wayland_wire::core::HeadlessWireCore,
+    outputs: &[OutputMode],
+) -> Result<DisplayEvent> {
+    let mut stream =
+        connect_service_socket(ServiceRole::Compd).context("production Wayland requires compd")?;
+    let output = outputs.first().context("displayd returned no output")?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Waylandd,
+        ServiceRole::Compd,
+        MessageKind::DisplayCommand(DisplayCommand::CommitScene {
+            target: CommitTarget::Output { name: output.name.clone() },
+            focus: FocusTarget::None,
+            selection: WaylandSelectionState::default(),
+            surfaces: production_scene_surfaces(core),
+        }),
+    );
+    send_json_line(&mut stream, &request)?;
+    let mut reader = BufReader::new(stream);
+    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    let commit_id = match response.kind {
+        MessageKind::DisplayEvent(DisplayEvent::SceneCommitted { commit_id, .. }) => commit_id,
+        other => bail!("scene commit failed before presentation: {other:?}"),
+    };
+
+    let mut feedback_stream = connect_service_socket(ServiceRole::Compd)?;
+    let feedback_request = IpcEnvelope::new(
+        ServiceRole::Waylandd,
+        ServiceRole::Compd,
+        MessageKind::DisplayCommand(DisplayCommand::GetPresentationFeedback { commit_id }),
+    );
+    send_json_line(&mut feedback_stream, &feedback_request)?;
+    let mut feedback_reader = BufReader::new(feedback_stream);
+    let feedback: IpcEnvelope = read_json_line(&mut feedback_reader)?;
+    match feedback.kind {
+        MessageKind::DisplayEvent(event @ DisplayEvent::FramePresented { .. }) => Ok(event),
+        other => bail!("scene commit did not reach presentation: {other:?}"),
+    }
+}
+
+fn sync_core_to_global_registry(core: &wayland_wire::core::HeadlessWireCore, client_id: u64) {
     let mut global = GLOBAL_REGISTRY.lock().unwrap();
     if let Some(ref mut reg) = *global {
-        reg.surfaces.clear();
+        let prefix = format!("client-{client_id}-");
+        reg.surfaces.retain(|surface| !surface.id.starts_with(&prefix));
         for (id, surf) in &core.surfaces.surfaces {
             let role = match core.surfaces.roles.get(id) {
                 Some(wayland_wire::surface::SurfaceRoleKind::XdgSurface) => {
@@ -1205,7 +1360,7 @@ fn sync_core_to_global_registry(core: &wayland_wire::core::HeadlessWireCore) {
             };
 
             reg.surfaces.push(WaylandSurfaceState {
-                id: id.0.to_string(),
+                id: format!("client-{client_id}-surface-{}", id.0),
                 app_id: "production-app".to_string(),
                 role,
                 mapped: surf.current.buffer_id.is_some(),
@@ -1227,6 +1382,66 @@ fn sync_core_to_global_registry(core: &wayland_wire::core::HeadlessWireCore) {
         }
         reg.generation = reg.generation.saturating_add(1);
         reg.unix_timestamp = now_unix_timestamp();
+    }
+}
+
+fn remove_client_from_global_registry(client_id: u64) {
+    let mut global = GLOBAL_REGISTRY.lock().unwrap();
+    if let Some(ref mut reg) = *global {
+        let prefix = format!("client-{client_id}-");
+        let before = reg.surfaces.len();
+        reg.surfaces.retain(|surface| !surface.id.starts_with(&prefix));
+        if reg.surfaces.len() != before {
+            reg.generation = reg.generation.saturating_add(1);
+            reg.unix_timestamp = now_unix_timestamp();
+        }
+    }
+}
+
+fn read_xdg_surface_configure(
+    stream: &mut UnixStream,
+    buf: &mut Vec<u8>,
+    temp_buf: &mut [u8],
+    xdg_surface_id: u32,
+) -> Result<u32> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            bail!("xdg_surface.configure timed out");
+        }
+        match stream.read(temp_buf) {
+            Ok(0) => bail!("Connection closed while waiting for xdg_surface.configure"),
+            Ok(n) => buf.extend_from_slice(&temp_buf[..n]),
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let mut consumed = 0;
+        while consumed + 8 <= buf.len() {
+            let header = wayland_wire::codec::decode_header(&buf[consumed..])?;
+            if consumed + header.size as usize > buf.len() {
+                break;
+            }
+            let msg = wayland_wire::codec::decode_message(
+                &buf[consumed..consumed + header.size as usize],
+            )?;
+            consumed += header.size as usize;
+            if msg.header.object_id.0 == xdg_surface_id && msg.header.opcode.0 == 0 {
+                if msg.payload.len() < 4 {
+                    bail!("invalid xdg_surface.configure payload");
+                }
+                let serial = byteorder::LittleEndian::read_u32(&msg.payload[..4]);
+                buf.drain(..consumed);
+                return Ok(serial);
+            }
+        }
+        if consumed > 0 {
+            buf.drain(..consumed);
+        }
     }
 }
 
@@ -1399,11 +1614,11 @@ fn run_readiness_check(socket_path: &Path) -> Result<()> {
     let msg_create_buf = WaylandMessage::new(WaylandObjectId(8), WaylandOpcode(0), create_buf);
     stream.write_all(&wayland_wire::codec::encode_message(&msg_create_buf)?)?;
 
-    // Get Xdg Surface (id 10 (xdg_wm_base), opcode 1, new_id 11, surface 5)
+    // Get Xdg Surface (id 10 (xdg_wm_base), opcode 2, new_id 11, surface 5)
     let mut get_xdg = vec![0u8; 8];
     LittleEndian::write_u32(&mut get_xdg[0..4], 11);
     LittleEndian::write_u32(&mut get_xdg[4..8], 5);
-    let msg_get_xdg = WaylandMessage::new(WaylandObjectId(10), WaylandOpcode(1), get_xdg);
+    let msg_get_xdg = WaylandMessage::new(WaylandObjectId(10), WaylandOpcode(2), get_xdg);
     stream.write_all(&wayland_wire::codec::encode_message(&msg_get_xdg)?)?;
 
     // Get Toplevel (id 11 (xdg_surface), opcode 1, new_id 12)
@@ -1411,6 +1626,15 @@ fn run_readiness_check(socket_path: &Path) -> Result<()> {
     LittleEndian::write_u32(&mut get_top[0..4], 12);
     let msg_get_top = WaylandMessage::new(WaylandObjectId(11), WaylandOpcode(1), get_top);
     stream.write_all(&wayland_wire::codec::encode_message(&msg_get_top)?)?;
+
+    // xdg-shell requires ack_configure before the first buffer commit.
+    let configure_serial = read_xdg_surface_configure(&mut stream, &mut buf, &mut temp_buf, 11)?;
+    let ack = WaylandMessage::new(
+        WaylandObjectId(11),
+        WaylandOpcode(3),
+        configure_serial.to_le_bytes().to_vec(),
+    );
+    stream.write_all(&wayland_wire::codec::encode_message(&ack)?)?;
 
     // Attach Buffer (id 5 (wl_surface), opcode 1, buffer 9, x 0, y 0)
     let mut attach = vec![0u8; 12];

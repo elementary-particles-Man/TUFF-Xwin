@@ -399,6 +399,14 @@ fn handle_client(mut stream: ServiceStream, config: &Config) -> Result<()> {
 fn build_response(request: IpcEnvelope, config: &Config) -> IpcEnvelope {
     let source = request.source;
     let response_kind = match request.kind {
+        MessageKind::DisplayCommand(command) if request.destination == ServiceRole::Compd => {
+            match forward_display_command(command) {
+                Ok(event) => MessageKind::DisplayEvent(event),
+                Err(err) => {
+                    MessageKind::DisplayEvent(DisplayEvent::Rejected { reason: err.to_string() })
+                }
+            }
+        }
         MessageKind::SessionCommand(waybroker_common::SessionCommand::ResumeHint {
             stage,
             output,
@@ -432,6 +440,23 @@ fn build_response(request: IpcEnvelope, config: &Config) -> IpcEnvelope {
     };
 
     IpcEnvelope::new(ServiceRole::Compd, source, response_kind)
+}
+
+fn forward_display_command(command: DisplayCommand) -> Result<DisplayEvent> {
+    let mut stream = connect_service_socket(ServiceRole::Displayd)
+        .context("compd could not connect to displayd")?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Compd,
+        ServiceRole::Displayd,
+        MessageKind::DisplayCommand(command),
+    );
+    send_json_line(&mut stream, &request)?;
+    let mut reader = BufReader::new(stream);
+    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    match response.kind {
+        MessageKind::DisplayEvent(event) => Ok(event),
+        other => bail!("displayd returned unexpected response: {other:?}"),
+    }
 }
 
 struct SocketGuard {

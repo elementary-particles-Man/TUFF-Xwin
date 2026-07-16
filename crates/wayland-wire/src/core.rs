@@ -58,7 +58,9 @@ pub struct HeadlessWireCore {
     pub relative_pointer: RelativePointerState,
     pub pointer_constraints: PointerConstraintsState,
     globals: Vec<WireGlobal>,
+    real_outputs: Vec<(String, i32, i32, u32)>,
     events_out: Vec<WaylandMessage>,
+    defer_frame_callbacks: bool,
 }
 
 impl Default for HeadlessWireCore {
@@ -89,7 +91,9 @@ impl Default for HeadlessWireCore {
             relative_pointer: RelativePointerState::new(),
             pointer_constraints: PointerConstraintsState::new(),
             globals: Vec::new(),
+            real_outputs: Vec::new(),
             events_out: Vec::new(),
+            defer_frame_callbacks: false,
         };
 
         // Standard globals
@@ -174,8 +178,23 @@ pub struct DispatchResult {
 }
 
 impl HeadlessWireCore {
-    pub fn add_real_output(&mut self, _name: &str, _width: i32, _height: i32) {
+    /// Production transport uses the callback as proof of the broker's
+    /// presentation path, so it must not be emitted by wl_surface.commit.
+    pub fn set_defer_frame_callbacks(&mut self, defer: bool) {
+        self.defer_frame_callbacks = defer;
+    }
+
+    pub fn take_frame_callbacks(&mut self, surface_id: WaylandObjectId) -> Vec<WaylandObjectId> {
+        self.surfaces
+            .surfaces
+            .get_mut(&surface_id)
+            .map(|surface| surface.callbacks.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn add_real_output(&mut self, name: &str, width: i32, height: i32) {
         let global_name = (self.globals.len() as u32) + 1;
+        self.real_outputs.push((name.to_string(), width, height, 16_666_666));
         self.globals.push(WireGlobal {
             name: global_name,
             interface: "wl_output".into(),
@@ -390,12 +409,12 @@ impl HeadlessWireCore {
             ("wl_surface", 9) => self.handle_surface_damage(message)?,
             ("wl_shm", 0) => self.handle_shm_create_pool(message, fd_queue, &args)?,
             ("wl_shm_pool", 0) => self.handle_shm_pool_create_buffer(message)?,
-            ("xdg_wm_base", 3) => self.handle_xdg_wm_base_get_xdg_surface(message)?,
-            ("xdg_wm_base", 4) => self.handle_xdg_wm_base_pong(message)?,
+            ("xdg_wm_base", 2) => self.handle_xdg_wm_base_get_xdg_surface(message)?,
+            ("xdg_wm_base", 3) => self.handle_xdg_wm_base_pong(message)?,
             ("xdg_wm_base", 1) => self.handle_xdg_wm_base_create_positioner(message)?,
             ("xdg_surface", 0) => self.handle_xdg_surface_destroy(message)?,
             ("xdg_surface", 1) => self.handle_xdg_surface_get_toplevel(message)?,
-            ("xdg_surface", 4) => self.handle_xdg_surface_ack_configure(message)?,
+            ("xdg_surface", 3) => self.handle_xdg_surface_ack_configure(message)?,
             ("xdg_toplevel", 0) => self.handle_xdg_toplevel_destroy(message)?,
             ("xdg_toplevel", 1) => self.handle_xdg_toplevel_set_parent(message)?,
             ("xdg_toplevel", 2) => self.handle_xdg_toplevel_set_title(message, &args)?,
@@ -501,6 +520,21 @@ impl HeadlessWireCore {
             self.send_seat_capabilities(new_id);
         } else if global.interface == "xdg_wm_base" {
             self.send_xdg_ping(new_id);
+        } else if global.interface == "wl_output" {
+            let output_index = self
+                .globals
+                .iter()
+                .filter(|candidate| {
+                    candidate.interface == "wl_output" && candidate.name <= global.name
+                })
+                .count()
+                .saturating_sub(1);
+            if let Some((output_name, width, height, refresh)) =
+                self.real_outputs.get(output_index).cloned()
+            {
+                self.output.create_output(new_id, &output_name);
+                self.output.set_mode(new_id, width, height, refresh);
+            }
         }
         Ok(())
     }
@@ -742,7 +776,11 @@ impl HeadlessWireCore {
 
         // Handle frame callbacks
         if let Some(surface) = self.surfaces.surfaces.get_mut(&id) {
-            for callback_id in surface.callbacks.drain(..) {
+            for callback_id in surface.callbacks.drain(..).collect::<Vec<_>>() {
+                if self.defer_frame_callbacks {
+                    surface.callbacks.push(callback_id);
+                    continue;
+                }
                 let mut payload = vec![0u8; 4];
                 LittleEndian::write_u32(&mut payload[0..4], 0); // serial
                 self.events_out.push(WaylandMessage::new(callback_id, WaylandOpcode(0), payload));

@@ -539,6 +539,18 @@ pub struct SurfaceSnapshot {
     pub buffer_generation: u64,
     #[serde(default)]
     pub damage_rects: Vec<Rect>,
+    /// Owned snapshot of the client buffer for the broker IPC boundary.
+    /// Production shm clients populate this; legacy/demo scenes leave it empty.
+    #[serde(default)]
+    pub buffer_pixels: Vec<u8>,
+    #[serde(default)]
+    pub buffer_width: u32,
+    #[serde(default)]
+    pub buffer_height: u32,
+    #[serde(default)]
+    pub buffer_stride: u32,
+    #[serde(default)]
+    pub buffer_format: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

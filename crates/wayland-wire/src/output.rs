@@ -38,6 +38,14 @@ impl OutputManager {
         );
     }
 
+    pub fn set_mode(&mut self, id: WaylandObjectId, width: i32, height: i32, refresh_nsec: u32) {
+        if let Some(output) = self.outputs.get_mut(&id) {
+            output.width = width;
+            output.height = height;
+            output.refresh_nsec = refresh_nsec;
+        }
+    }
+
     pub fn geometry_rect(&self, id: WaylandObjectId) -> Option<Rect> {
         self.outputs.get(&id).map(|output| Rect {
             x: output.x,

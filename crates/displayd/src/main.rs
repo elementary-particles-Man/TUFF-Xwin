@@ -435,7 +435,27 @@ async fn handle_display_command(
 
                     for y in start_y..end_y {
                         for x in start_x..end_x {
-                            state.framebuffer[y * 1920 + x] = color;
+                            let pixel = if !surf.buffer_pixels.is_empty()
+                                && surf.buffer_width > 0
+                                && surf.buffer_height > 0
+                                && surf.buffer_stride >= surf.buffer_width.saturating_mul(4)
+                            {
+                                let local_x = (x as i32 - p.x).max(0) as u32;
+                                let local_y = (y as i32 - p.y).max(0) as u32;
+                                if local_x < surf.buffer_width && local_y < surf.buffer_height {
+                                    let offset = local_y as usize * surf.buffer_stride as usize
+                                        + local_x as usize * 4;
+                                    surf.buffer_pixels
+                                        .get(offset..offset + 4)
+                                        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+                                        .unwrap_or(color)
+                                } else {
+                                    color
+                                }
+                            } else {
+                                color
+                            };
+                            state.framebuffer[y * 1920 + x] = pixel;
                         }
                     }
                 }
