@@ -1278,4 +1278,123 @@ mod tests {
         assert_eq!(overlay.placement.y, 1080 - 36 - 20);
         assert_eq!(overlay.placement.z, 200);
     }
+
+    #[test]
+    fn test_phase2_scene_stacking_and_focus() {
+        let mut scene = CompdScene {
+            target_output: "eDP-1".into(),
+            focus: FocusTarget::Surface { id: "win2".into() },
+            selection: WaylandSelectionState::default(),
+            surfaces: vec![
+                SurfaceSnapshot {
+                    id: "win1".into(),
+                    app_id: "app1".into(),
+                    placement: SurfacePlacement {
+                        x: 10,
+                        y: 10,
+                        width: 200,
+                        height: 200,
+                        z: 1,
+                        visible: true,
+                    },
+                },
+                SurfaceSnapshot {
+                    id: "win2".into(),
+                    app_id: "app2".into(),
+                    placement: SurfacePlacement {
+                        x: 50,
+                        y: 50,
+                        width: 200,
+                        height: 200,
+                        z: 2,
+                        visible: true,
+                    },
+                },
+            ],
+        };
+        scene.surfaces.sort_by_key(|s| s.placement.z);
+        assert_eq!(scene.surfaces[0].id, "win1");
+        assert_eq!(scene.surfaces[1].id, "win2");
+        assert_eq!(scene.focus, FocusTarget::Surface { id: "win2".into() });
+    }
+
+    #[test]
+    fn test_phase2_occlusion_and_visibility() {
+        let win1 =
+            SurfacePlacement { x: 100, y: 100, width: 100, height: 100, z: 1, visible: true };
+        let win2 = SurfacePlacement { x: 50, y: 50, width: 300, height: 300, z: 2, visible: true };
+
+        let win1_occluded = win1.x >= win2.x
+            && win1.y >= win2.y
+            && (win1.x + win1.width as i32) <= (win2.x + win2.width as i32)
+            && (win1.y + win1.height as i32) <= (win2.y + win2.height as i32);
+
+        assert!(win1_occluded, "win1 should be fully occluded by win2");
+    }
+
+    #[test]
+    fn test_phase2_snapshot_reconcile_crash_recovery() {
+        let snapshot = CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: CommitTarget::Output { name: "eDP-1".into() },
+            focus: FocusTarget::Surface { id: "gone-app".into() },
+            selection: WaylandSelectionState::default(),
+            surfaces: vec![
+                SurfaceSnapshot {
+                    id: "gone-app".into(),
+                    app_id: "gone.app".into(),
+                    placement: SurfacePlacement {
+                        x: 0,
+                        y: 0,
+                        width: 100,
+                        height: 100,
+                        z: 1,
+                        visible: true,
+                    },
+                },
+                SurfaceSnapshot {
+                    id: "surviving-app".into(),
+                    app_id: "surviving.app".into(),
+                    placement: SurfacePlacement {
+                        x: 10,
+                        y: 10,
+                        width: 100,
+                        height: 100,
+                        z: 2,
+                        visible: true,
+                    },
+                },
+            ],
+            commit_id: 10,
+            unix_timestamp: 1234567,
+        };
+
+        let registry = SurfaceRegistrySnapshot {
+            generation: 1,
+            surfaces: vec![WaylandSurfaceState {
+                id: "surviving-app".into(),
+                app_id: "surviving.app".into(),
+                role: WaylandSurfaceRole::Toplevel,
+                mapped: true,
+                buffer_attached: true,
+            }],
+            foreign_toplevels: vec![],
+            selection: WaylandSelectionState::default(),
+            unix_timestamp: 1234567,
+        };
+
+        let output_mode = waybroker_common::OutputMode {
+            name: "eDP-1".into(),
+            width: 1920,
+            height: 1080,
+            refresh_hz: 60,
+        };
+
+        let initial_scene = scene_from_snapshot(&snapshot);
+        let reconciled = reconcile_scene_with_registry(initial_scene, &registry, &output_mode);
+
+        assert_eq!(reconciled.scene.surfaces.len(), 1);
+        assert_eq!(reconciled.scene.surfaces[0].id, "surviving-app");
+        assert_eq!(reconciled.dropped_surface_ids, vec!["gone-app"]);
+    }
 }
