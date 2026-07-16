@@ -14,9 +14,11 @@ use std::os::unix::{
 
 use anyhow::{Context, Result, bail};
 use byteorder::ByteOrder;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 static GLOBAL_REGISTRY: Mutex<Option<SurfaceRegistrySnapshot>> = Mutex::new(None);
+static CANONICAL_SCENE: LazyLock<Mutex<std::collections::HashMap<u64, Vec<SurfaceSnapshot>>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
@@ -1138,9 +1140,7 @@ fn bind_single_wayland_display_socket_ext(
 }
 
 fn handle_production_client(stream: UnixStream) -> Result<()> {
-    use std::time::Duration;
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
-    let _registry_guard = ClientRegistryGuard(client_id);
     let mut core = wayland_wire::core::HeadlessWireCore::default();
     core.set_defer_frame_callbacks(true);
     let outputs = query_output_inventory()
@@ -1148,6 +1148,7 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
     if outputs.is_empty() {
         bail!("production Wayland requires at least one real displayd output");
     }
+    let _registry_guard = ClientRegistryGuard { client_id, outputs: outputs.clone() };
     {
         for output in &outputs {
             core.add_real_output(&output.name, output.width as i32, output.height as i32);
@@ -1157,7 +1158,9 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
     let mut buffer = Vec::with_capacity(4096);
     let mut read_buf = [0u8; 4096];
 
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    // A production Wayland connection is long-lived; idle clients must not be
+    // disconnected merely because no request arrived for a fixed interval.
+    stream.set_read_timeout(None)?;
 
     loop {
         let (n, fds) = wayland_wire::fd::recv_with_fds(&stream, &mut read_buf)?;
@@ -1194,20 +1197,20 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
                         s.write_all(&encoded)?;
                     }
                     if is_commit {
+                        upsert_client_scene(client_id, &core);
+                        let _presented =
+                            commit_production_scene(&canonical_scene_surfaces(), &outputs)?;
                         let callbacks = core.take_frame_callbacks(committed_surface);
-                        if !callbacks.is_empty() {
-                            let _presented = commit_production_scene(&core, &outputs)?;
-                            for callback_id in callbacks {
-                                let mut payload = vec![0u8; 4];
-                                byteorder::LittleEndian::write_u32(&mut payload, 0);
-                                let event = wayland_wire::WaylandMessage::new(
-                                    callback_id,
-                                    wayland_wire::WaylandOpcode(0),
-                                    payload,
-                                );
-                                let mut s = &stream;
-                                s.write_all(&wayland_wire::codec::encode_message(&event)?)?;
-                            }
+                        for callback_id in callbacks {
+                            let mut payload = vec![0u8; 4];
+                            byteorder::LittleEndian::write_u32(&mut payload, 0);
+                            let event = wayland_wire::WaylandMessage::new(
+                                callback_id,
+                                wayland_wire::WaylandOpcode(0),
+                                payload,
+                            );
+                            let mut s = &stream;
+                            s.write_all(&wayland_wire::codec::encode_message(&event)?)?;
                         }
                     }
                 }
@@ -1224,15 +1227,23 @@ fn handle_production_client(stream: UnixStream) -> Result<()> {
     Ok(())
 }
 
-struct ClientRegistryGuard(u64);
+struct ClientRegistryGuard {
+    client_id: u64,
+    outputs: Vec<OutputMode>,
+}
 
 impl Drop for ClientRegistryGuard {
     fn drop(&mut self) {
-        remove_client_from_global_registry(self.0);
+        remove_client_from_global_registry(self.client_id);
+        CANONICAL_SCENE.lock().unwrap().remove(&self.client_id);
+        let _ = commit_production_scene(&canonical_scene_surfaces(), &self.outputs);
     }
 }
 
-fn production_scene_surfaces(core: &wayland_wire::core::HeadlessWireCore) -> Vec<SurfaceSnapshot> {
+fn production_scene_surfaces(
+    client_id: u64,
+    core: &wayland_wire::core::HeadlessWireCore,
+) -> Vec<SurfaceSnapshot> {
     core.surfaces
         .surfaces
         .iter()
@@ -1240,7 +1251,7 @@ fn production_scene_surfaces(core: &wayland_wire::core::HeadlessWireCore) -> Vec
             let buffer_id = surface.current.buffer_id?;
             let buffer = core.shm.buffers.get(&buffer_id)?;
             Some(SurfaceSnapshot {
-                id: format!("wayland-surface-{}", id.0),
+                id: format!("client-{client_id}-surface-{}", id.0),
                 app_id: "production-app".into(),
                 placement: SurfacePlacement {
                     x: surface.current.offset_x,
@@ -1273,6 +1284,14 @@ fn production_scene_surfaces(core: &wayland_wire::core::HeadlessWireCore) -> Vec
         .collect()
 }
 
+fn upsert_client_scene(client_id: u64, core: &wayland_wire::core::HeadlessWireCore) {
+    CANONICAL_SCENE.lock().unwrap().insert(client_id, production_scene_surfaces(client_id, core));
+}
+
+fn canonical_scene_surfaces() -> Vec<SurfaceSnapshot> {
+    CANONICAL_SCENE.lock().unwrap().values().flat_map(|surfaces| surfaces.iter().cloned()).collect()
+}
+
 fn read_shm_buffer(
     core: &wayland_wire::core::HeadlessWireCore,
     buffer: &wayland_wire::shm::ShmBuffer,
@@ -1303,7 +1322,7 @@ fn read_shm_buffer(
 }
 
 fn commit_production_scene(
-    core: &wayland_wire::core::HeadlessWireCore,
+    surfaces: &[SurfaceSnapshot],
     outputs: &[OutputMode],
 ) -> Result<DisplayEvent> {
     let mut stream =
@@ -1316,7 +1335,7 @@ fn commit_production_scene(
             target: CommitTarget::Output { name: output.name.clone() },
             focus: FocusTarget::None,
             selection: WaylandSelectionState::default(),
-            surfaces: production_scene_surfaces(core),
+            surfaces: surfaces.to_vec(),
         }),
     );
     send_json_line(&mut stream, &request)?;
