@@ -1412,6 +1412,44 @@ fn handle_session_command(
             }
             Ok(SessionCommand::ReleaseIdle { reason })
         }
+        SessionCommand::SuspendRequested => {
+            if let Some(supervisor) = supervisor {
+                supervisor.is_suspended = true;
+                supervisor.suspend_count += 1;
+                println!(
+                    "service=sessiond op=suspend event=success reason=system_suspend suspend_count={}",
+                    supervisor.suspend_count
+                );
+            } else {
+                println!(
+                    "service=sessiond op=suspend event=skipped reason=\"no supervisor active\""
+                );
+            }
+            Ok(SessionCommand::SuspendRequested)
+        }
+        SessionCommand::ResumeHint { stage, output } => {
+            if let Some(supervisor) = supervisor {
+                supervisor.is_suspended = false;
+                println!(
+                    "service=sessiond op=resume event=success stage={:?} output={:?}",
+                    stage, output
+                );
+
+                if let Ok(mut displayd_stream) = connect_service_socket(ServiceRole::Displayd) {
+                    let resume_req = IpcEnvelope::new(
+                        ServiceRole::Sessiond,
+                        ServiceRole::Displayd,
+                        MessageKind::DisplayCommand(waybroker_common::DisplayCommand::ResumeBegin),
+                    );
+                    let _ = send_json_line(&mut displayd_stream, &resume_req);
+                }
+            } else {
+                println!(
+                    "service=sessiond op=resume event=skipped reason=\"no supervisor active\""
+                );
+            }
+            Ok(SessionCommand::ResumeHint { stage, output })
+        }
         other => Ok(SessionCommand::ProfileUnchanged {
             profile_id: "unknown".into(),
             reason: format!("sessiond IPC does not apply {other:?}"),
@@ -2002,6 +2040,8 @@ struct SessionSupervisor {
     stream_sequence: u64,
     last_streamed_state: Option<SessionLaunchState>,
     idle_inhibitors: Vec<String>,
+    is_suspended: bool,
+    suspend_count: u32,
 }
 
 impl SessionSupervisor {
@@ -2037,6 +2077,8 @@ impl SessionSupervisor {
             stream_sequence: 0,
             last_streamed_state: None,
             idle_inhibitors: Vec::new(),
+            is_suspended: false,
+            suspend_count: 0,
         })
     }
 
@@ -3055,5 +3097,67 @@ mod tests {
         assert_eq!(plasmashell.id, "plasmashell");
         assert_eq!(plasmashell.role, DesktopComponentRole::Shell);
         assert_eq!(plasmashell.command, vec!["plasmashell"]);
+    }
+
+    #[test]
+    fn test_phase7_suspend_resume_lifecycle() {
+        let profile = DesktopProfile {
+            id: "demo-x11".into(),
+            display_name: "Demo X11".into(),
+            protocol: DesktopProtocol::LayerX11,
+            summary: "demo".into(),
+            degraded_profile_id: None,
+            broker_services: vec![ServiceRole::Sessiond],
+            session_components: vec![],
+            service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
+        };
+
+        let mut supervisor = super::SessionSupervisor {
+            profiles: vec![profile.clone()],
+            profile,
+            components: vec![],
+            session_instance_id: "test-session".into(),
+            stream_generation: 1,
+            stream_sequence: 1,
+            last_streamed_state: None,
+            idle_inhibitors: Vec::new(),
+            is_suspended: false,
+            suspend_count: 0,
+        };
+
+        let config = super::Config::default();
+
+        let res_suspend = super::handle_session_command(
+            waybroker_common::SessionCommand::SuspendRequested,
+            &[supervisor.profile.clone()],
+            &config,
+            Some(&mut supervisor),
+        )
+        .expect("handle suspend");
+
+        assert_eq!(res_suspend, waybroker_common::SessionCommand::SuspendRequested);
+        assert!(supervisor.is_suspended);
+        assert_eq!(supervisor.suspend_count, 1);
+
+        let res_resume = super::handle_session_command(
+            waybroker_common::SessionCommand::ResumeHint {
+                stage: waybroker_common::ResumeStage::Complete,
+                output: None,
+            },
+            &[supervisor.profile.clone()],
+            &config,
+            Some(&mut supervisor),
+        )
+        .expect("handle resume");
+
+        assert_eq!(
+            res_resume,
+            waybroker_common::SessionCommand::ResumeHint {
+                stage: waybroker_common::ResumeStage::Complete,
+                output: None,
+            }
+        );
+        assert!(!supervisor.is_suspended);
     }
 }
