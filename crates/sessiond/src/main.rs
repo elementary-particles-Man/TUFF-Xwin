@@ -3031,4 +3031,29 @@ mod tests {
         assert_eq!(result, "missing");
         assert_eq!(reason, "no lockd binding found");
     }
+
+    #[test]
+    fn test_phase5_kde_plasma_profile_load() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+        let profiles_dir = repo_root.join("profiles");
+
+        let profiles = super::load_profiles(&profiles_dir).expect("failed to load profiles");
+        let plasma_profile =
+            profiles.iter().find(|p| p.id == "plasma").expect("plasma profile not found");
+
+        assert_eq!(plasma_profile.display_name, "KDE Plasma on WaylandNative");
+        assert_eq!(plasma_profile.protocol, DesktopProtocol::WaylandNative);
+        assert_eq!(plasma_profile.session_components.len(), 2);
+
+        let kwin = &plasma_profile.session_components[0];
+        assert_eq!(kwin.id, "kwin");
+        assert_eq!(kwin.role, DesktopComponentRole::WindowManager);
+        assert_eq!(kwin.command, vec!["kwin_wayland", "--replace"]);
+
+        let plasmashell = &plasma_profile.session_components[1];
+        assert_eq!(plasmashell.id, "plasmashell");
+        assert_eq!(plasmashell.role, DesktopComponentRole::Shell);
+        assert_eq!(plasmashell.command, vec!["plasmashell"]);
+    }
 }
