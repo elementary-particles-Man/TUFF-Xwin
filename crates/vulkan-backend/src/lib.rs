@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
+use std::io::Cursor;
 use std::mem::size_of;
 use std::time::{Duration, Instant};
 
@@ -57,6 +58,7 @@ pub enum VulkanWorkloadClass {
     PacketPreclassification,
     BulkPrefilter,
     ScreenshotRefine,
+    SceneComposition,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +243,7 @@ impl VulkanBackend {
             }
             Err(e) => {
                 inner.state = VulkanBackendState::Faulted;
+                eprintln!("vulkan-backend: initialization failed: {e:?}");
                 log::error!("vulkan-backend: initialization failed: {:?}", e);
             }
         }
@@ -309,13 +312,8 @@ impl VulkanBackend {
         let pipeline_layout =
             unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
 
-        let shader_module_info = vk::ShaderModuleCreateInfo::builder().code(unsafe {
-            let (prefix, code, suffix) = COMPUTE_SHADER_BYTES.align_to::<u32>();
-            if !prefix.is_empty() || !suffix.is_empty() {
-                return Err("Shader bytes not aligned".into());
-            }
-            code
-        });
+        let shader_code = ash::util::read_spv(&mut Cursor::new(COMPUTE_SHADER_BYTES))?;
+        let shader_module_info = vk::ShaderModuleCreateInfo::builder().code(&shader_code);
         let shader_module = unsafe { device.create_shader_module(&shader_module_info, None)? };
 
         let main_cstr = CString::new("main")?;

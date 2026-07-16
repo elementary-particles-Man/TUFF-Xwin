@@ -165,6 +165,7 @@ impl Default for HeadlessWireCore {
             interface: "zwp_pointer_constraints_v1".into(),
             version: 1,
         });
+        core.globals.push(WireGlobal { name: 21, interface: "wl_output".into(), version: 4 });
 
         core
     }

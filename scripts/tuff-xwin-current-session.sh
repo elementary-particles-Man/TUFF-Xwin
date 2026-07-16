@@ -211,6 +211,24 @@ assert_tuff_active() {
     fi
   done
   [[ $failed -eq 0 ]] || die "TUFF-Xwin current-session is not fully active; aborting takeover"
+
+  # Perform real compositor readiness check
+  log "running real compositor readiness check..."
+  local target_socket="wayland-0"
+  if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+    target_socket="$WAYLAND_DISPLAY"
+  fi
+
+  local waylandd_bin
+  waylandd_bin="$(PATH="$bin_path" which waylandd 2>/dev/null || true)"
+  if [[ -z "$waylandd_bin" ]]; then
+    die "waylandd binary not found in path: $bin_path"
+  fi
+
+  if ! "$waylandd_bin" --check-readiness "$target_socket"; then
+    die "Compositor readiness check failed on $target_socket; aborting takeover (fail closed)"
+  fi
+  log "readiness check success"
 }
 
 cmd_start() {

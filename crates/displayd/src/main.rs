@@ -30,8 +30,11 @@ async fn main() -> Result<()> {
         let backend = VulkanBackend::new(VulkanBackendConfig::default());
         let caps = backend.initialize();
         println!(
-            "service=displayd op=vulkan_init event=success driver={} device={}",
-            caps.driver_name, caps.device_name
+            "service=displayd op=vulkan_init event={} compute_available={} driver={} device={}",
+            if caps.compute_available { "success" } else { "fallback" },
+            caps.compute_available,
+            caps.driver_name,
+            caps.device_name
         );
         Some(backend)
     } else {
@@ -122,6 +125,8 @@ struct Config {
 impl Config {
     fn from_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let mut config = Self::default();
+        // Prefer GPU acceleration; Vulkan initialization remains fail-soft.
+        config.use_vulkan = true;
         config.session_instance_id = DEFAULT_SESSION_INSTANCE_ID.to_string();
 
         while let Some(arg) = args.next() {
@@ -129,6 +134,7 @@ impl Config {
                 "--once" => config.serve_once = true,
                 "--fail-resume" => config.fail_resume = true,
                 "--vulkan" => config.use_vulkan = true,
+                "--no-vulkan" => config.use_vulkan = false,
                 "--session-instance-id" => {
                     config.session_instance_id =
                         args.next().context("--session-instance-id requires an id")?;
@@ -172,7 +178,7 @@ impl Config {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID] [--socket PATH] [--capture-backend fake|real] [--allow-real-capture] [--capture-method stub|x11|portal] [--x11-display DISPLAY] [--allow-portal-capture] [--allow-portal-dialog]"
+                        "usage: displayd [--once] [--fail-resume] [--vulkan|--no-vulkan] [--session-instance-id ID] [--socket PATH] [--capture-backend fake|real] [--allow-real-capture] [--capture-method stub|x11|portal] [--x11-display DISPLAY] [--allow-portal-capture] [--allow-portal-dialog]"
                     );
                     std::process::exit(0);
                 }
@@ -329,19 +335,36 @@ async fn handle_display_command(
             Ok(DisplayEvent::ModeApplied { output, mode })
         }
         DisplayCommand::CommitScene { target, focus, selection, surfaces } => {
+            let surface_words: Vec<u32> = surfaces
+                .iter()
+                .flat_map(|surface| {
+                    [
+                        surface.placement.x as u32,
+                        surface.placement.y as u32,
+                        surface.placement.width,
+                        surface.placement.height,
+                        surface.placement.z as u32,
+                        u32::from(surface.placement.visible),
+                    ]
+                })
+                .collect();
+
             if let Some(vulkan) = vulkan {
                 let handle = vulkan.submit_batch(VulkanBatchSubmission {
-                    workload: VulkanWorkloadClass::MaintenanceHashing,
-                    payload_len: surfaces.len() * 512, // シミュレート
-                    surface_words: None,
+                    workload: VulkanWorkloadClass::SceneComposition,
+                    payload_len: surface_words.len() * std::mem::size_of::<u32>(),
+                    surface_words: Some(surface_words),
                     timeout: Duration::from_millis(50),
                     requires_zeroize: false,
                     allows_gpu: true,
                 });
                 let result = vulkan.wait_for_completion(handle).await;
                 println!(
-                    "service=displayd op=vulkan_hashing event=completed workload={:?} path={:?}",
-                    result.workload, result.path
+                    "service=displayd op=vulkan_scene_composition event=completed workload={:?} path={:?} fallback_reason={:?} surfaces={}",
+                    result.workload,
+                    result.path,
+                    result.fallback_reason,
+                    surfaces.len(),
                 );
             }
 

@@ -23,8 +23,11 @@ async fn main() -> Result<()> {
         let backend = VulkanBackend::new(VulkanBackendConfig::default());
         let caps = backend.initialize();
         println!(
-            "service=compd op=vulkan_init event=success driver={} device={}",
-            caps.driver_name, caps.device_name
+            "service=compd op=vulkan_init event={} compute_available={} driver={} device={}",
+            if caps.compute_available { "success" } else { "fallback" },
+            caps.compute_available,
+            caps.driver_name,
+            caps.device_name
         );
         Some(backend)
     } else {
@@ -146,6 +149,8 @@ struct Config {
 impl Config {
     fn from_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let mut config = Self::default();
+        // Prefer GPU acceleration; Vulkan initialization remains fail-soft.
+        config.use_vulkan = true;
         config.session_instance_id = "default-single-session".to_string();
 
         while let Some(arg) = args.next() {
@@ -165,13 +170,14 @@ impl Config {
                 "--require-waylandd" => config.require_waylandd = true,
                 "--handoff-selection" => config.handoff_selection = true,
                 "--vulkan" => config.use_vulkan = true,
+                "--no-vulkan" => config.use_vulkan = false,
                 "--session-instance-id" => {
                     config.session_instance_id =
                         args.next().context("--session-instance-id requires an id")?;
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: compd [--scene PATH] [--print-scene] [--commit-demo] [--require-displayd] [--require-waylandd] [--restore-from-displayd] [--reconcile-waylandd] [--handoff-selection] [--serve-ipc] [--once] [--fail-resume] [--vulkan] [--session-instance-id ID]"
+                        "usage: compd [--scene PATH] [--print-scene] [--commit-demo] [--require-displayd] [--require-waylandd] [--restore-from-displayd] [--reconcile-waylandd] [--handoff-selection] [--serve-ipc] [--once] [--fail-resume] [--vulkan|--no-vulkan] [--session-instance-id ID]"
                     );
                     std::process::exit(0);
                 }

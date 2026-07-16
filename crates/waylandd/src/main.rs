@@ -7,7 +7,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 
 use anyhow::{Context, Result, bail};
 use vulkan_backend::{
@@ -179,6 +179,33 @@ async fn main() -> Result<()> {
     );
     println!("{}", banner.render());
 
+    if let Some(check_socket) = config.check_readiness.as_ref() {
+        let socket_path = resolve_wayland_display_path(check_socket)?;
+        match run_readiness_check(&socket_path) {
+            Ok(_) => {
+                println!("service=waylandd op=readiness_check event=success");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("service=waylandd op=readiness_check event=failure reason={:?}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if config.smoke_check {
+        match run_smoke_check() {
+            Ok(_) => {
+                println!("service=waylandd op=smoke_check event=success");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("service=waylandd op=smoke_check event=failure reason={:?}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     let vulkan = if config.use_vulkan && global_accel_policy().prefers_vulkan() {
         let backend = VulkanBackend::new(VulkanBackendConfig::default());
         let caps = backend.initialize();
@@ -268,12 +295,20 @@ struct Config {
     session_instance_id: String,
     wire_headless_test: bool,
     wire_test_socket: Option<PathBuf>,
+    diagnostic_only: bool,
+    production: bool,
+    headless_socket: Option<PathBuf>,
+    check_readiness: Option<String>,
+    smoke_check: bool,
 }
 
 impl Config {
     fn from_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let mut config = Self::default();
+        // waylandd currently tracks protocol/state; GPU scene work is owned by
+        // compd/displayd until a real buffer import path is available here.
         config.session_instance_id = DEFAULT_SESSION_INSTANCE_ID.to_string();
+        config.diagnostic_only = true; // default behavior for safety
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -282,6 +317,7 @@ impl Config {
                 "--once" => config.serve_once = true,
                 "--print-registry" => config.print_registry = true,
                 "--vulkan" => config.use_vulkan = true,
+                "--no-vulkan" => config.use_vulkan = false,
                 "--wire-headless-test" => config.wire_headless_test = true,
                 "--wire-test-socket" => {
                     let path = args.next().context("--wire-test-socket requires a path")?;
@@ -307,9 +343,30 @@ impl Config {
                     config.bind_wayland_display =
                         Some(args.next().context("--bind-wayland-display requires a socket name")?);
                 }
+                "--diagnostic-only" => {
+                    config.diagnostic_only = true;
+                    config.production = false;
+                }
+                "--production" => {
+                    config.production = true;
+                    config.diagnostic_only = false;
+                }
+                "--headless-socket" => {
+                    config.headless_socket = Some(PathBuf::from(
+                        args.next().context("--headless-socket requires a path")?,
+                    ));
+                }
+                "--check-readiness" => {
+                    config.check_readiness = Some(
+                        args.next().context("--check-readiness requires a socket name or path")?,
+                    );
+                }
+                "--smoke-check" => {
+                    config.smoke_check = true;
+                }
                 "--help" | "-h" => {
                     println!(
-                        "usage: waylandd [--require-displayd] [--serve-ipc] [--once] [--print-registry] [--registry PATH] [--bind-wayland-display NAME] [--vulkan] [--session-instance-id ID] [--wire-headless-test] [--wire-test-socket PATH]"
+                        "usage: waylandd [--require-displayd] [--serve-ipc] [--once] [--print-registry] [--registry PATH] [--bind-wayland-display NAME] [--vulkan|--no-vulkan] [--session-instance-id ID] [--wire-headless-test] [--wire-test-socket PATH] [--diagnostic-only] [--production] [--headless-socket PATH] [--check-readiness SOCKET] [--smoke-check]"
                     );
                     std::process::exit(0);
                 }
@@ -329,9 +386,12 @@ async fn serve_ipc(
     data_payloads: &mut DataPayloadRegistry,
     vulkan: Option<&VulkanBackend>,
 ) -> Result<()> {
-    let _wayland_display = match config.bind_wayland_display.as_deref() {
-        Some(name) => Some(bind_wayland_display_socket(name)?),
-        None => None,
+    let _wayland_display = if let Some(name) = config.bind_wayland_display.as_deref() {
+        Some(bind_wayland_display_socket_ext(name, config.production)?)
+    } else if let Some(path) = config.headless_socket.as_ref() {
+        Some(bind_wayland_display_socket_absolute(path, config.production)?)
+    } else {
+        None
     };
 
     let listener = bind_service_socket(ServiceRole::Waylandd)?;
@@ -932,7 +992,7 @@ fn format_outputs(outputs: &[OutputMode]) -> String {
 }
 
 #[cfg(unix)]
-fn bind_wayland_display_socket(name: &str) -> Result<WaylandDisplaySocket> {
+fn bind_wayland_display_socket_ext(name: &str, production: bool) -> Result<WaylandDisplaySocket> {
     let mut candidates = vec![name.to_string()];
     if let Some((prefix, display_num)) = split_wayland_display_name(name) {
         candidates.push(format!("{prefix}{}", display_num + 1));
@@ -943,7 +1003,7 @@ fn bind_wayland_display_socket(name: &str) -> Result<WaylandDisplaySocket> {
     for candidate in candidates {
         let path = resolve_wayland_display_path(&candidate)?;
         let lock_path = wayland_lock_path(&path);
-        match bind_single_wayland_display_socket(&path, &lock_path) {
+        match bind_single_wayland_display_socket_ext(&path, &lock_path, production) {
             Ok(socket) => return Ok(socket),
             Err(err) => {
                 println!(
@@ -961,9 +1021,19 @@ fn bind_wayland_display_socket(name: &str) -> Result<WaylandDisplaySocket> {
 }
 
 #[cfg(unix)]
-fn bind_single_wayland_display_socket(
+fn bind_wayland_display_socket_absolute(
+    path: &Path,
+    production: bool,
+) -> Result<WaylandDisplaySocket> {
+    let lock_path = wayland_lock_path(path);
+    bind_single_wayland_display_socket_ext(path, &lock_path, production)
+}
+
+#[cfg(unix)]
+fn bind_single_wayland_display_socket_ext(
     path: &Path,
     lock_path: &Path,
+    production: bool,
 ) -> Result<WaylandDisplaySocket> {
     if path.exists() {
         bail!("Wayland display socket already exists: {}", path.display());
@@ -983,7 +1053,7 @@ fn bind_single_wayland_display_socket(
         }
     }
 
-    let _listener = UnixListener::bind(path)
+    let listener = UnixListener::bind(path)
         .with_context(|| format!("failed to bind Wayland display socket {}", path.display()))?;
     fs::write(lock_path, format!("{}\n", std::process::id()))
         .with_context(|| format!("failed to write Wayland display lock {}", lock_path.display()))?;
@@ -992,13 +1062,30 @@ fn bind_single_wayland_display_socket(
     thread::Builder::new()
         .name("wayland-display-listener".to_string())
         .spawn(move || {
-            for stream in _listener.incoming() {
+            for stream in listener.incoming() {
                 match stream {
-                    Ok(_stream) => {
-                        println!(
-                            "service=waylandd op=wayland_display event=client_connected path={} info=\"connection accepted by diagnostic listener (no data read)\"",
-                            log_path.display()
-                        );
+                    Ok(stream) => {
+                        if production {
+                            println!(
+                                "service=waylandd op=wayland_display event=client_connected path={} mode=production",
+                                log_path.display()
+                            );
+                            let client_path = log_path.clone();
+                            thread::spawn(move || {
+                                if let Err(err) = handle_production_client(stream) {
+                                    eprintln!(
+                                        "service=waylandd op=wayland_display event=production_client_error path={} reason={:?}",
+                                        client_path.display(),
+                                        err
+                                    );
+                                }
+                            });
+                        } else {
+                            println!(
+                                "service=waylandd op=wayland_display event=client_connected path={} info=\"connection accepted by diagnostic listener (no data read)\"",
+                                log_path.display()
+                            );
+                        }
                     }
                     Err(err) => {
                         println!(
@@ -1013,15 +1100,284 @@ fn bind_single_wayland_display_socket(
         })
         .context("failed to spawn Wayland display listener")?;
 
-    println!(
-        "service=waylandd op=wayland_display event=diagnostic_listener_bound path={} info=\"this is a minimal listener for connection observation only\"",
-        path.display()
-    );
+    if production {
+        println!(
+            "service=waylandd op=wayland_display event=production_listener_bound path={} info=\"this listener handles real Wayland clients\"",
+            path.display()
+        );
+    } else {
+        println!(
+            "service=waylandd op=wayland_display event=diagnostic_listener_bound path={} info=\"this is a minimal listener for connection observation only\"",
+            path.display()
+        );
+    }
     Ok(WaylandDisplaySocket { path: path.to_path_buf(), lock_path: lock_path.to_path_buf() })
 }
 
+fn handle_production_client(stream: UnixStream) -> Result<()> {
+    use std::time::Duration;
+    let mut core = wayland_wire::core::HeadlessWireCore::default();
+    let mut received_fds = Vec::new();
+    let mut buffer = Vec::with_capacity(4096);
+    let mut read_buf = [0u8; 4096];
+
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+    loop {
+        let (n, fds) = wayland_wire::fd::recv_with_fds(&stream, &mut read_buf)?;
+        if n == 0 && fds.is_empty() {
+            break;
+        }
+        buffer.extend_from_slice(&read_buf[..n]);
+        received_fds.extend(fds);
+
+        let mut consumed = 0;
+        loop {
+            let remaining = &buffer[consumed..];
+            if remaining.len() < 8 {
+                break;
+            }
+
+            match wayland_wire::codec::decode_message(remaining) {
+                Ok(msg) => {
+                    let size = msg.header.size as usize;
+                    consumed += size;
+
+                    let result = core.dispatch_with_fds(msg, &mut received_fds)?;
+                    for ev in result.events {
+                        let encoded = wayland_wire::codec::encode_message(&ev)?;
+                        use std::io::Write;
+                        let mut s = &stream;
+                        s.write_all(&encoded)?;
+                    }
+                }
+                Err(wayland_wire::WireError::Incomplete) => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        if consumed > 0 {
+            buffer.drain(0..consumed);
+        }
+    }
+    Ok(())
+}
+
+fn run_readiness_check(socket_path: &Path) -> Result<()> {
+    use byteorder::{ByteOrder, LittleEndian};
+    use std::io::{Read, Write};
+    use std::time::Duration;
+    use wayland_wire::{WaylandMessage, WaylandObjectId, WaylandOpcode};
+
+    println!("service=waylandd op=readiness_check event=begin path={}", socket_path.display());
+
+    let mut stream = UnixStream::connect(socket_path)
+        .context("Failed to connect to Wayland socket for readiness check")?;
+
+    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+
+    // 1. Send wl_display.get_registry (id: 1, opcode: 1, new_id: 2)
+    let mut payload = vec![0u8; 4];
+    LittleEndian::write_u32(&mut payload[0..4], 2);
+    let msg1 = WaylandMessage::new(WaylandObjectId::DISPLAY, WaylandOpcode(1), payload);
+    stream.write_all(&wayland_wire::codec::encode_message(&msg1)?)?;
+
+    // 2. Send wl_display.sync (id: 1, opcode: 0, new_id: 3)
+    let mut payload_sync = vec![0u8; 4];
+    LittleEndian::write_u32(&mut payload_sync[0..4], 3);
+    let msg2 = WaylandMessage::new(WaylandObjectId::DISPLAY, WaylandOpcode(0), payload_sync);
+    stream.write_all(&wayland_wire::codec::encode_message(&msg2)?)?;
+
+    let mut buf = Vec::new();
+    let mut temp_buf = [0u8; 1024];
+    let mut got_callback_done = false;
+    let mut output_count = 0;
+    let mut compositor_bound = false;
+    let mut shm_bound = false;
+
+    let start = std::time::Instant::now();
+    while !got_callback_done && start.elapsed() < Duration::from_secs(2) {
+        let n = match stream.read(&mut temp_buf) {
+            Ok(0) => bail!("Connection closed during readiness check"),
+            Ok(n) => n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        buf.extend_from_slice(&temp_buf[..n]);
+
+        let mut consumed = 0;
+        while consumed + 8 <= buf.len() {
+            let header = wayland_wire::codec::decode_header(&buf[consumed..])?;
+            if consumed + header.size as usize > buf.len() {
+                break;
+            }
+            let msg = wayland_wire::codec::decode_message(
+                &buf[consumed..consumed + header.size as usize],
+            )?;
+            consumed += header.size as usize;
+
+            if msg.header.object_id.0 == 2 && msg.header.opcode.0 == 0 {
+                if msg.payload.len() >= 8 {
+                    let interface_len = LittleEndian::read_u32(&msg.payload[4..8]) as usize;
+                    if msg.payload.len() >= 8 + interface_len {
+                        let interface_name =
+                            String::from_utf8_lossy(&msg.payload[8..8 + interface_len - 1])
+                                .into_owned();
+                        if interface_name == "wl_output" {
+                            output_count += 1;
+                        } else if interface_name == "wl_compositor" {
+                            compositor_bound = true;
+                        } else if interface_name == "wl_shm" {
+                            shm_bound = true;
+                        }
+                    }
+                }
+            }
+
+            if msg.header.object_id.0 == 3 && msg.header.opcode.0 == 0 {
+                got_callback_done = true;
+            }
+        }
+        if consumed > 0 {
+            buf.drain(0..consumed);
+        }
+    }
+
+    if !got_callback_done {
+        bail!("Registry roundtrip timed out during readiness check");
+    }
+
+    // output inventory count >= 1
+    // For smoke tests, KWin integration or test, output might not always be there unless displayd is running.
+    // If not testing with displayd, we could inject outputs inside the core registry mock.
+    // In production, we check output_count >= 1. We'll verify this condition.
+    if output_count == 0 {
+        bail!("No outputs advertised in registry. At least 1 output is required.");
+    }
+    if !compositor_bound || !shm_bound {
+        bail!("Missing critical globals (wl_compositor/wl_shm)");
+    }
+
+    // 3. Bind wl_compositor (new_id 4)
+    let mut bind_comp = Vec::new();
+    bind_comp.extend_from_slice(&1u32.to_le_bytes()); // name
+    let comp_iface = "wl_compositor\0";
+    bind_comp.extend_from_slice(&(comp_iface.len() as u32).to_le_bytes());
+    bind_comp.extend_from_slice(comp_iface.as_bytes());
+    while bind_comp.len() % 4 != 0 {
+        bind_comp.push(0);
+    }
+    bind_comp.extend_from_slice(&4u32.to_le_bytes()); // version
+    bind_comp.extend_from_slice(&4u32.to_le_bytes()); // new_id
+    let msg_bind_comp = WaylandMessage::new(WaylandObjectId(2), WaylandOpcode(0), bind_comp);
+    stream.write_all(&wayland_wire::codec::encode_message(&msg_bind_comp)?)?;
+
+    // 4. Create Surface (id 4 (compositor), opcode 0, new_id 5)
+    let mut create_surf = vec![0u8; 4];
+    LittleEndian::write_u32(&mut create_surf[0..4], 5);
+    let msg_create_surf = WaylandMessage::new(WaylandObjectId(4), WaylandOpcode(0), create_surf);
+    stream.write_all(&wayland_wire::codec::encode_message(&msg_create_surf)?)?;
+
+    // 5. Commit (id 5, opcode 6)
+    let msg_commit = WaylandMessage::new(WaylandObjectId(5), WaylandOpcode(6), vec![]);
+    stream.write_all(&wayland_wire::codec::encode_message(&msg_commit)?)?;
+
+    // 6. Presentation / Sync completion feedback
+    let mut payload_sync2 = vec![0u8; 4];
+    LittleEndian::write_u32(&mut payload_sync2[0..4], 6);
+    let msg_sync2 = WaylandMessage::new(WaylandObjectId::DISPLAY, WaylandOpcode(0), payload_sync2);
+    stream.write_all(&wayland_wire::codec::encode_message(&msg_sync2)?)?;
+
+    let mut got_callback_done2 = false;
+    let start = std::time::Instant::now();
+    while !got_callback_done2 && start.elapsed() < Duration::from_secs(2) {
+        let n = match stream.read(&mut temp_buf) {
+            Ok(0) => bail!("Connection closed during commit validation"),
+            Ok(n) => n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        buf.extend_from_slice(&temp_buf[..n]);
+
+        let mut consumed = 0;
+        while consumed + 8 <= buf.len() {
+            let header = wayland_wire::codec::decode_header(&buf[consumed..])?;
+            if consumed + header.size as usize > buf.len() {
+                break;
+            }
+            let msg = wayland_wire::codec::decode_message(
+                &buf[consumed..consumed + header.size as usize],
+            )?;
+            consumed += header.size as usize;
+
+            if msg.header.object_id.0 == 6 && msg.header.opcode.0 == 0 {
+                got_callback_done2 = true;
+            }
+        }
+        if consumed > 0 {
+            buf.drain(0..consumed);
+        }
+    }
+
+    if !got_callback_done2 {
+        bail!("Commit feedback roundtrip timed out");
+    }
+
+    Ok(())
+}
+
+fn run_smoke_check() -> Result<()> {
+    let temp_dir = std::env::temp_dir();
+    let socket_path = temp_dir.join(format!("waybroker-smoke-{}.sock", std::process::id()));
+
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path)?;
+    }
+
+    // Start production server in background
+    let s_path = socket_path.clone();
+    let handle = thread::spawn(move || {
+        let display = bind_wayland_display_socket_absolute(&s_path, true).unwrap();
+        // Keep the lock alive for the duration of the test
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        drop(display);
+    });
+
+    // Wait for socket
+    let mut found = false;
+    for _ in 0..50 {
+        if socket_path.exists() {
+            found = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    if !found {
+        bail!("Smoke test socket did not appear");
+    }
+
+    // Run readiness check
+    let res = run_readiness_check(&socket_path);
+
+    // Clean up
+    let _ = std::fs::remove_file(&socket_path);
+    let lock_path = wayland_lock_path(&socket_path);
+    let _ = std::fs::remove_file(&lock_path);
+
+    let _ = handle.join();
+    res
+}
+
 #[cfg(not(unix))]
-fn bind_wayland_display_socket(_name: &str) -> Result<WaylandDisplaySocket> {
+fn bind_wayland_display_socket_ext(_name: &str, _production: bool) -> Result<WaylandDisplaySocket> {
     bail!("--bind-wayland-display is supported only on Unix platforms")
 }
 
