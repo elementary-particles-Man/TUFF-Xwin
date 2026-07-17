@@ -12,3 +12,5 @@
 *.qcow2
 *.raw
 *_OVMF_VARS.fd
+/dir/
+
