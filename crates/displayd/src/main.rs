@@ -20,6 +20,9 @@ use waybroker_common::{
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
+const FRAMEBUFFER_WIDTH: u32 = 1920;
+const FRAMEBUFFER_HEIGHT: u32 = 1080;
+const BACKGROUND_PIXEL: u32 = 0;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -425,69 +428,33 @@ async fn handle_display_command(
             let composition_target_count = if is_direct_scanout { 0 } else { 1 };
             let scanout_buffer_count = if is_direct_scanout { 1 } else { 0 };
 
-            // Real CPU Composition and pixel generation
             let mut damaged_pixels = 0u64;
             let mut copied_bytes = 0u64;
 
             if !skipped {
-                let mut damage_map = vec![false; 1920 * 1080];
-                for surf in &surfaces {
-                    let p = &surf.placement;
-                    if !p.visible {
-                        continue;
-                    }
-                    let rects = if surf.damage_rects.is_empty() {
-                        vec![waybroker_common::Rect {
-                            x: p.x,
-                            y: p.y,
-                            width: p.width,
-                            height: p.height,
-                        }]
-                    } else {
-                        surf.damage_rects.clone()
-                    };
-
-                    for r in rects {
-                        let start_x = r.x.max(0).min(1919) as usize;
-                        let end_x = (r.x + r.width as i32).max(0).min(1920) as usize;
-                        let start_y = r.y.max(0).min(1079) as usize;
-                        let end_y = (r.y + r.height as i32).max(0).min(1080) as usize;
-
-                        for y in start_y..end_y {
-                            for x in start_x..end_x {
-                                damage_map[y * 1920 + x] = true;
-                            }
-                        }
-                    }
-                }
-                damaged_pixels = damage_map.iter().filter(|&&v| v).count() as u64;
-                copied_bytes = damaged_pixels * 4;
-
-                if state.framebuffer.len() != 1920 * 1080 {
-                    state.framebuffer = vec![0u32; 1920 * 1080];
-                }
-                for surf in &surfaces {
-                    let p = &surf.placement;
-                    if !p.visible {
-                        continue;
-                    }
-                    let color = if surf.id.contains("panel") { 0xFF0000FF } else { 0xFFFF0000 };
-                    let start_x = p.x.max(0).min(1919) as usize;
-                    let end_x = (p.x + p.width as i32).max(0).min(1920) as usize;
-                    let start_y = p.y.max(0).min(1079) as usize;
-                    let end_y = (p.y + p.height as i32).max(0).min(1080) as usize;
-
-                    for y in start_y..end_y {
-                        for x in start_x..end_x {
-                            let pixel =
-                                match pixel_for_surface(&state.pixel_transport, surf, p, x, y) {
-                                    Ok(Some(pixel)) => pixel,
-                                    Ok(None) => color,
-                                    Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
-                                };
-                            state.framebuffer[y * 1920 + x] = pixel;
-                        }
-                    }
+                let output_bounds =
+                    RendererRect::from_origin_size(0, 0, FRAMEBUFFER_WIDTH, FRAMEBUFFER_HEIGHT)
+                        .expect("static framebuffer dimensions are valid");
+                let damage_rects = effective_damage_rects(
+                    state.last_scene.as_ref(),
+                    &surfaces,
+                    framebuffer_is_initialized(&state.framebuffer),
+                    output_bounds,
+                );
+                if damage_rects.is_empty() {
+                    skipped = true;
+                    state.zero_damage_skipped_count += 1;
+                } else {
+                    ensure_framebuffer(&mut state.framebuffer);
+                    let stats = compose_damage_rects(
+                        &mut state.framebuffer,
+                        &state.pixel_transport,
+                        &surfaces,
+                        &damage_rects,
+                    )
+                    .map_err(|reason| anyhow::anyhow!(reason))?;
+                    damaged_pixels = stats.damaged_pixels;
+                    copied_bytes = stats.copied_bytes;
                 }
             }
 
@@ -1502,6 +1469,247 @@ fn submit_pixel_payloads(
         store.submit(payload)?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RendererRect {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+}
+
+impl RendererRect {
+    fn from_origin_size(x: i32, y: i32, width: u32, height: u32) -> Option<Self> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let x1 = checked_add_i32_u32(x, width)?;
+        let y1 = checked_add_i32_u32(y, height)?;
+        (x1 > x && y1 > y).then_some(Self { x0: x, y0: y, x1, y1 })
+    }
+
+    fn width(self) -> u32 {
+        (self.x1 - self.x0) as u32
+    }
+
+    fn height(self) -> u32 {
+        (self.y1 - self.y0) as u32
+    }
+
+    fn area(self) -> u64 {
+        self.width() as u64 * self.height() as u64
+    }
+
+    fn intersect(self, other: Self) -> Option<Self> {
+        let rect = Self {
+            x0: self.x0.max(other.x0),
+            y0: self.y0.max(other.y0),
+            x1: self.x1.min(other.x1),
+            y1: self.y1.min(other.y1),
+        };
+        (rect.x1 > rect.x0 && rect.y1 > rect.y0).then_some(rect)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct CompositionStats {
+    damaged_pixels: u64,
+    copied_bytes: u64,
+}
+
+fn checked_add_i32_u32(value: i32, delta: u32) -> Option<i32> {
+    let sum = value as i64 + delta as i64;
+    i32::try_from(sum).ok()
+}
+
+fn framebuffer_is_initialized(framebuffer: &[u32]) -> bool {
+    framebuffer.len() == (FRAMEBUFFER_WIDTH as usize * FRAMEBUFFER_HEIGHT as usize)
+}
+
+fn ensure_framebuffer(framebuffer: &mut Vec<u32>) {
+    if !framebuffer_is_initialized(framebuffer) {
+        *framebuffer =
+            vec![BACKGROUND_PIXEL; FRAMEBUFFER_WIDTH as usize * FRAMEBUFFER_HEIGHT as usize];
+    }
+}
+
+fn surface_output_bounds(surface: &waybroker_common::SurfaceSnapshot) -> Option<RendererRect> {
+    if !surface.placement.visible {
+        return None;
+    }
+    RendererRect::from_origin_size(
+        surface.placement.x,
+        surface.placement.y,
+        surface.placement.width,
+        surface.placement.height,
+    )
+}
+
+fn surface_damage_rects(
+    surface: &waybroker_common::SurfaceSnapshot,
+    output_bounds: RendererRect,
+) -> Vec<RendererRect> {
+    let Some(surface_bounds) = surface_output_bounds(surface) else {
+        return Vec::new();
+    };
+    let Some(surface_local_bounds) =
+        RendererRect::from_origin_size(0, 0, surface.placement.width, surface.placement.height)
+    else {
+        return Vec::new();
+    };
+    surface
+        .damage_rects
+        .iter()
+        .filter_map(|damage| {
+            let local =
+                RendererRect::from_origin_size(damage.x, damage.y, damage.width, damage.height)?;
+            let local = local.intersect(surface_local_bounds)?;
+            let output = RendererRect::from_origin_size(
+                surface.placement.x.checked_add(local.x0)?,
+                surface.placement.y.checked_add(local.y0)?,
+                local.width(),
+                local.height(),
+            )?;
+            output.intersect(surface_bounds)?.intersect(output_bounds)
+        })
+        .collect()
+}
+
+fn effective_damage_rects(
+    previous: Option<&CommittedSceneState>,
+    surfaces: &[waybroker_common::SurfaceSnapshot],
+    framebuffer_ready: bool,
+    output_bounds: RendererRect,
+) -> Vec<RendererRect> {
+    if previous.is_none() || !framebuffer_ready {
+        return vec![output_bounds];
+    }
+
+    let previous = previous.expect("checked above");
+    let previous_by_id: HashMap<&str, &waybroker_common::SurfaceSnapshot> =
+        previous.surfaces.iter().map(|surface| (surface.id.as_str(), surface)).collect();
+    let current_by_id: HashMap<&str, &waybroker_common::SurfaceSnapshot> =
+        surfaces.iter().map(|surface| (surface.id.as_str(), surface)).collect();
+    let mut damage = Vec::new();
+
+    for surface in surfaces {
+        let previous_surface = previous_by_id.get(surface.id.as_str()).copied();
+        if previous_surface
+            .map(|old| surface_exposes_or_occupies_different_region(old, surface))
+            .unwrap_or(true)
+        {
+            if let Some(rect) =
+                surface_output_bounds(surface).and_then(|r| r.intersect(output_bounds))
+            {
+                damage.push(rect);
+            }
+        }
+        damage.extend(surface_damage_rects(surface, output_bounds));
+    }
+
+    for old in &previous.surfaces {
+        if !current_by_id.contains_key(old.id.as_str())
+            || current_by_id
+                .get(old.id.as_str())
+                .map(|new| surface_exposes_or_occupies_different_region(old, new))
+                .unwrap_or(false)
+        {
+            if let Some(rect) = surface_output_bounds(old).and_then(|r| r.intersect(output_bounds))
+            {
+                damage.push(rect);
+            }
+        }
+    }
+
+    damage.sort_by_key(|rect| (rect.y0, rect.x0, rect.y1, rect.x1));
+    damage
+}
+
+fn surface_exposes_or_occupies_different_region(
+    old: &waybroker_common::SurfaceSnapshot,
+    new: &waybroker_common::SurfaceSnapshot,
+) -> bool {
+    old.placement != new.placement
+        || old.buffer_generation != new.buffer_generation
+        || old.placement.visible != new.placement.visible
+}
+
+fn compose_damage_rects(
+    framebuffer: &mut [u32],
+    store: &PixelTransportStore,
+    surfaces: &[waybroker_common::SurfaceSnapshot],
+    damage_rects: &[RendererRect],
+) -> std::result::Result<CompositionStats, String> {
+    let mut stats = CompositionStats::default();
+    for damage in damage_rects {
+        stats.damaged_pixels = stats.damaged_pixels.saturating_add(damage.area());
+        fill_framebuffer_rect(framebuffer, *damage, BACKGROUND_PIXEL)?;
+        for surface in surfaces {
+            let Some(surface_bounds) = surface_output_bounds(surface) else {
+                continue;
+            };
+            let Some(copy_rect) = surface_bounds.intersect(*damage) else {
+                continue;
+            };
+            let color = fallback_surface_pixel(surface);
+            copy_surface_rect(framebuffer, store, surface, copy_rect, color)?;
+        }
+    }
+    stats.copied_bytes = stats.damaged_pixels.saturating_mul(4);
+    Ok(stats)
+}
+
+fn fill_framebuffer_rect(
+    framebuffer: &mut [u32],
+    rect: RendererRect,
+    pixel: u32,
+) -> std::result::Result<(), String> {
+    for y in rect.y0..rect.y1 {
+        let row_start = framebuffer_offset(0, y as u32)?;
+        for x in rect.x0..rect.x1 {
+            let index = row_start
+                .checked_add(x as usize)
+                .ok_or_else(|| "framebuffer offset overflow".to_string())?;
+            framebuffer[index] = pixel;
+        }
+    }
+    Ok(())
+}
+
+fn copy_surface_rect(
+    framebuffer: &mut [u32],
+    store: &PixelTransportStore,
+    surface: &waybroker_common::SurfaceSnapshot,
+    rect: RendererRect,
+    fallback_pixel: u32,
+) -> std::result::Result<(), String> {
+    for y in rect.y0..rect.y1 {
+        let row_start = framebuffer_offset(0, y as u32)?;
+        for x in rect.x0..rect.x1 {
+            let index = row_start
+                .checked_add(x as usize)
+                .ok_or_else(|| "framebuffer offset overflow".to_string())?;
+            framebuffer[index] =
+                pixel_for_surface(store, surface, &surface.placement, x as usize, y as usize)?
+                    .unwrap_or(fallback_pixel);
+        }
+    }
+    Ok(())
+}
+
+fn framebuffer_offset(x: u32, y: u32) -> std::result::Result<usize, String> {
+    if x >= FRAMEBUFFER_WIDTH || y >= FRAMEBUFFER_HEIGHT {
+        return Err("framebuffer coordinate out of bounds".into());
+    }
+    (y as usize)
+        .checked_mul(FRAMEBUFFER_WIDTH as usize)
+        .and_then(|offset| offset.checked_add(x as usize))
+        .ok_or_else(|| "framebuffer offset overflow".into())
+}
+
+fn fallback_surface_pixel(surface: &waybroker_common::SurfaceSnapshot) -> u32 {
+    if surface.id.contains("panel") { 0xFF0000FF } else { 0xFFFF0000 }
 }
 
 fn pixel_for_surface(
@@ -3197,6 +3405,284 @@ exit 0
 
         assert!(matches!(commit, DisplayEvent::Rejected { .. }));
         assert!(state.last_scene.is_none());
+    }
+
+    fn test_handle(
+        client_id: u64,
+        surface_id: &str,
+        buffer_generation: u64,
+        scene_generation: u64,
+    ) -> waybroker_common::PixelTransportHandle {
+        waybroker_common::PixelTransportHandle {
+            client_id,
+            surface_id: surface_id.into(),
+            buffer_generation,
+            scene_generation,
+        }
+    }
+
+    fn test_payload(
+        handle: waybroker_common::PixelTransportHandle,
+        pixels: Vec<u32>,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> waybroker_common::PixelTransportPayload {
+        let mut bytes = vec![0u8; stride as usize * height as usize];
+        for (i, pixel) in pixels.into_iter().enumerate() {
+            let row = i as u32 / width;
+            let col = i as u32 % width;
+            let offset = row as usize * stride as usize + col as usize * 4;
+            bytes[offset..offset + 4].copy_from_slice(&pixel.to_le_bytes());
+        }
+        waybroker_common::PixelTransportPayload {
+            handle,
+            pixels: bytes,
+            width,
+            height,
+            stride,
+            format: 1,
+        }
+    }
+
+    fn test_surface(
+        id: &str,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        z: i32,
+        handle: Option<waybroker_common::PixelTransportHandle>,
+    ) -> waybroker_common::SurfaceSnapshot {
+        waybroker_common::SurfaceSnapshot {
+            id: id.into(),
+            app_id: "app1".into(),
+            placement: waybroker_common::SurfacePlacement { x, y, width, height, z, visible: true },
+            buffer_generation: handle.as_ref().map(|h| h.buffer_generation).unwrap_or(0),
+            pixel_transport: handle,
+            ..Default::default()
+        }
+    }
+
+    async fn commit_test_scene(
+        state: &mut DisplayState,
+        surfaces: Vec<waybroker_common::SurfaceSnapshot>,
+        pixel_payloads: Vec<waybroker_common::PixelTransportPayload>,
+        scene_generation: u64,
+    ) -> DisplayEvent {
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
+        let mut clock = FakePresentationClock::default();
+        let capture_backend = FakeCaptureBackend;
+        let mut record_backend = FakeRecordBackend;
+        let mut display_backend = FakeDisplayBackend;
+        handle_display_command(
+            DisplayCommand::CommitScene {
+                target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+                focus: waybroker_common::FocusTarget::None,
+                selection: waybroker_common::WaylandSelectionState::default(),
+                surfaces,
+                pixel_payloads,
+                scene_epoch: 1,
+                scene_generation,
+            },
+            ServiceRole::Compd,
+            &config,
+            state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn damage_limited_composition_updates_only_small_rect() {
+        let mut state = DisplayState::new_test();
+        let handle = test_handle(1, "surface-1", 1, 1);
+        let surface = test_surface("surface-1", 0, 0, 4, 4, 1, Some(handle.clone()));
+        let initial_payload = test_payload(handle.clone(), vec![0x11111111; 16], 4, 4, 16);
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![surface.clone()], vec![initial_payload], 1).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+        let before = state.framebuffer.clone();
+
+        let updated_handle = test_handle(1, "surface-1", 1, 2);
+        let mut damaged_surface =
+            test_surface("surface-1", 0, 0, 4, 4, 1, Some(updated_handle.clone()));
+        damaged_surface.damage_rects =
+            vec![waybroker_common::Rect { x: 1, y: 1, width: 1, height: 1 }];
+        let updated_payload = test_payload(updated_handle, vec![0x22222222; 16], 4, 4, 16);
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![damaged_surface], vec![updated_payload], 2).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        let changed = framebuffer_offset(1, 1).unwrap();
+        assert_eq!(state.framebuffer[changed], 0x22222222);
+        for (index, pixel) in state.framebuffer.iter().enumerate().take(8_000) {
+            if index != changed {
+                assert_eq!(*pixel, before[index], "unexpected framebuffer change at {index}");
+            }
+        }
+    }
+
+    #[test]
+    fn damage_rects_are_translated_and_clipped_for_negative_and_overflowing_surfaces() {
+        let output =
+            RendererRect::from_origin_size(0, 0, FRAMEBUFFER_WIDTH, FRAMEBUFFER_HEIGHT).unwrap();
+        let mut negative = test_surface("neg", -2, -1, 4, 4, 1, None);
+        negative.damage_rects = vec![waybroker_common::Rect { x: 0, y: 0, width: 4, height: 4 }];
+        let mut overflow = test_surface("overflow", 1918, 1078, 8, 8, 1, None);
+        overflow.damage_rects = vec![waybroker_common::Rect { x: 0, y: 0, width: 8, height: 8 }];
+
+        assert_eq!(
+            surface_damage_rects(&negative, output),
+            vec![RendererRect { x0: 0, y0: 0, x1: 2, y1: 3 }]
+        );
+        assert_eq!(
+            surface_damage_rects(&overflow, output),
+            vec![RendererRect { x0: 1918, y0: 1078, x1: 1920, y1: 1080 }]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_tight_stride_partial_row_copy_uses_source_stride() {
+        let mut state = DisplayState::new_test();
+        let handle = test_handle(1, "surface-1", 1, 1);
+        let mut surface = test_surface("surface-1", 0, 0, 3, 2, 1, Some(handle.clone()));
+        surface.damage_rects = vec![waybroker_common::Rect { x: 1, y: 1, width: 1, height: 1 }];
+        ensure_framebuffer(&mut state.framebuffer);
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![test_surface("surface-1", 0, 0, 3, 2, 1, Some(handle.clone()))],
+            scene_epoch: 1,
+            scene_generation: 1,
+            commit_id: 1,
+            unix_timestamp: 1,
+        });
+        let payload =
+            test_payload(handle, vec![0x10, 0x11, 0x12, 0x20, 0xAABBCCDD, 0x22], 3, 2, 16);
+
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![surface], vec![payload], 2).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(state.framebuffer[framebuffer_offset(1, 1).unwrap()], 0xAABBCCDD);
+        assert_eq!(state.framebuffer[framebuffer_offset(0, 1).unwrap()], BACKGROUND_PIXEL);
+    }
+
+    #[tokio::test]
+    async fn overlapping_surfaces_recompose_damage_in_canonical_order() {
+        let mut state = DisplayState::new_test();
+        let bottom = test_surface("bottom", 0, 0, 4, 4, 1, None);
+        let mut top = test_surface("panel-top", 1, 1, 2, 2, 2, None);
+        top.damage_rects = vec![waybroker_common::Rect { x: 0, y: 0, width: 1, height: 1 }];
+        ensure_framebuffer(&mut state.framebuffer);
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![bottom.clone(), test_surface("panel-top", 1, 1, 2, 2, 2, None)],
+            scene_epoch: 1,
+            scene_generation: 1,
+            commit_id: 1,
+            unix_timestamp: 1,
+        });
+
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![bottom, top], vec![], 2).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(state.framebuffer[framebuffer_offset(1, 1).unwrap()], 0xFF0000FF);
+    }
+
+    #[tokio::test]
+    async fn surface_movement_and_removal_reconstruct_exposed_regions() {
+        let mut state = DisplayState::new_test();
+        let original = test_surface("surface-1", 0, 0, 2, 2, 1, None);
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![original], vec![], 1).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+        assert_eq!(state.framebuffer[framebuffer_offset(0, 0).unwrap()], 0xFFFF0000);
+
+        let moved = test_surface("surface-1", 2, 0, 2, 2, 1, None);
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![moved], vec![], 2).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+        assert_eq!(state.framebuffer[framebuffer_offset(0, 0).unwrap()], BACKGROUND_PIXEL);
+        assert_eq!(state.framebuffer[framebuffer_offset(2, 0).unwrap()], 0xFFFF0000);
+
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![], vec![], 3).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+        assert_eq!(state.framebuffer[framebuffer_offset(2, 0).unwrap()], BACKGROUND_PIXEL);
+    }
+
+    #[tokio::test]
+    async fn stale_or_missing_payload_does_not_partially_mutate_framebuffer() {
+        let mut state = DisplayState::new_test();
+        ensure_framebuffer(&mut state.framebuffer);
+        state.framebuffer[framebuffer_offset(0, 0).unwrap()] = 0xDEADBEEF;
+        let before = state.framebuffer.clone();
+        let surface =
+            test_surface("surface-1", 0, 0, 2, 2, 1, Some(test_handle(1, "surface-1", 1, 1)));
+
+        let event = commit_test_scene(&mut state, vec![surface], vec![], 1).await;
+
+        assert!(matches!(event, DisplayEvent::Rejected { .. }));
+        assert_eq!(state.framebuffer, before);
+    }
+
+    #[tokio::test]
+    async fn stale_pixel_transport_payload_is_rejected_without_framebuffer_mutation() {
+        let mut state = DisplayState::new_test();
+        ensure_framebuffer(&mut state.framebuffer);
+        state.framebuffer[framebuffer_offset(0, 0).unwrap()] = 0xDEADBEEF;
+        let before = state.framebuffer.clone();
+        let current_handle = test_handle(1, "surface-1", 2, 2);
+        state
+            .pixel_transport
+            .submit(test_payload(current_handle, vec![0x11111111; 4], 2, 2, 8))
+            .unwrap();
+        let stale_handle = test_handle(1, "surface-1", 1, 1);
+        let surface = test_surface("surface-1", 0, 0, 2, 2, 1, Some(stale_handle.clone()));
+        let stale_payload = test_payload(stale_handle, vec![0x22222222; 4], 2, 2, 8);
+
+        let event = commit_test_scene(&mut state, vec![surface], vec![stale_payload], 1).await;
+
+        assert!(matches!(event, DisplayEvent::Rejected { .. }));
+        assert_eq!(state.framebuffer, before);
+    }
+
+    #[tokio::test]
+    async fn initial_frame_uses_full_output_damage() {
+        let mut state = DisplayState::new_test();
+        let surface = test_surface("surface-1", 10, 10, 2, 2, 1, None);
+
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![surface], vec![], 1).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(
+            state.framebuffer.len(),
+            FRAMEBUFFER_WIDTH as usize * FRAMEBUFFER_HEIGHT as usize
+        );
+        assert_eq!(state.framebuffer[framebuffer_offset(0, 0).unwrap()], BACKGROUND_PIXEL);
+        assert_eq!(state.framebuffer[framebuffer_offset(10, 10).unwrap()], 0xFFFF0000);
     }
 
     #[tokio::test]

@@ -1327,8 +1327,8 @@ fn production_scene_surfaces(
                     .damage
                     .iter()
                     .map(|r| waybroker_common::Rect {
-                        x: r.x + surface.current.offset_x,
-                        y: r.y + surface.current.offset_y,
+                        x: r.x,
+                        y: r.y,
                         width: r.width,
                         height: r.height,
                     })
@@ -2257,6 +2257,44 @@ mod tests {
         assert_eq!(surfaces.len(), 1);
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].handle.surface_id, surfaces[0].id);
+    }
+
+    #[test]
+    fn pending_replay_retains_surface_damage_with_payload_bundle() {
+        let handle = waybroker_common::PixelTransportHandle {
+            client_id: 7,
+            surface_id: "client-7-surface-3".into(),
+            buffer_generation: 3,
+            scene_generation: 4,
+        };
+        let damage = waybroker_common::Rect { x: 1, y: 2, width: 3, height: 4 };
+        let scene = super::CanonicalSceneState {
+            generation: 4,
+            clients: Default::default(),
+            pending: Some(super::PendingCanonicalCommit {
+                generation: 4,
+                surfaces: vec![SurfaceSnapshot {
+                    id: handle.surface_id.clone(),
+                    pixel_transport: Some(handle.clone()),
+                    damage_rects: vec![damage],
+                    ..Default::default()
+                }],
+                pixel_payloads: vec![waybroker_common::PixelTransportPayload {
+                    handle,
+                    pixels: vec![0; 16],
+                    width: 2,
+                    height: 2,
+                    stride: 8,
+                    format: 1,
+                }],
+                reason: "displayd unavailable".into(),
+            }),
+        };
+
+        let (_, surfaces, payloads, _) = super::pending_replay_commit(&scene).unwrap();
+
+        assert_eq!(surfaces[0].damage_rects, vec![damage]);
+        assert_eq!(payloads.len(), 1);
     }
 
     #[test]

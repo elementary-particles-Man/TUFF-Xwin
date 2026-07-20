@@ -43,6 +43,16 @@
     *   pending replay は canonical surfaces と対応 payload bundle を保持し、成功時に既存の generation 条件で clear する。
     *   検証は headless/mock の Cargo tests のみで行い、production desktop/display server は起動していない。
 
+8.  **Damage-limited Framebuffer Composition**
+    *   `displayd` の full-frame/surface-wide repaint を renderer-facing damage rect ベースの再合成へ置換。
+    *   surface-local damage を canonical geometry で output 座標へ変換し、surface bounds と framebuffer bounds で checked clipping する。
+    *   damage rect ごとに背景を復元してから、canonical back-to-front order の全 intersecting surface を opaque copy する。
+    *   movement / resize / removal / disconnect 相当の scene 差分では、旧領域と新領域を damage として扱い、露出領域を再構築する。
+    *   `PixelTransportStore` から payload を lookup し、missing/stale payload は framebuffer を部分更新せず reject する。
+    *   copied-byte / damaged-pixel accounting は effective damage region の面積ベースに更新。
+    *   `waylandd` の production SHM damage は surface-local metadata として保持し、pending replay でも damage と payload bundle を維持する。
+    *   検証は headless/mock の Cargo tests のみで行い、production desktop/display server は起動していない。
+
 ## 次のステップへの申し送り
 
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
