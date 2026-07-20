@@ -1,6 +1,6 @@
 # HANDOFF
 
-更新日: `2026-04-04`  
+更新日: `2026-07-21`
 対象 repository: `/media/flux/THPDOC/Develop/TUFF-Xwin`
 
 ## 完了した主要タスク
@@ -33,6 +33,15 @@
     *   `vulkan-backend` に AVX2 加速によるピクセル変換（BGRA <-> RGBA）を実装。
     *   Vulkan コンピュートシェーダーによる並列処理の統合。
     *   検証用スクリプト `scripts/tuff-xwin-screenshot.sh` を追加。
+
+7.  **Pixel Transport と Canonical Scene State の分離**
+    *   `SurfaceSnapshot` から raw pixel 所有を外し、`PixelTransportHandle` と `PixelTransportPayload` による明示的な transport 境界へ移行。
+    *   `waylandd` の canonical scene は surface ordering、client/surface identity、`scene_generation` を引き続き唯一の権威として保持。
+    *   SHM pixel bytes は `PixelTransportStore` へ generation-bound に登録し、`CommitScene.pixel_payloads` 経由で `compd`/`displayd` へ渡す。
+    *   `displayd` の renderer 入力は transport lookup を通じて payload を取得し、handle 付き surface の payload 欠落は scene を記録せず `Rejected` とする。
+    *   disconnect cleanup は対象 client の transport payload だけを無効化し、別 client の payload には影響しない。
+    *   pending replay は canonical surfaces と対応 payload bundle を保持し、成功時に既存の generation 条件で clear する。
+    *   検証は headless/mock の Cargo tests のみで行い、production desktop/display server は起動していない。
 
 ## 次のステップへの申し送り
 

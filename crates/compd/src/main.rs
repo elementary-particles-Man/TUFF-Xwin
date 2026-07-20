@@ -549,6 +549,7 @@ fn commit_scene_to_displayd(scene: &CompdScene) -> Result<SceneCommitReceipt> {
             focus: scene.focus.clone(),
             selection: scene.selection.clone(),
             surfaces: scene.surfaces.clone(),
+            pixel_payloads: vec![],
             scene_epoch: 0,
             scene_generation: 0,
         }),

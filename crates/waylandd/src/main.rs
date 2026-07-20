@@ -19,17 +19,20 @@ use std::sync::{LazyLock, Mutex};
 static GLOBAL_REGISTRY: Mutex<Option<SurfaceRegistrySnapshot>> = Mutex::new(None);
 static CANONICAL_SCENE: LazyLock<Mutex<CanonicalSceneState>> =
     LazyLock::new(|| Mutex::new(CanonicalSceneState::default()));
+static PIXEL_TRANSPORT: LazyLock<Mutex<PixelTransportStore>> =
+    LazyLock::new(|| Mutex::new(PixelTransportStore::default()));
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
 };
 use waybroker_common::{
     CommitTarget, DisplayCommand, DisplayEvent, FocusTarget, ImeBridgeMode, ImeCommand, ImeEvent,
-    ImeStatus, IpcEnvelope, MessageKind, OutputMode, ServiceBanner, ServiceEndpoint, ServiceRole,
-    ServiceStream, SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand,
-    WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
-    WaylandSurfaceState, accel::global_accel_policy, bind_service_socket, connect_service_socket,
-    ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
+    ImeStatus, IpcEnvelope, MessageKind, OutputMode, PixelTransportHandle, PixelTransportPayload,
+    PixelTransportStore, ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream,
+    SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
+    WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
+    accel::global_accel_policy, bind_service_socket, connect_service_socket, ensure_runtime_dir,
+    now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
 };
 
 fn run_wire_headless_test() -> Result<()> {
@@ -1250,6 +1253,7 @@ impl ClientRegistryGuard {
         }
         remove_client_from_global_registry(self.client_id);
         remove_client_scene(self.client_id);
+        invalidate_client_pixel_payloads(self.client_id);
         self.finalized = true;
         commit_canonical_scene(&self.outputs, self.scene_epoch).map(|_| ()).map_err(|err| {
             eprintln!(
@@ -1277,15 +1281,36 @@ impl Drop for ClientRegistryGuard {
 fn production_scene_surfaces(
     client_id: u64,
     core: &wayland_wire::core::HeadlessWireCore,
-) -> Vec<SurfaceSnapshot> {
-    core.surfaces
+) -> (Vec<SurfaceSnapshot>, Vec<PixelTransportPayload>) {
+    let scene_generation = next_canonical_scene_generation();
+    let mut payloads = Vec::new();
+    let surfaces = core
+        .surfaces
         .surfaces
         .iter()
         .filter_map(|(id, surface)| {
             let buffer_id = surface.current.buffer_id?;
             let buffer = core.shm.buffers.get(&buffer_id)?;
+            let surface_id = format!("client-{client_id}-surface-{}", id.0);
+            let handle = PixelTransportHandle {
+                client_id,
+                surface_id: surface_id.clone(),
+                buffer_generation: buffer_id.0 as u64,
+                scene_generation,
+            };
+            let pixels = read_shm_buffer(core, buffer);
+            if !pixels.is_empty() {
+                payloads.push(PixelTransportPayload {
+                    handle: handle.clone(),
+                    pixels,
+                    width: buffer.width.max(0) as u32,
+                    height: buffer.height.max(0) as u32,
+                    stride: buffer.stride.max(0) as u32,
+                    format: buffer.format,
+                });
+            }
             Some(SurfaceSnapshot {
-                id: format!("client-{client_id}-surface-{}", id.0),
+                id: surface_id,
                 app_id: "production-app".into(),
                 placement: SurfacePlacement {
                     x: surface.current.offset_x,
@@ -1308,22 +1333,38 @@ fn production_scene_surfaces(
                         height: r.height,
                     })
                     .collect(),
-                buffer_pixels: read_shm_buffer(core, buffer),
-                buffer_width: buffer.width.max(0) as u32,
-                buffer_height: buffer.height.max(0) as u32,
-                buffer_stride: buffer.stride.max(0) as u32,
-                buffer_format: buffer.format,
+                pixel_transport: Some(handle),
                 layer_class: 0,
                 creation_sequence: id.0 as u64,
             })
         })
-        .collect()
+        .collect();
+    (surfaces, payloads)
 }
 
 fn upsert_client_scene(client_id: u64, core: &wayland_wire::core::HeadlessWireCore) {
+    let (surfaces, payloads) = production_scene_surfaces(client_id, core);
+    submit_pixel_payloads(payloads);
     let mut scene = CANONICAL_SCENE.lock().unwrap();
     scene.generation = scene.generation.saturating_add(1);
-    scene.clients.insert(client_id, production_scene_surfaces(client_id, core));
+    scene.clients.insert(client_id, surfaces);
+}
+
+fn next_canonical_scene_generation() -> u64 {
+    CANONICAL_SCENE.lock().unwrap().generation.saturating_add(1)
+}
+
+fn submit_pixel_payloads(payloads: Vec<PixelTransportPayload>) {
+    let mut store = PIXEL_TRANSPORT.lock().unwrap();
+    for payload in payloads {
+        if let Err(err) = store.submit(payload) {
+            eprintln!("service=waylandd op=pixel_transport_submit event=rejected reason={err:?}");
+        }
+    }
+}
+
+fn invalidate_client_pixel_payloads(client_id: u64) {
+    PIXEL_TRANSPORT.lock().unwrap().invalidate_client(client_id);
 }
 
 fn remove_client_scene(client_id: u64) {
@@ -1343,6 +1384,7 @@ struct CanonicalSceneState {
 struct PendingCanonicalCommit {
     generation: u64,
     surfaces: Vec<SurfaceSnapshot>,
+    pixel_payloads: Vec<PixelTransportPayload>,
     reason: String,
 }
 
@@ -1352,11 +1394,6 @@ struct SceneOrderKey {
     z_index: i32,
     creation_sequence: u64,
     stable_surface_id: String,
-}
-
-fn canonical_scene_surfaces() -> (u64, Vec<SurfaceSnapshot>) {
-    let scene = CANONICAL_SCENE.lock().unwrap();
-    canonical_scene_surfaces_from(&scene)
 }
 
 fn canonical_scene_surfaces_from(scene: &CanonicalSceneState) -> (u64, Vec<SurfaceSnapshot>) {
@@ -1378,20 +1415,28 @@ fn order_scene_surfaces(mut surfaces: Vec<SurfaceSnapshot>) -> Vec<SurfaceSnapsh
 }
 
 fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<DisplayEvent> {
-    let (generation, surfaces) = {
+    let (generation, surfaces, pixel_payloads) = {
         let scene = CANONICAL_SCENE.lock().unwrap();
-        match scene.pending.as_ref() {
-            Some(pending) if pending.generation >= scene.generation => {
+        match pending_replay_commit(&scene) {
+            Some((generation, surfaces, pixel_payloads, reason)) => {
                 eprintln!(
                     "service=waylandd op=canonical_recommit event=retry generation={} reason={}",
-                    pending.generation, pending.reason
+                    generation, reason
                 );
-                (pending.generation, pending.surfaces.clone())
+                (generation, surfaces, pixel_payloads)
             }
-            _ => canonical_scene_surfaces_from(&scene),
+            None => {
+                let (generation, surfaces) = canonical_scene_surfaces_from(&scene);
+                (generation, surfaces, Vec::new())
+            }
         }
     };
-    match commit_production_scene(&surfaces, generation, scene_epoch, outputs) {
+    let pixel_payloads = if pixel_payloads.is_empty() {
+        resolve_pixel_payloads_for_surfaces(&surfaces)
+    } else {
+        pixel_payloads
+    };
+    match commit_production_scene(&surfaces, &pixel_payloads, generation, scene_epoch, outputs) {
         Ok(event) => {
             let mut scene = CANONICAL_SCENE.lock().unwrap();
             if scene
@@ -1414,12 +1459,40 @@ fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<Di
                 current_generation,
                 current_pending_generation,
             ) {
-                scene.pending =
-                    Some(PendingCanonicalCommit { generation, surfaces, reason: err.to_string() });
+                scene.pending = Some(PendingCanonicalCommit {
+                    generation,
+                    surfaces,
+                    pixel_payloads,
+                    reason: err.to_string(),
+                });
             }
             Err(err)
         }
     }
+}
+
+fn pending_replay_commit(
+    scene: &CanonicalSceneState,
+) -> Option<(u64, Vec<SurfaceSnapshot>, Vec<PixelTransportPayload>, String)> {
+    let pending = scene.pending.as_ref()?;
+    (pending.generation >= scene.generation).then(|| {
+        (
+            pending.generation,
+            pending.surfaces.clone(),
+            pending.pixel_payloads.clone(),
+            pending.reason.clone(),
+        )
+    })
+}
+
+fn resolve_pixel_payloads_for_surfaces(surfaces: &[SurfaceSnapshot]) -> Vec<PixelTransportPayload> {
+    let store = PIXEL_TRANSPORT.lock().unwrap();
+    surfaces
+        .iter()
+        .filter_map(|surface| {
+            surface.pixel_transport.as_ref().and_then(|handle| store.lookup(handle).cloned())
+        })
+        .collect()
 }
 
 fn should_store_pending_commit(
@@ -1470,6 +1543,7 @@ fn read_shm_buffer(
 
 fn commit_production_scene(
     surfaces: &[SurfaceSnapshot],
+    pixel_payloads: &[PixelTransportPayload],
     scene_generation: u64,
     scene_epoch: u64,
     outputs: &[OutputMode],
@@ -1485,6 +1559,7 @@ fn commit_production_scene(
             focus: FocusTarget::None,
             selection: WaylandSelectionState::default(),
             surfaces: surfaces.to_vec(),
+            pixel_payloads: pixel_payloads.to_vec(),
             scene_epoch,
             scene_generation,
         }),
@@ -2074,6 +2149,114 @@ mod tests {
         assert!(!should_store_pending_commit(10, 10, 11));
         assert!(should_clear_pending_commit(11, 10));
         assert!(!should_clear_pending_commit(10, 11));
+    }
+
+    #[test]
+    fn canonical_scene_metadata_survives_without_transport_payload() {
+        let scene = super::CanonicalSceneState {
+            generation: 4,
+            clients: [(7, {
+                vec![SurfaceSnapshot {
+                    id: "client-7-surface-3".into(),
+                    app_id: "production-app".into(),
+                    placement: SurfacePlacement { z: 9, visible: true, ..Default::default() },
+                    pixel_transport: Some(waybroker_common::PixelTransportHandle {
+                        client_id: 7,
+                        surface_id: "client-7-surface-3".into(),
+                        buffer_generation: 3,
+                        scene_generation: 4,
+                    }),
+                    creation_sequence: 3,
+                    ..Default::default()
+                }]
+            })]
+            .into_iter()
+            .collect(),
+            pending: None,
+        };
+
+        let (generation, surfaces) = super::canonical_scene_surfaces_from(&scene);
+
+        assert_eq!(generation, 4);
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0].id, "client-7-surface-3");
+        assert_eq!(surfaces[0].pixel_transport.as_ref().unwrap().scene_generation, 4);
+    }
+
+    #[test]
+    fn production_scene_splits_shm_pixels_from_canonical_surface_metadata() {
+        let mut core = wayland_wire::core::HeadlessWireCore::default();
+        let surface_id = wayland_wire::WaylandObjectId(3);
+        let pool_id = wayland_wire::WaylandObjectId(4);
+        let buffer_id = wayland_wire::WaylandObjectId(5);
+        core.shm.create_pool_from_fake(pool_id, 16);
+        core.shm.create_buffer(buffer_id, pool_id, 0, 2, 2, 8, 1).unwrap();
+        core.surfaces.surfaces.insert(
+            surface_id,
+            wayland_wire::surface::SurfaceInstance {
+                pending: Default::default(),
+                current: wayland_wire::surface::SurfaceState {
+                    buffer_id: Some(buffer_id),
+                    offset_x: 10,
+                    offset_y: 20,
+                    damage: vec![wayland_wire::surface::Rect { x: 0, y: 0, width: 2, height: 2 }],
+                    opaque_region: None,
+                    input_region: None,
+                },
+                callbacks: vec![],
+            },
+        );
+
+        let (surfaces, payloads) = super::production_scene_surfaces(7, &core);
+
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(surfaces[0].id, "client-7-surface-3");
+        assert_eq!(surfaces[0].placement.x, 10);
+        assert_eq!(surfaces[0].placement.y, 20);
+        assert_eq!(surfaces[0].buffer_generation, 5);
+        assert!(surfaces[0].pixel_transport.is_some());
+        assert_eq!(surfaces[0].pixel_transport.as_ref().unwrap(), &payloads[0].handle);
+        assert_eq!(payloads[0].pixels.len(), 16);
+    }
+
+    #[test]
+    fn pending_replay_carries_transport_payload_bundle_once() {
+        let handle = waybroker_common::PixelTransportHandle {
+            client_id: 7,
+            surface_id: "client-7-surface-3".into(),
+            buffer_generation: 3,
+            scene_generation: 4,
+        };
+        let payload = waybroker_common::PixelTransportPayload {
+            handle: handle.clone(),
+            pixels: vec![0; 16],
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: 1,
+        };
+        let scene = super::CanonicalSceneState {
+            generation: 4,
+            clients: Default::default(),
+            pending: Some(super::PendingCanonicalCommit {
+                generation: 4,
+                surfaces: vec![SurfaceSnapshot {
+                    id: handle.surface_id.clone(),
+                    pixel_transport: Some(handle),
+                    ..Default::default()
+                }],
+                pixel_payloads: vec![payload],
+                reason: "displayd unavailable".into(),
+            }),
+        };
+
+        let (generation, surfaces, payloads, _) = super::pending_replay_commit(&scene).unwrap();
+
+        assert_eq!(generation, 4);
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].handle.surface_id, surfaces[0].id);
     }
 
     #[test]

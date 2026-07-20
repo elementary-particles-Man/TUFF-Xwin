@@ -13,9 +13,10 @@ use vulkan_backend::{
 };
 use waybroker_common::{
     CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputMode,
-    ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, accel::global_accel_policy,
-    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
-    sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
+    PixelTransportError, PixelTransportPayload, PixelTransportStore, ServiceBanner,
+    ServiceEndpoint, ServiceRole, ServiceStream, accel::global_accel_policy, bind_service_socket,
+    ensure_runtime_dir, now_unix_timestamp, read_json_line, sanitize_artifact_filename,
+    send_json_line, session_artifact_path, validate_artifact_filename,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
@@ -339,6 +340,7 @@ async fn handle_display_command(
             focus,
             selection,
             surfaces,
+            pixel_payloads,
             scene_epoch,
             scene_generation,
         } => {
@@ -367,6 +369,15 @@ async fn handle_display_command(
                 {
                     state.last_scene_generation = scene_generation;
                 }
+            }
+            if let Err(err) = submit_pixel_payloads(&mut state.pixel_transport, pixel_payloads) {
+                return Ok(DisplayEvent::Rejected {
+                    reason: format!("pixel transport rejected payload: {err:?}"),
+                });
+            }
+            if let Err(reason) = verify_pixel_payloads_available(&state.pixel_transport, &surfaces)
+            {
+                return Ok(DisplayEvent::Rejected { reason });
             }
             let start_time = std::time::Instant::now();
             let mut skipped = false;
@@ -468,26 +479,12 @@ async fn handle_display_command(
 
                     for y in start_y..end_y {
                         for x in start_x..end_x {
-                            let pixel = if !surf.buffer_pixels.is_empty()
-                                && surf.buffer_width > 0
-                                && surf.buffer_height > 0
-                                && surf.buffer_stride >= surf.buffer_width.saturating_mul(4)
-                            {
-                                let local_x = (x as i32 - p.x).max(0) as u32;
-                                let local_y = (y as i32 - p.y).max(0) as u32;
-                                if local_x < surf.buffer_width && local_y < surf.buffer_height {
-                                    let offset = local_y as usize * surf.buffer_stride as usize
-                                        + local_x as usize * 4;
-                                    surf.buffer_pixels
-                                        .get(offset..offset + 4)
-                                        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
-                                        .unwrap_or(color)
-                                } else {
-                                    color
-                                }
-                            } else {
-                                color
-                            };
+                            let pixel =
+                                match pixel_for_surface(&state.pixel_transport, surf, p, x, y) {
+                                    Ok(Some(pixel)) => pixel,
+                                    Ok(None) => color,
+                                    Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
+                                };
                             state.framebuffer[y * 1920 + x] = pixel;
                         }
                     }
@@ -707,6 +704,7 @@ struct DisplayState {
     direct_scanout_count: u64,
     composition_frame_count: u64,
     framebuffer: Vec<u32>,
+    pixel_transport: PixelTransportStore,
 }
 
 #[derive(Debug, Clone)]
@@ -1444,6 +1442,7 @@ impl DisplayState {
             direct_scanout_count: 0,
             composition_frame_count: 0,
             framebuffer: Vec::new(),
+            pixel_transport: PixelTransportStore::default(),
         })
     }
 
@@ -1490,8 +1489,66 @@ impl DisplayState {
             direct_scanout_count: 0,
             composition_frame_count: 0,
             framebuffer: Vec::new(),
+            pixel_transport: PixelTransportStore::default(),
         }
     }
+}
+
+fn submit_pixel_payloads(
+    store: &mut PixelTransportStore,
+    payloads: Vec<PixelTransportPayload>,
+) -> std::result::Result<(), PixelTransportError> {
+    for payload in payloads {
+        store.submit(payload)?;
+    }
+    Ok(())
+}
+
+fn pixel_for_surface(
+    store: &PixelTransportStore,
+    surface: &waybroker_common::SurfaceSnapshot,
+    placement: &waybroker_common::SurfacePlacement,
+    x: usize,
+    y: usize,
+) -> std::result::Result<Option<u32>, String> {
+    let Some(handle) = surface.pixel_transport.as_ref() else { return Ok(None) };
+    let payload = store.lookup(handle).ok_or_else(|| {
+        format!(
+            "missing pixel payload for client {} surface {} buffer {} scene {}",
+            handle.client_id, handle.surface_id, handle.buffer_generation, handle.scene_generation
+        )
+    })?;
+    let local_x = (x as i32 - placement.x).max(0) as u32;
+    let local_y = (y as i32 - placement.y).max(0) as u32;
+    if local_x >= payload.width || local_y >= payload.height {
+        return Ok(None);
+    }
+    let offset = local_y as usize * payload.stride as usize + local_x as usize * 4;
+    Ok(payload
+        .pixels
+        .get(offset..offset + 4)
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("slice length checked"))))
+}
+
+fn verify_pixel_payloads_available(
+    store: &PixelTransportStore,
+    surfaces: &[waybroker_common::SurfaceSnapshot],
+) -> std::result::Result<(), String> {
+    for surface in surfaces {
+        let Some(handle) = surface.pixel_transport.as_ref() else {
+            continue;
+        };
+        if store.lookup(handle).is_none() {
+            return Err(format!(
+                "missing pixel payload for client {} surface {} buffer {} scene {}",
+                handle.client_id,
+                handle.surface_id,
+                handle.buffer_generation,
+                handle.scene_generation
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn load_scene_snapshot(path: &Path) -> Result<Option<CommittedSceneState>> {
@@ -1815,6 +1872,7 @@ mod tests {
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![],
+                pixel_payloads: vec![],
                 scene_epoch: 0,
                 scene_generation: 0,
             },
@@ -2975,6 +3033,7 @@ exit 0
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![surf1.clone()],
+                pixel_payloads: vec![],
                 scene_epoch: 0,
                 scene_generation: 0,
             },
@@ -2999,6 +3058,7 @@ exit 0
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![surf1],
+                pixel_payloads: vec![],
                 scene_epoch: 0,
                 scene_generation: 0,
             },
@@ -3015,6 +3075,128 @@ exit 0
         .unwrap();
         assert!(matches!(commit2, DisplayEvent::SceneCommitted { .. }));
         assert_eq!(state.zero_damage_skipped_count, 1);
+    }
+
+    #[tokio::test]
+    async fn pixel_transport_payload_feeds_renderer_without_entering_scene_snapshot() {
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
+        let mut state = DisplayState::new_test();
+        let mut clock = FakePresentationClock::default();
+        let capture_backend = FakeCaptureBackend;
+        let mut record_backend = FakeRecordBackend;
+        let mut display_backend = FakeDisplayBackend;
+        let handle = waybroker_common::PixelTransportHandle {
+            client_id: 7,
+            surface_id: "client-7-surface-3".into(),
+            buffer_generation: 3,
+            scene_generation: 1,
+        };
+        let surface = waybroker_common::SurfaceSnapshot {
+            id: handle.surface_id.clone(),
+            app_id: "app1".into(),
+            placement: waybroker_common::SurfacePlacement {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+                z: 1,
+                visible: true,
+            },
+            buffer_handle: Some("3".into()),
+            buffer_generation: 3,
+            pixel_transport: Some(handle.clone()),
+            ..Default::default()
+        };
+        let payload = waybroker_common::PixelTransportPayload {
+            handle,
+            pixels: vec![0x44, 0x33, 0x22, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: 1,
+        };
+
+        let commit = handle_display_command(
+            DisplayCommand::CommitScene {
+                target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+                focus: waybroker_common::FocusTarget::None,
+                selection: waybroker_common::WaylandSelectionState::default(),
+                surfaces: vec![surface],
+                pixel_payloads: vec![payload],
+                scene_epoch: 1,
+                scene_generation: 1,
+            },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(commit, DisplayEvent::SceneCommitted { .. }));
+        assert_eq!(state.framebuffer[0], 0x11223344);
+        let snapshot = state.last_scene.as_ref().unwrap();
+        assert!(snapshot.surfaces[0].pixel_transport.is_some());
+        assert!(!serde_json::to_string(snapshot).unwrap().contains("\"pixels\""));
+    }
+
+    #[tokio::test]
+    async fn missing_pixel_transport_payload_rejects_without_corrupting_scene() {
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
+        let mut state = DisplayState::new_test();
+        let mut clock = FakePresentationClock::default();
+        let capture_backend = FakeCaptureBackend;
+        let mut record_backend = FakeRecordBackend;
+        let mut display_backend = FakeDisplayBackend;
+        let surface = waybroker_common::SurfaceSnapshot {
+            id: "client-7-surface-3".into(),
+            app_id: "app1".into(),
+            placement: waybroker_common::SurfacePlacement {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+                z: 1,
+                visible: true,
+            },
+            pixel_transport: Some(waybroker_common::PixelTransportHandle {
+                client_id: 7,
+                surface_id: "client-7-surface-3".into(),
+                buffer_generation: 3,
+                scene_generation: 1,
+            }),
+            ..Default::default()
+        };
+
+        let commit = handle_display_command(
+            DisplayCommand::CommitScene {
+                target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+                focus: waybroker_common::FocusTarget::None,
+                selection: waybroker_common::WaylandSelectionState::default(),
+                surfaces: vec![surface],
+                pixel_payloads: vec![],
+                scene_epoch: 1,
+                scene_generation: 1,
+            },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(commit, DisplayEvent::Rejected { .. }));
+        assert!(state.last_scene.is_none());
     }
 
     #[tokio::test]
@@ -3046,6 +3228,7 @@ exit 0
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![fullscreen_surf],
+                pixel_payloads: vec![],
                 scene_epoch: 0,
                 scene_generation: 0,
             },

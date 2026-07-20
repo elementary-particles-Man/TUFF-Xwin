@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::pixel_transport::PixelTransportPayload;
+
 use crate::{
     ServiceRole, SessionLaunchDelta, SessionLaunchState, SessionProfileTransition,
     SessionWatchdogReport, profile::default_session_instance_id,
@@ -103,6 +105,8 @@ pub enum DisplayCommand {
         #[serde(default)]
         selection: WaylandSelectionState,
         surfaces: Vec<SurfaceSnapshot>,
+        #[serde(default)]
+        pixel_payloads: Vec<PixelTransportPayload>,
         #[serde(default)]
         scene_epoch: u64,
         #[serde(default)]
@@ -548,18 +552,8 @@ pub struct SurfaceSnapshot {
     pub buffer_generation: u64,
     #[serde(default)]
     pub damage_rects: Vec<Rect>,
-    /// Owned snapshot of the client buffer for the broker IPC boundary.
-    /// Production shm clients populate this; legacy/demo scenes leave it empty.
     #[serde(default)]
-    pub buffer_pixels: Vec<u8>,
-    #[serde(default)]
-    pub buffer_width: u32,
-    #[serde(default)]
-    pub buffer_height: u32,
-    #[serde(default)]
-    pub buffer_stride: u32,
-    #[serde(default)]
-    pub buffer_format: u32,
+    pub pixel_transport: Option<crate::pixel_transport::PixelTransportHandle>,
     #[serde(default)]
     pub layer_class: u32,
     #[serde(default)]

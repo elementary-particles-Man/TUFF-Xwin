@@ -1,5 +1,6 @@
 pub mod accel;
 mod ipc;
+pub mod pixel_transport;
 mod profile;
 mod transport;
 
@@ -11,6 +12,9 @@ pub use ipc::{
     PointerConstraints, Rect, ResumeStage, SessionCommand, SurfacePlacement,
     SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand, WaylandCommand, WaylandEvent,
     WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
+};
+pub use pixel_transport::{
+    PixelTransportError, PixelTransportHandle, PixelTransportPayload, PixelTransportStore,
 };
 pub use profile::{
     DesktopComponent, DesktopComponentRole, DesktopComponentState, DesktopHealthStatus,
@@ -131,6 +135,7 @@ mod tests {
                         ..Default::default()
                     },
                 ],
+                pixel_payloads: vec![],
                 scene_epoch: 42,
                 scene_generation: 1,
             }),
