@@ -8,7 +8,7 @@ pub use accel::{AccelPolicy, SimdFlavor};
 pub use ipc::{
     CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget,
     ForeignToplevelHandle, HealthState, ImeBridgeMode, ImeCommand, ImeEvent, ImeStatus,
-    IpcEnvelope, LayerMetadata, LockCommand, LockState, MessageKind, OutputMode,
+    IpcEnvelope, LayerMetadata, LockCommand, LockState, MessageKind, OutputGeometry, OutputMode,
     PointerConstraints, Rect, ResumeStage, SessionCommand, SurfacePlacement,
     SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand, WaylandCommand, WaylandEvent,
     WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,

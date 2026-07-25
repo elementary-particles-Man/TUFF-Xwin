@@ -1,5 +1,9 @@
 # HANDOFF
 
+## Variable output geometry implementation (2026-07-26)
+
+`feature/variable-output-geometry` にて、`waybroker-common` の `DisplayCommand::ConfigureOutput` と `OutputGeometry`（output identity、幅、高さ、stride、format、origin、output_generation）を追加し、`displayd` の CPU 合成を検証済み出力状態へ移行した。framebuffer は stride から checked に算出し、初回設定・resize・stride変更は旧バッファを公開せず次回合成で full repaint を行う。surface/damage は output origin を含む global 座標から local framebuffer 座標へ checked translation し、既存の canonical ordering、PixelTransport、premultiplied alpha、damage-limited replay を維持する。不正 geometry、overflow、unsupported format、stale generation は拒否する。負 origin、padding stride、generation 独立性のテストを追加した。production display/backend は起動していない。
+
 更新日: `2026-07-26`
 対象 repository: `/media/flux/THPDOC/Develop/TUFF-Xwin`
 

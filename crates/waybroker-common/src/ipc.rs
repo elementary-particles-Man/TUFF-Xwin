@@ -89,6 +89,9 @@ pub enum ImeEvent {
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum DisplayCommand {
     EnumerateOutputs,
+    ConfigureOutput {
+        geometry: OutputGeometry,
+    },
     SetMode {
         output: String,
         mode: OutputMode,
@@ -136,6 +139,18 @@ pub enum DisplayCommand {
         commit_id: u64,
     },
     ResumeBegin,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputGeometry {
+    pub output_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub format: u32,
+    pub origin_x: i32,
+    pub origin_y: i32,
+    pub output_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

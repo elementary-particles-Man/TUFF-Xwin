@@ -12,17 +12,19 @@ use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
 };
 use waybroker_common::{
-    CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputMode,
-    PixelTransportError, PixelTransportPayload, PixelTransportStore, ServiceBanner,
+    CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputGeometry,
+    OutputMode, PixelTransportError, PixelTransportPayload, PixelTransportStore, ServiceBanner,
     ServiceEndpoint, ServiceRole, ServiceStream, accel::global_accel_policy, bind_service_socket,
     ensure_runtime_dir, now_unix_timestamp, read_json_line, sanitize_artifact_filename,
     send_json_line, session_artifact_path, validate_artifact_filename,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
-const FRAMEBUFFER_WIDTH: u32 = 1920;
-const FRAMEBUFFER_HEIGHT: u32 = 1080;
 const BACKGROUND_PIXEL: u32 = 0xFF00_0000;
+#[cfg(test)]
+const FRAMEBUFFER_WIDTH: u32 = 1920;
+#[cfg(test)]
+const FRAMEBUFFER_HEIGHT: u32 = 1080;
 const WL_SHM_FORMAT_ARGB8888: u32 = 0;
 const WL_SHM_FORMAT_XRGB8888: u32 = 1;
 
@@ -335,6 +337,29 @@ async fn handle_display_command(
             println!("service=displayd op=enumerate_outputs event=success count={}", outputs.len());
             Ok(DisplayEvent::OutputInventory { outputs })
         }
+        DisplayCommand::ConfigureOutput { geometry } => {
+            let next = OutputState::validate(&geometry).map_err(|reason| anyhow::anyhow!(reason));
+            let next = match next {
+                Ok(value) => value,
+                Err(error) => return Ok(DisplayEvent::Rejected { reason: error.to_string() }),
+            };
+            if next.generation <= state.output.generation {
+                return Ok(DisplayEvent::Rejected { reason: "stale output generation".into() });
+            }
+            state.output = next;
+            // Keep the replacement unpublished until the next successful composition;
+            // an empty active buffer also forces the required full repaint.
+            state.framebuffer = Vec::new();
+            Ok(DisplayEvent::ModeApplied {
+                output: geometry.output_id.clone(),
+                mode: OutputMode {
+                    name: geometry.output_id,
+                    width: geometry.width,
+                    height: geometry.height,
+                    refresh_hz: 0,
+                },
+            })
+        }
         DisplayCommand::SetMode { output, mode } => {
             display_backend.set_mode(&output, &mode)?;
             println!("service=displayd op=set_mode event=success output={output} mode={:?}", mode);
@@ -415,8 +440,8 @@ async fn handle_display_command(
                 let surf = &surfaces[0];
                 if surf.placement.x == 0
                     && surf.placement.y == 0
-                    && surf.placement.width == 1920
-                    && surf.placement.height == 1080
+                    && surf.placement.width == state.output.width
+                    && surf.placement.height == state.output.height
                 {
                     is_direct_scanout = true;
                     state.direct_scanout_count += 1;
@@ -434,20 +459,17 @@ async fn handle_display_command(
             let mut copied_bytes = 0u64;
 
             if !skipped {
-                let output_bounds =
-                    RendererRect::from_origin_size(0, 0, FRAMEBUFFER_WIDTH, FRAMEBUFFER_HEIGHT)
-                        .expect("static framebuffer dimensions are valid");
+                let output_bounds = state.output.bounds();
                 let damage_rects = effective_damage_rects(
                     state.last_scene.as_ref(),
                     &surfaces,
-                    framebuffer_is_initialized(&state.framebuffer),
+                    framebuffer_is_initialized(&state.framebuffer, &state.output),
                     output_bounds,
                 );
                 if damage_rects.is_empty() {
                     skipped = true;
                     state.zero_damage_skipped_count += 1;
                 } else {
-                    ensure_framebuffer(&mut state.framebuffer);
                     if let Err(reason) = validate_surface_pixels_for_damage(
                         &state.pixel_transport,
                         &surfaces,
@@ -455,9 +477,15 @@ async fn handle_display_command(
                     ) {
                         return Ok(DisplayEvent::Rejected { reason });
                     }
-                    let mut scratch = state.framebuffer.clone();
+                    let mut scratch =
+                        if framebuffer_is_initialized(&state.framebuffer, &state.output) {
+                            state.framebuffer.clone()
+                        } else {
+                            vec![BACKGROUND_PIXEL; state.output.framebuffer_words()]
+                        };
                     let stats = match compose_damage_rects(
                         &mut scratch,
+                        &state.output,
                         &state.pixel_transport,
                         &surfaces,
                         &damage_rects,
@@ -684,7 +712,58 @@ struct DisplayState {
     direct_scanout_count: u64,
     composition_frame_count: u64,
     framebuffer: Vec<u32>,
+    output: OutputState,
     pixel_transport: PixelTransportStore,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputState {
+    output_id: String,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+    origin_x: i32,
+    origin_y: i32,
+    generation: u64,
+}
+impl OutputState {
+    fn validate(g: &OutputGeometry) -> std::result::Result<Self, String> {
+        if g.output_id.is_empty() || g.width == 0 || g.height == 0 {
+            return Err("invalid output identity or zero dimensions".into());
+        }
+        if g.format != WL_SHM_FORMAT_XRGB8888 {
+            return Err("output framebuffer must be XRGB8888".into());
+        }
+        let min = g.width.checked_mul(4).ok_or("output stride overflow")?;
+        if g.stride < min || g.stride % 4 != 0 {
+            return Err("undersized or unaligned output stride".into());
+        }
+        let words = (g.stride as usize)
+            .checked_div(4)
+            .and_then(|row| row.checked_mul(g.height as usize))
+            .ok_or("framebuffer size overflow")?;
+        if words == 0 {
+            return Err("framebuffer size overflow".into());
+        }
+        Ok(Self {
+            output_id: g.output_id.clone(),
+            width: g.width,
+            height: g.height,
+            stride: g.stride,
+            format: g.format,
+            origin_x: g.origin_x,
+            origin_y: g.origin_y,
+            generation: g.output_generation,
+        })
+    }
+    fn bounds(&self) -> RendererRect {
+        RendererRect::from_origin_size(self.origin_x, self.origin_y, self.width, self.height)
+            .expect("validated geometry")
+    }
+    fn framebuffer_words(&self) -> usize {
+        (self.stride as usize / 4) * self.height as usize
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1422,6 +1501,16 @@ impl DisplayState {
             direct_scanout_count: 0,
             composition_frame_count: 0,
             framebuffer: Vec::new(),
+            output: OutputState {
+                output_id: "eDP-1".into(),
+                width: 1920,
+                height: 1080,
+                stride: 1920 * 4,
+                format: WL_SHM_FORMAT_XRGB8888,
+                origin_x: 0,
+                origin_y: 0,
+                generation: 0,
+            },
             pixel_transport: PixelTransportStore::default(),
         })
     }
@@ -1469,6 +1558,16 @@ impl DisplayState {
             direct_scanout_count: 0,
             composition_frame_count: 0,
             framebuffer: Vec::new(),
+            output: OutputState {
+                output_id: "eDP-1".into(),
+                width: 1920,
+                height: 1080,
+                stride: 1920 * 4,
+                format: WL_SHM_FORMAT_XRGB8888,
+                origin_x: 0,
+                origin_y: 0,
+                generation: 0,
+            },
             pixel_transport: PixelTransportStore::default(),
         }
     }
@@ -1558,12 +1657,13 @@ fn checked_add_i32_u32(value: i32, delta: u32) -> Option<i32> {
     i32::try_from(sum).ok()
 }
 
-fn framebuffer_is_initialized(framebuffer: &[u32]) -> bool {
-    framebuffer.len() == (FRAMEBUFFER_WIDTH as usize * FRAMEBUFFER_HEIGHT as usize)
+fn framebuffer_is_initialized(framebuffer: &[u32], output: &OutputState) -> bool {
+    framebuffer.len() == output.framebuffer_words()
 }
 
+#[cfg(test)]
 fn ensure_framebuffer(framebuffer: &mut Vec<u32>) {
-    if !framebuffer_is_initialized(framebuffer) {
+    if framebuffer.len() != (FRAMEBUFFER_WIDTH as usize * FRAMEBUFFER_HEIGHT as usize) {
         *framebuffer =
             vec![BACKGROUND_PIXEL; FRAMEBUFFER_WIDTH as usize * FRAMEBUFFER_HEIGHT as usize];
     }
@@ -1672,6 +1772,7 @@ fn surface_exposes_or_occupies_different_region(
 
 fn compose_damage_rects(
     framebuffer: &mut [u32],
+    output: &OutputState,
     store: &PixelTransportStore,
     surfaces: &[waybroker_common::SurfaceSnapshot],
     damage_rects: &[RendererRect],
@@ -1679,7 +1780,7 @@ fn compose_damage_rects(
     let mut stats = CompositionStats::default();
     for damage in damage_rects {
         stats.damaged_pixels = stats.damaged_pixels.saturating_add(damage.area());
-        fill_framebuffer_rect(framebuffer, *damage, BACKGROUND_PIXEL)?;
+        fill_framebuffer_rect(framebuffer, output, *damage, BACKGROUND_PIXEL)?;
         for surface in surfaces {
             let Some(surface_bounds) = surface_output_bounds(surface) else {
                 continue;
@@ -1688,7 +1789,7 @@ fn compose_damage_rects(
                 continue;
             };
             let color = fallback_surface_pixel(surface);
-            copy_surface_rect(framebuffer, store, surface, copy_rect, color)?;
+            copy_surface_rect(framebuffer, output, store, surface, copy_rect, color)?;
         }
     }
     stats.copied_bytes = stats.damaged_pixels.saturating_mul(4);
@@ -1740,14 +1841,15 @@ fn validate_surface_pixel_rect(
 
 fn fill_framebuffer_rect(
     framebuffer: &mut [u32],
+    output: &OutputState,
     rect: RendererRect,
     pixel: u32,
 ) -> std::result::Result<(), String> {
     for y in rect.y0..rect.y1 {
-        let row_start = framebuffer_offset(0, y as u32)?;
+        let row_start = framebuffer_offset_for_output(output, output.origin_x, y)?;
         for x in rect.x0..rect.x1 {
             let index = row_start
-                .checked_add(x as usize)
+                .checked_add((x - output.origin_x) as usize)
                 .ok_or_else(|| "framebuffer offset overflow".to_string())?;
             framebuffer[index] = pixel;
         }
@@ -1757,16 +1859,17 @@ fn fill_framebuffer_rect(
 
 fn copy_surface_rect(
     framebuffer: &mut [u32],
+    output: &OutputState,
     store: &PixelTransportStore,
     surface: &waybroker_common::SurfaceSnapshot,
     rect: RendererRect,
     fallback_pixel: u32,
 ) -> std::result::Result<(), String> {
     for y in rect.y0..rect.y1 {
-        let row_start = framebuffer_offset(0, y as u32)?;
+        let row_start = framebuffer_offset_for_output(output, output.origin_x, y)?;
         for x in rect.x0..rect.x1 {
             let index = row_start
-                .checked_add(x as usize)
+                .checked_add((x - output.origin_x) as usize)
                 .ok_or_else(|| "framebuffer offset overflow".to_string())?;
             let src =
                 pixel_for_surface(store, surface, &surface.placement, x as usize, y as usize)?
@@ -1777,14 +1880,42 @@ fn copy_surface_rect(
     Ok(())
 }
 
-fn framebuffer_offset(x: u32, y: u32) -> std::result::Result<usize, String> {
-    if x >= FRAMEBUFFER_WIDTH || y >= FRAMEBUFFER_HEIGHT {
+fn framebuffer_offset_for_output(
+    output: &OutputState,
+    x: i32,
+    y: i32,
+) -> std::result::Result<usize, String> {
+    let local_x = x.checked_sub(output.origin_x).ok_or("x translation overflow")?;
+    let local_y = y.checked_sub(output.origin_y).ok_or("y translation overflow")?;
+    if local_x < 0
+        || local_y < 0
+        || local_x as u32 >= output.width
+        || local_y as u32 >= output.height
+    {
         return Err("framebuffer coordinate out of bounds".into());
     }
-    (y as usize)
-        .checked_mul(FRAMEBUFFER_WIDTH as usize)
-        .and_then(|offset| offset.checked_add(x as usize))
+    (local_y as usize)
+        .checked_mul(output.stride as usize / 4)
+        .and_then(|offset| offset.checked_add(local_x as usize))
         .ok_or_else(|| "framebuffer offset overflow".into())
+}
+
+#[cfg(test)]
+fn framebuffer_offset(x: u32, y: u32) -> std::result::Result<usize, String> {
+    framebuffer_offset_for_output(
+        &OutputState {
+            output_id: "test".into(),
+            width: FRAMEBUFFER_WIDTH,
+            height: FRAMEBUFFER_HEIGHT,
+            stride: FRAMEBUFFER_WIDTH * 4,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            generation: 1,
+        },
+        x as i32,
+        y as i32,
+    )
 }
 
 fn fallback_surface_pixel(surface: &waybroker_common::SurfaceSnapshot) -> u32 {
@@ -4123,5 +4254,71 @@ exit 0
         assert!(matches!(commit, DisplayEvent::SceneCommitted { .. }));
         assert_eq!(state.direct_scanout_count, 1);
         assert_eq!(state.composition_frame_count, 0);
+    }
+
+    #[test]
+    fn output_geometry_rejects_invalid_shapes_and_overflow() {
+        let base = OutputGeometry {
+            output_id: "test".into(),
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 1,
+        };
+        assert!(OutputState::validate(&base).is_ok());
+        assert!(OutputState::validate(&OutputGeometry { width: 0, ..base.clone() }).is_err());
+        assert!(OutputState::validate(&OutputGeometry { stride: 4, ..base.clone() }).is_err());
+        assert!(OutputState::validate(&OutputGeometry { format: 99, ..base.clone() }).is_err());
+        assert!(OutputState::validate(&OutputGeometry { width: u32::MAX, ..base }).is_err());
+    }
+
+    #[test]
+    fn output_geometry_supports_padding_and_negative_origin() {
+        let output = OutputState::validate(&OutputGeometry {
+            output_id: "test".into(),
+            width: 3,
+            height: 2,
+            stride: 16,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: -4,
+            origin_y: -3,
+            output_generation: 7,
+        })
+        .unwrap();
+        assert_eq!(output.framebuffer_words(), 8);
+        assert_eq!(output.bounds(), RendererRect { x0: -4, y0: -3, x1: -1, y1: -1 });
+        assert_eq!(framebuffer_offset_for_output(&output, -4, -3).unwrap(), 0);
+        assert_eq!(framebuffer_offset_for_output(&output, -2, -2).unwrap(), 6);
+    }
+
+    #[test]
+    fn output_and_scene_generations_are_independent() {
+        let output = OutputState::validate(&OutputGeometry {
+            output_id: "test".into(),
+            width: 4,
+            height: 4,
+            stride: 16,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 11,
+        })
+        .unwrap();
+        assert_eq!(output.generation, 11);
+        let scene = CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "test".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: Default::default(),
+            surfaces: vec![],
+            scene_epoch: 2,
+            scene_generation: 3,
+            commit_id: 1,
+            unix_timestamp: 0,
+        };
+        assert_ne!(output.generation, scene.scene_generation);
     }
 }
