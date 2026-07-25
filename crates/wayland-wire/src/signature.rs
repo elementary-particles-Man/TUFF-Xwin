@@ -29,17 +29,18 @@ pub fn validate_args(msg: &MessageSpec, args: &[WireArg]) -> bool {
     }
 
     for (spec, arg) in msg.args.iter().zip(args.iter()) {
-        let match_type = match (spec.arg_type.as_str(), arg) {
-            ("int", WireArg::Int(_)) => true,
-            ("uint", WireArg::Uint(_)) => true,
-            ("fixed", WireArg::Fixed(_)) => true,
-            ("string", WireArg::String(_)) => true,
-            ("object", WireArg::Object(_)) => true,
-            ("new_id", WireArg::NewId(_)) => true,
-            ("array", WireArg::Array(_)) => true,
-            ("fd", WireArg::Fd(_)) | ("fd", WireArg::AncillaryFd) => true,
-            _ => false,
-        };
+        let match_type = matches!(
+            (spec.arg_type.as_str(), arg),
+            ("int", WireArg::Int(_))
+                | ("uint", WireArg::Uint(_))
+                | ("fixed", WireArg::Fixed(_))
+                | ("string", WireArg::String(_))
+                | ("object", WireArg::Object(_))
+                | ("new_id", WireArg::NewId(_))
+                | ("array", WireArg::Array(_))
+                | ("fd", WireArg::Fd(_))
+                | ("fd", WireArg::AncillaryFd)
+        );
         if !match_type {
             return false;
         }

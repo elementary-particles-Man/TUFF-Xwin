@@ -13,6 +13,7 @@ impl PresentationClock for SystemPresentationClock {
     }
 }
 
+#[derive(Default)]
 pub struct PresentationManager {
     pub feedbacks: HashMap<WaylandObjectId, PresentationFeedbackState>,
 }

@@ -32,6 +32,7 @@ impl ShmBuffer {
     }
 }
 
+#[derive(Default)]
 pub struct ShmManager {
     pub pools: HashMap<WaylandObjectId, ShmPool>,
     pub buffers: HashMap<WaylandObjectId, ShmBuffer>,
@@ -53,6 +54,7 @@ impl ShmManager {
         self.pools.insert(id, ShmPool { id, storage: ShmPoolStorage::ReceivedFd(fd), size });
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_buffer(
         &mut self,
         id: WaylandObjectId,

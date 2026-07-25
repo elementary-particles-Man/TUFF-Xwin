@@ -624,7 +624,7 @@ impl HeadlessWireCore {
         message: WaylandMessage,
         args: &[crate::WireArg],
     ) -> Result<()> {
-        if let Some(crate::WireArg::String(title)) = args.get(0) {
+        if let Some(crate::WireArg::String(title)) = args.first() {
             if let Some(surf) = self.xdg_shell.surfaces.get_mut(&message.header.object_id) {
                 surf.title = Some(title.clone());
             }
@@ -637,7 +637,7 @@ impl HeadlessWireCore {
         message: WaylandMessage,
         args: &[crate::WireArg],
     ) -> Result<()> {
-        if let Some(crate::WireArg::String(app_id)) = args.get(0) {
+        if let Some(crate::WireArg::String(app_id)) = args.first() {
             if let Some(surf) = self.xdg_shell.surfaces.get_mut(&message.header.object_id) {
                 surf.app_id = Some(app_id.clone());
             }
@@ -906,6 +906,7 @@ impl HeadlessWireCore {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

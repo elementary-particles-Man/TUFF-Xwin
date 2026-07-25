@@ -209,6 +209,7 @@ impl WireFakeClient {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn wl_shm_pool_create_buffer(
         &mut self,
         pool_id: u32,

@@ -199,9 +199,7 @@ impl ProtocolSpec {
                     Event::Eof => break,
                     _ => {}
                 },
-                Err(e) => {
-                    return Err(WireError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))
-                }
+                Err(e) => return Err(WireError::Io(std::io::Error::other(e))),
             }
             buf.clear();
         }

@@ -517,6 +517,7 @@ impl VulkanBackend {
                 &[],
             );
 
+            #[allow(clippy::manual_div_ceil)]
             let group_count = ((payload_size / 4) + 63) / 64;
             device.cmd_dispatch(cmd_buf, group_count as u32, 1, 1);
             device.end_command_buffer(cmd_buf)?;
@@ -550,7 +551,7 @@ impl VulkanBackend {
         let now = Instant::now();
 
         // Get device clone first to avoid simultaneous borrow of inner
-        let device = inner.device.as_ref().map(|d| d.clone());
+        let device = inner.device.clone();
 
         if let Some(sub) = inner.submissions.get_mut(&handle.id) {
             if sub.completed_at.is_some() {

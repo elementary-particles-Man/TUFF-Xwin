@@ -322,12 +322,14 @@ struct Config {
 
 impl Config {
     fn from_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
-        let mut config = Self::default();
+        let mut config = Self {
+            session_instance_id: DEFAULT_SESSION_INSTANCE_ID.to_string(),
+            scene_epoch: generate_scene_epoch(),
+            diagnostic_only: true,
+            ..Self::default()
+        };
         // waylandd currently tracks protocol/state; GPU scene work is owned by
         // compd/displayd until a real buffer import path is available here.
-        config.session_instance_id = DEFAULT_SESSION_INSTANCE_ID.to_string();
-        config.scene_epoch = generate_scene_epoch();
-        config.diagnostic_only = true; // default behavior for safety
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -455,6 +457,7 @@ async fn serve_ipc(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_client(
     mut stream: ServiceStream,
     registry: &mut SurfaceRegistrySnapshot,
@@ -1747,6 +1750,7 @@ fn run_readiness_check(socket_path: &Path) -> Result<()> {
             )?;
             consumed += header.size as usize;
 
+            #[allow(clippy::collapsible_if)]
             if msg.header.object_id.0 == 2 && msg.header.opcode.0 == 0 {
                 if msg.payload.len() >= 8 {
                     let interface_len = LittleEndian::read_u32(&msg.payload[4..8]) as usize;
@@ -2384,7 +2388,7 @@ mod tests {
             event,
             ImeEvent::PreeditUpdated { text: "hello".into(), cursor_begin: 5, cursor_end: 5 }
         );
-        assert_eq!(state.preedit_active, true);
+        assert!(state.preedit_active);
 
         // Test cursor rect
         let event = super::handle_ime_command(
@@ -2407,7 +2411,7 @@ mod tests {
             &mut backend,
         );
         assert_eq!(event, ImeEvent::StringCommitted { text: "hello".into() });
-        assert_eq!(state.preedit_active, false);
+        assert!(!state.preedit_active);
         assert_eq!(state.commit_count, 1);
 
         // Test surrounding text and content type

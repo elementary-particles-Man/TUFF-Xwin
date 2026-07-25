@@ -38,7 +38,7 @@ pub fn normalize_bgra_to_rgba_in_place_with_path(pixels: &mut [u32], path: Pixel
 }
 
 pub fn normalize_bgra_to_rgba_bytes(bytes: &mut [u8]) -> Result<(), &'static str> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err("pixel buffer must be 4-byte aligned");
     }
 

@@ -504,9 +504,6 @@ mod tests {
             std::io::ErrorKind::ConnectionAborted,
             "connection aborted"
         )));
-        assert!(!is_recoverable_accept_error(&std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "fatal"
-        )));
+        assert!(!is_recoverable_accept_error(&std::io::Error::other("fatal")));
     }
 }

@@ -5,7 +5,7 @@ use crate::browser_surface_boundary::{
     BrowserGpuBoundaryPolicy, BrowserRuntimeFamily, BrowserRuntimePosture, BrowserWindowRole,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AgeAssuranceBrowserSurfaceState {
     NewWindow,
     Focused,
@@ -25,13 +25,8 @@ pub enum AgeAssuranceBrowserSurfaceState {
     ExternalProtocolHandler,
     ScreenCaptureOrMirroring,
     SharedGpuSurface,
+    #[default]
     Unknown,
-}
-
-impl Default for AgeAssuranceBrowserSurfaceState {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -48,7 +43,7 @@ pub struct AgeAssuranceBrowserOperatorOverrides {
     pub operator_confirmed_external_protocol_allowed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AgeAssuranceBrowserSurfaceBoundaryContext {
     pub runtime_family: BrowserRuntimeFamily,
     pub runtime_posture: BrowserRuntimePosture,
@@ -59,22 +54,6 @@ pub struct AgeAssuranceBrowserSurfaceBoundaryContext {
     pub extension_or_native_policy: BrowserExtensionOrNativePolicy,
     pub gpu_boundary_policy: BrowserGpuBoundaryPolicy,
     pub operator_overrides: AgeAssuranceBrowserOperatorOverrides,
-}
-
-impl Default for AgeAssuranceBrowserSurfaceBoundaryContext {
-    fn default() -> Self {
-        Self {
-            runtime_family: BrowserRuntimeFamily::default(),
-            runtime_posture: BrowserRuntimePosture::default(),
-            window_role: BrowserWindowRole::default(),
-            surface_state: AgeAssuranceBrowserSurfaceState::default(),
-            clipboard_policy: BrowserClipboardPolicy::default(),
-            file_boundary_policy: BrowserFileBoundaryPolicy::default(),
-            extension_or_native_policy: BrowserExtensionOrNativePolicy::default(),
-            gpu_boundary_policy: BrowserGpuBoundaryPolicy::default(),
-            operator_overrides: AgeAssuranceBrowserOperatorOverrides::default(),
-        }
-    }
 }
 
 impl AgeAssuranceBrowserSurfaceBoundaryContext {

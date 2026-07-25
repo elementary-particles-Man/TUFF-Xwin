@@ -18,6 +18,7 @@ pub struct InputPopupSurfaceState {
     pub height: i32,
 }
 
+#[derive(Default)]
 pub struct InputMethodManager {
     pub methods: HashMap<WaylandObjectId, InputMethodState>,
     pub popups: HashMap<WaylandObjectId, InputPopupSurfaceState>,

@@ -1,6 +1,7 @@
 use crate::{surface::Rect, WaylandObjectId};
 use std::collections::HashMap;
 
+#[derive(Default)]
 pub struct OutputManager {
     pub outputs: HashMap<WaylandObjectId, OutputState>,
 }

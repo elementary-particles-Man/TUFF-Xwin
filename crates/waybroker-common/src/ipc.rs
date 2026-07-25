@@ -87,6 +87,8 @@ pub enum ImeEvent {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
+// IPC values remain inline to preserve the established wire shape and public API.
+#[allow(clippy::large_enum_variant)]
 pub enum DisplayCommand {
     EnumerateOutputs,
     ConfigureOutput {
@@ -237,6 +239,8 @@ pub enum DisplayEvent {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
+// IPC values remain inline to preserve the established wire shape and public API.
+#[allow(clippy::large_enum_variant)]
 pub enum WaylandCommand {
     GetSurfaceRegistry,
     ApplySelectionHandoff {

@@ -28,6 +28,7 @@ pub struct PopupState {
     pub positioner: PositionerState,
 }
 
+#[derive(Default)]
 pub struct XdgShellManager {
     pub surfaces: HashMap<WaylandObjectId, XdgSurfaceState>,
     pub positioners: HashMap<WaylandObjectId, PositionerState>,

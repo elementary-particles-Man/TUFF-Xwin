@@ -1,6 +1,7 @@
 use crate::{Result, WaylandObjectId, WireError};
 use std::collections::HashMap;
 
+#[derive(Default)]
 pub struct XdgOutputManager {
     pub outputs: HashMap<WaylandObjectId, XdgOutputState>,
 }

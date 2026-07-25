@@ -30,6 +30,7 @@ impl CaptureScratch {
     }
 }
 
+#[derive(Default)]
 pub struct ScreencopyManager {
     pub frames: HashMap<WaylandObjectId, ScreencopyFrameState>,
     pub scratch: CaptureScratch,
@@ -69,6 +70,7 @@ impl ScreencopyManager {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn capture_output_region(
         &mut self,
         id: WaylandObjectId,

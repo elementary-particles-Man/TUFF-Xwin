@@ -18,16 +18,11 @@ use crate::{
 };
 use xwin_sec::{BrowserSecurityPolicy, PolicyContext, SecurityPolicy};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CaptureBackendKind {
+    #[default]
     Fake,
     IsolatedDisplayd,
-}
-
-impl Default for CaptureBackendKind {
-    fn default() -> Self {
-        Self::Fake
-    }
 }
 
 impl CaptureBackendKind {
@@ -120,10 +115,7 @@ impl CliOptions {
     {
         let raw = CliOverrides::parse_from(args)?;
         if raw.help {
-            let mut options = Self::default();
-            options.help = true;
-            options.config_path = raw.config_path;
-            return Ok(options);
+            return Ok(Self { help: true, config_path: raw.config_path, ..Self::default() });
         }
 
         let mut options = Self::default();

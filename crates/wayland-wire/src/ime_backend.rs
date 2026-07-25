@@ -10,6 +10,7 @@ pub enum ImeRequest {
     DeleteSurroundingText { before: u32, after: u32 },
 }
 
+#[derive(Default)]
 pub struct FakeImeBackend {
     pub last_text: String,
     pub requests: Vec<ImeRequest>,

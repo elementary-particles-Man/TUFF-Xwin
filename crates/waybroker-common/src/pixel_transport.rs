@@ -67,6 +67,10 @@ impl PixelTransportStore {
         self.payloads.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.payloads.is_empty()
+    }
+
     fn latest_handle_for_surface(
         &self,
         client_id: u64,

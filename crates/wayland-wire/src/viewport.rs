@@ -15,6 +15,7 @@ pub struct RectFixed {
     pub height: i32,
 }
 
+#[derive(Default)]
 pub struct ViewportManager {
     pub viewports: HashMap<WaylandObjectId, ViewportState>,
 }

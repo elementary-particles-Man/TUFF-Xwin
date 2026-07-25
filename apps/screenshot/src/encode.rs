@@ -54,7 +54,7 @@ pub fn encode_rgba_jpeg(path: &Path, frame: &CapturedFrame, quality: u8) -> Resu
 }
 
 fn rgba_to_rgb(rgba: &[u8]) -> Result<Vec<u8>> {
-    if !rgba.len().is_multiple_of(4) {
+    if rgba.len() % 4 != 0 {
         bail!("rgba buffer length must be divisible by 4");
     }
     let mut rgb = Vec::with_capacity((rgba.len() / 4) * 3);

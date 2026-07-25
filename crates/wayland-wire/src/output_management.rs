@@ -1,6 +1,7 @@
 use crate::{Result, WaylandObjectId, WireError};
 use std::collections::HashMap;
 
+#[derive(Default)]
 pub struct OutputManagementManager {
     pub heads: HashMap<WaylandObjectId, OutputHeadState>,
     pub modes: HashMap<WaylandObjectId, OutputModeState>,

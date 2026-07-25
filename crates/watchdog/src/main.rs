@@ -513,9 +513,9 @@ fn load_launch_states(config: &Config) -> Result<Vec<SessionLaunchState>> {
         let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
 
         // session-<instance_id>-launch-state.json 形式をサポート
-        if file_name.starts_with("session-") && file_name.ends_with("-launch-state.json") {
-            launch_states.push(load_launch_state(&path)?);
-        } else if file_name.starts_with("launch-state-") && file_name.ends_with(".json") {
+        if (file_name.starts_with("session-") && file_name.ends_with("-launch-state.json"))
+            || (file_name.starts_with("launch-state-") && file_name.ends_with(".json"))
+        {
             launch_states.push(load_launch_state(&path)?);
         }
     }

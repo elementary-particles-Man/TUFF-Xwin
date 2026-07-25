@@ -148,10 +148,12 @@ struct Config {
 
 impl Config {
     fn from_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
-        let mut config = Self::default();
+        let mut config = Self {
+            use_vulkan: true,
+            session_instance_id: "default-single-session".to_string(),
+            ..Self::default()
+        };
         // Prefer GPU acceleration; Vulkan initialization remains fail-soft.
-        config.use_vulkan = true;
-        config.session_instance_id = "default-single-session".to_string();
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -845,6 +847,7 @@ fn apply_role_based_layout(
                 _ => 100,
             };
         }
+        #[allow(clippy::collapsible_match)]
         WaylandSurfaceRole::Toplevel => {
             if surface.placement.z < 30 {
                 surface.placement.z = 30;

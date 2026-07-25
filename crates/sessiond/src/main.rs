@@ -581,7 +581,7 @@ fn resolve_lockd_resume_binding(
     }
 
     if profile.protocol == waybroker_common::DesktopProtocol::WaylandNative
-        && profile.broker_services.iter().any(|service| *service == ServiceRole::Lockd)
+        && profile.broker_services.contains(&ServiceRole::Lockd)
     {
         return (
             None,
@@ -1208,7 +1208,7 @@ fn run_resume_scenario(scenario: ResumeScenario, session_instance_id: &str) -> R
     let lock_artifact = LockPathArtifact {
         scenario: scenario.as_str().into(),
         service: "lockd".into(),
-        binding_source: lockd_binding_source.into(),
+        binding_source: lockd_binding_source,
         bound_component_id: lockd_bound_id,
         component_role: ui_component_present.then_some("lockscreen".into()),
         ui_component_present,
@@ -1980,6 +1980,8 @@ fn print_watchdog_stream_report(report: &SessionWatchdogReport) {
     );
 }
 
+// Keep the existing value-oriented internal outcome API; boxing would add churn without behavior benefit.
+#[allow(clippy::large_enum_variant)]
 enum WatchdogApplyOutcome {
     Transition { target_profile: DesktopProfile, transition: SessionProfileTransition },
     Unchanged { profile_id: String, reason: String },
@@ -2712,8 +2714,7 @@ mod tests {
             critical: true,
             launcher: waybroker_common::DesktopLauncher::RepoScript,
         };
-        let mut config = super::Config::default();
-        config.repo_root = Some(temp_dir.clone());
+        let config = super::Config { repo_root: Some(temp_dir.clone()), ..Default::default() };
 
         assert_eq!(resolve_command_path(&component, &config).as_deref(), Some(script.as_path()));
 
@@ -2820,8 +2821,9 @@ mod tests {
             unix_timestamp: 0,
         };
 
-        let outcome = apply_watchdog_report(&active_profile, &[active_profile.clone()], &report)
-            .expect("evaluate transition");
+        let outcome =
+            apply_watchdog_report(&active_profile, std::slice::from_ref(&active_profile), &report)
+                .expect("evaluate transition");
 
         match outcome {
             super::WatchdogApplyOutcome::Transition { .. } => {

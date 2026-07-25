@@ -53,6 +53,7 @@ impl SurfaceState {
     }
 }
 
+#[derive(Default)]
 pub struct SurfaceManager {
     pub surfaces: HashMap<WaylandObjectId, SurfaceInstance>,
     pub regions: HashMap<WaylandObjectId, RegionState>,

@@ -26,20 +26,19 @@ pub fn send_with_fds(stream: &UnixStream, data: &[u8], fds: &[RawFd]) -> std::io
     let mut control_buf = [0u8; 128]; // Enough for a few FDs
     if !fds.is_empty() {
         msg.msg_control = control_buf.as_mut_ptr() as *mut c_void;
-        msg.msg_controllen =
-            unsafe { CMSG_SPACE((fds.len() * std::mem::size_of::<RawFd>()) as u32) } as _;
+        msg.msg_controllen = unsafe { CMSG_SPACE(std::mem::size_of_val(fds) as u32) } as _;
 
         let cmsg = unsafe { CMSG_FIRSTHDR(&msg) };
         if !cmsg.is_null() {
             unsafe {
                 (*cmsg).cmsg_level = SOL_SOCKET;
                 (*cmsg).cmsg_type = SCM_RIGHTS;
-                (*cmsg).cmsg_len = CMSG_LEN((fds.len() * std::mem::size_of::<RawFd>()) as u32) as _;
+                (*cmsg).cmsg_len = CMSG_LEN(std::mem::size_of_val(fds) as u32) as _;
                 let data_ptr = CMSG_DATA(cmsg);
                 ptr::copy_nonoverlapping(
                     fds.as_ptr() as *const u8,
                     data_ptr,
-                    fds.len() * std::mem::size_of::<RawFd>(),
+                    std::mem::size_of_val(fds),
                 );
             }
         }

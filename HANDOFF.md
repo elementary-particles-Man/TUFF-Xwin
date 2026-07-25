@@ -1,5 +1,9 @@
 # HANDOFF
 
+## Clippy baseline cleanup (2026-07-26)
+
+`feature/clippy-baseline-cleanup` で初期 Clippy 12件だった `xwin-sec` の `derivable_impls` を、enum の `Unknown` default variant と context struct の `derive(Default)` へ同値変換した。追加で検出された workspace Clippy 指摘も、MSRV互換の局所修正、不要 clone/import/mut、manager の `Default` derive、test assertions、API形状を維持すべき large enum / dependency injection / protocol argument の狭い説明付き allow で解消した。`cargo clippy --all-targets --all-features -- -D warnings` は0件で成功。production display/backend は未接触。
+
 ## Rust warning cleanup (2026-07-26)
 
 `feature/warning-cleanup` で workspace の rustc warning 20件（重複 target 出力を除く）を根原因修正した。wayland-wire の未使用 import/引数、sessiond/watchdog の未使用 helper、displayd の obsolete/test-only backend・helper・未読 recording fields、wayland-wire integration test の未使用 binding、screenshot test の未使用 import を削除または test cfg に分離した。blanket allow、RUSTFLAGS、Cargo 設定変更はなし。`cargo check --all-targets` と `cargo test --all-targets` の workspace warning は0件。clippy は既存 `xwin-sec` の手書き Default 実装12件（今回の rustc warning ではない）で `-D warnings` が停止した。

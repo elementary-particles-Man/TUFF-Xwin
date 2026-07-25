@@ -7,7 +7,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use async_trait;
 use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
 };
@@ -131,6 +130,7 @@ struct Config {
 }
 
 impl Config {
+    #[allow(clippy::field_reassign_with_default)]
     fn from_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let mut config = Self::default();
         // Prefer GPU acceleration; Vulkan initialization remains fail-soft.
@@ -248,6 +248,8 @@ impl Config {
     }
 }
 
+// The arguments are the explicit service dependencies of the isolated display path.
+#[allow(clippy::too_many_arguments)]
 async fn handle_client(
     mut stream: ServiceStream,
     config: &Config,
@@ -278,6 +280,8 @@ async fn handle_client(
     Ok(())
 }
 
+// Keep dependency injection explicit at this process boundary.
+#[allow(clippy::too_many_arguments)]
 async fn build_response(
     request: IpcEnvelope,
     config: &Config,
@@ -320,6 +324,8 @@ async fn build_response(
     Ok(IpcEnvelope::new(ServiceRole::Displayd, source, response_kind))
 }
 
+// Keep renderer, capture, recording, and publication dependencies separate.
+#[allow(clippy::too_many_arguments)]
 async fn handle_display_command(
     command: DisplayCommand,
     source: ServiceRole,
@@ -946,7 +952,7 @@ impl PortalCaptureBackend {
 #[cfg(feature = "real-portal")]
 #[async_trait::async_trait]
 impl CaptureBackend for PortalCaptureBackend {
-    async fn capture(&self, output: &str) -> Result<(u32, u32, Vec<u32>)> {
+    async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
         use ashpd::WindowIdentifier;
         use ashpd::desktop::PersistMode;
         use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
@@ -963,7 +969,7 @@ impl CaptureBackend for PortalCaptureBackend {
 
         println!("service=displayd op=portal_capture event=initiation");
 
-        let mut restore_token: Option<String> = None;
+        let restore_token: Option<String> = None;
 
         let proxy = Screencast::new().await.context("failed to create Screencast portal proxy")?;
 
@@ -1100,7 +1106,7 @@ impl CaptureBackend for PortalCaptureBackend {
                 if cell.frame_data.is_some() { return; }
 
                 let video_info = match &cell.format {
-                    Some(info) => info.clone(),
+                    Some(info) => *info,
                     None => {
                         cell.frame_data = Some(Err(anyhow::anyhow!("process called before format negotiation")));
                         cell.mainloop.quit();
@@ -2319,8 +2325,8 @@ fn generate_mock_pixels(width: u32, height: u32) -> Vec<u32> {
     let mut pixels = Vec::with_capacity((width * height) as usize);
     for y in 0..height {
         for x in 0..width {
-            let r = (x % 256) as u32;
-            let g = (y % 256) as u32;
+            let r = x % 256;
+            let g = y % 256;
             let b = 128u32;
             let a = 255u32;
             // Encoded as 0xAARRGGBB; bytes are emitted explicitly as RGBA8888 later.
@@ -2885,7 +2891,7 @@ mod tests {
                 flags: 0,
                 fd: -1,
                 mapoffset: 0,
-                maxsize: maxsize,
+                maxsize,
                 data: raw_pixels.as_ptr() as *mut _,
                 chunk: std::ptr::null_mut(), // initialized dynamically in tests
             };
@@ -3227,7 +3233,7 @@ exit 0
                     repo_root: repo,
                     target_xsm_dir: target_xsm,
                     mock_desktop_path: mock_desktop,
-                    bin_dir: bin_dir,
+                    bin_dir,
                 }
             }
 

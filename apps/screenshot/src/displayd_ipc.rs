@@ -49,6 +49,8 @@ impl DisplaydIpcTransport for DisplaydUnixSocketTransport {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+// The envelope variant preserves the existing test transport API without boxing.
+#[allow(clippy::large_enum_variant)]
 pub enum FakeDisplaydTransportResponse {
     Envelope(IpcEnvelope),
     TransportError(String),

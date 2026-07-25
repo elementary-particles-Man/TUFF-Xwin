@@ -1,6 +1,7 @@
 use crate::{Result, WaylandObjectId, WireError};
 use std::collections::HashMap;
 
+#[derive(Default)]
 pub struct SeatManager {
     pub seats: HashMap<WaylandObjectId, SeatState>,
     pub pointers: HashMap<WaylandObjectId, PointerState>,

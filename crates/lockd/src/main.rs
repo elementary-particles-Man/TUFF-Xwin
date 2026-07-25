@@ -28,10 +28,10 @@ struct Config {
 }
 
 impl Config {
-    fn from_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
+    fn from_args(args: impl Iterator<Item = String>) -> Result<Self> {
         let mut config = Self::default();
 
-        while let Some(arg) = args.next() {
+        for arg in args {
             match arg.as_str() {
                 "--serve-ipc" => config.serve_ipc = true,
                 "--once" => config.serve_once = true,

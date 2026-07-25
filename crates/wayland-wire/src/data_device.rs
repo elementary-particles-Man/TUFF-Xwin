@@ -30,6 +30,7 @@ pub struct ActiveDrag {
     pub offer_id: Option<WaylandObjectId>,
 }
 
+#[derive(Default)]
 pub struct DataDeviceManager {
     pub sources: HashMap<WaylandObjectId, DataSource>,
     pub offers: HashMap<WaylandObjectId, DataOffer>,

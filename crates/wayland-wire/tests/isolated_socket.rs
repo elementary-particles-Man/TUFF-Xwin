@@ -358,8 +358,7 @@ fn test_isolated_socket_clipboard_e2e() {
         .core
         .data_device
         .seat_selections
-        .get(&wayland_wire::WaylandObjectId(5))
-        .is_some());
+        .contains_key(&wayland_wire::WaylandObjectId(5)));
 }
 
 fn make_message(object_id: u32, opcode: u16, payload: Vec<u8>) -> WaylandMessage {
@@ -1141,7 +1140,7 @@ fn test_phase1_invalid_object_id_and_opcode() {
     // object_id = 9999, size = 8, opcode = 0
     let mut msg = vec![0u8; 8];
     byteorder::LittleEndian::write_u32(&mut msg[0..4], 9999);
-    byteorder::LittleEndian::write_u32(&mut msg[4..8], (8u32 << 16) | 0);
+    byteorder::LittleEndian::write_u32(&mut msg[4..8], 8u32 << 16);
 
     use std::io::Write;
     let _ = stream.write_all(&msg);
