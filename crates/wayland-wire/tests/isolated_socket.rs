@@ -637,7 +637,7 @@ fn test_isolated_socket_dnd_e2e() {
     // But focus is usually set via seat events.
 
     thread::sleep(std::time::Duration::from_millis(50));
-    let events = client.receive_events().unwrap();
+    let _events = client.receive_events().unwrap();
     // If focus was missing, we might not get enter.
     // But we should at least not crash.
 
@@ -1023,7 +1023,7 @@ fn test_isolated_socket_output_screencopy_e2e() {
 
     // screencopy
     client.zwlr_screencopy_capture_output(5, 9, 0, 99).unwrap();
-    let buf_fd = tempfile::tempfile().unwrap();
+    let _buf_fd = tempfile::tempfile().unwrap();
     // Simulate buffer creation (assume id 10)
     // Actually we just pass buffer object ID 10 to copy
     client.zwlr_screencopy_frame_copy(9, 10).unwrap();

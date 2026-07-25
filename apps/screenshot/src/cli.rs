@@ -394,11 +394,10 @@ mod tests {
     use crate::harness_displayd::{HarnessDisplayd, HarnessDisplaydResponse};
     use crate::{
         artifact::{DisplaydArtifactCaptureClient, FileCaptureArtifactReader},
-        displayd_ipc::{DisplaydIpcCaptureClient, FakeDisplaydTransport},
+        displayd_ipc::DisplaydIpcCaptureClient,
     };
     use std::{fs, path::Path};
     use tempfile::tempdir;
-    use waybroker_common::{DisplayEvent, IpcEnvelope, MessageKind, ServiceRole};
     use xwin_sec::{DecisionReason, SecurityDecision, browser_hostile_client};
 
     #[test]

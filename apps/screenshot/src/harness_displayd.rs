@@ -320,15 +320,14 @@ mod tests {
         artifact::DisplaydArtifactCaptureClient,
         capture::CaptureClient,
         cli::CliOptions,
-        config::{CaptureTarget, ScreenshotFormat},
+        config::CaptureTarget,
         displayd_ipc::{
             DisplaydIpcCaptureClient, DisplaydUnixSocketTransport, screenshot_user_policy_context,
         },
-        ui::ScreenshotApp,
     };
     use xwin_sec::{
-        BrowserSecurityPolicy, ClientProfile, DecisionReason, PolicyContext, SecurityDecision,
-        SecurityPolicy, SurfaceId, XwinCapability, browser_hostile_client,
+        BrowserSecurityPolicy, DecisionReason, PolicyContext, SecurityDecision, SecurityPolicy,
+        XwinCapability, browser_hostile_client,
     };
 
     #[test]

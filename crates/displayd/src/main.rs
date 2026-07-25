@@ -799,8 +799,6 @@ impl OutputState {
 #[derive(Debug, Clone)]
 struct RecordingState {
     session_id: String,
-    fps: u32,
-    start_timestamp: u64,
 }
 
 trait PresentationClock {
@@ -845,16 +843,20 @@ struct MockDisplayBackend {
 }
 
 impl MockDisplayBackend {
+    #[cfg(test)]
     fn set_fail_on_frame(&mut self, frame_id: u64) {
         self.fail_on_frame = Some(frame_id);
     }
+    #[cfg(test)]
     fn publications(&self) -> &[FramePublication] {
         &self.publications
     }
 }
 
+#[cfg(test)]
 struct FakeDisplayBackend;
 
+#[cfg(test)]
 impl DisplayBackend for FakeDisplayBackend {
     fn enumerate_outputs(&self) -> Result<Vec<OutputMode>> {
         Ok(vec![stub_output_mode()])
@@ -920,9 +922,11 @@ impl CaptureBackend for RealCaptureBackendStub {
     }
 }
 
+#[cfg(test)]
 struct PortalCaptureBackendStub;
 
 #[async_trait::async_trait]
+#[cfg(test)]
 impl CaptureBackend for PortalCaptureBackendStub {
     async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
         bail!(
@@ -1461,6 +1465,7 @@ impl CaptureBackend for X11CaptureBackend {
     }
 }
 
+#[cfg(any(test, feature = "real-x11"))]
 fn convert_x11_to_internal_u32(
     width: u32,
     height: u32,
@@ -1529,13 +1534,6 @@ impl PresentationClock for FakePresentationClock {
     }
     fn current_seq(&self) -> u64 {
         self.seq
-    }
-}
-
-impl FakePresentationClock {
-    fn advance_frame(&mut self) {
-        self.time_ns += 16_666_666; // 60Hz
-        self.seq += 1;
     }
 }
 
@@ -2239,14 +2237,9 @@ async fn handle_start_record(
     }
 
     let session_id = backend.start(output, fps)?;
-    state.active_recordings.insert(
-        output.to_string(),
-        RecordingState {
-            session_id: session_id.clone(),
-            fps,
-            start_timestamp: now_unix_timestamp(),
-        },
-    );
+    state
+        .active_recordings
+        .insert(output.to_string(), RecordingState { session_id: session_id.clone() });
 
     println!(
         "service=displayd op=start_record event=success output={output} session_id={session_id} fps={fps}"

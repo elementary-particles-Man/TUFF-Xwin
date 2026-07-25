@@ -258,11 +258,11 @@ fn main() -> Result<()> {
     }
 
     if config.resume_demo {
-        run_resume_scenario(&config, ResumeScenario::Normal, &session_instance_id)?;
+        run_resume_scenario(ResumeScenario::Normal, &session_instance_id)?;
     }
 
     if let Some(scenario) = config.resume_scenario {
-        run_resume_scenario(&config, scenario, &session_instance_id)?;
+        run_resume_scenario(scenario, &session_instance_id)?;
     }
 
     if config.serve_ipc {
@@ -521,10 +521,6 @@ fn active_profile_path(session_instance_id: &str) -> PathBuf {
     session_artifact_path(session_instance_id, "active-profile")
 }
 
-fn launch_state_path(session_instance_id: &str) -> PathBuf {
-    session_artifact_path(session_instance_id, "launch-state")
-}
-
 fn new_session_instance_id(profile_id: &str) -> String {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos();
     format!("{profile_id}-{}-{nonce}", std::process::id())
@@ -598,11 +594,7 @@ fn resolve_lockd_resume_binding(
     (None, "missing".into(), "missing".into(), "no lockd binding found".into())
 }
 
-fn run_resume_scenario(
-    config: &Config,
-    scenario: ResumeScenario,
-    session_instance_id: &str,
-) -> Result<()> {
+fn run_resume_scenario(scenario: ResumeScenario, session_instance_id: &str) -> Result<()> {
     println!(
         "service=sessiond op=resume_sequence event=begin scenario={} session_instance_id={}",
         scenario.as_str(),

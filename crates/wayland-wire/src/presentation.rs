@@ -1,4 +1,4 @@
-use crate::{Result, WaylandObjectId, WireError};
+use crate::WaylandObjectId;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 

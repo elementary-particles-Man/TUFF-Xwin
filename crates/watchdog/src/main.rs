@@ -495,10 +495,6 @@ impl WatchdogServer {
         self.cached_states.insert(cache_key, next_state.clone());
         StateUpdateOutcome::Accepted(next_state)
     }
-
-    fn latest_session_instance_id(&self) -> Option<String> {
-        self.cached_states.keys().next().map(|key| key.session_instance_id.clone())
-    }
 }
 
 fn load_launch_states(config: &Config) -> Result<Vec<SessionLaunchState>> {

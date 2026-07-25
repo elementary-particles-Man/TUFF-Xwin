@@ -1,5 +1,9 @@
 # HANDOFF
 
+## Rust warning cleanup (2026-07-26)
+
+`feature/warning-cleanup` で workspace の rustc warning 20件（重複 target 出力を除く）を根原因修正した。wayland-wire の未使用 import/引数、sessiond/watchdog の未使用 helper、displayd の obsolete/test-only backend・helper・未読 recording fields、wayland-wire integration test の未使用 binding、screenshot test の未使用 import を削除または test cfg に分離した。blanket allow、RUSTFLAGS、Cargo 設定変更はなし。`cargo check --all-targets` と `cargo test --all-targets` の workspace warning は0件。clippy は既存 `xwin-sec` の手書き Default 実装12件（今回の rustc warning ではない）で `-D warnings` が停止した。
+
 ## DisplayBackend boundary implementation (2026-07-26)
 
 `feature/display-backend-boundary` にて、displayd の CPU 合成後 publication を `FramePublication` と `DisplayBackend::publish_frame` の immutable boundary に分離した。publication は output identity、validated geometry、stride、format、owned `Arc<[u32]>` framebuffer、damage、scene/output generation、単調増加 frame identity を保持する。実際の displayd main path は `MockDisplayBackend` を明示選択し、backend 成功後だけ active framebuffer、published frame identity、scene snapshot/generation を更新する。失敗時は renderer state と retry 条件を保持する。Mock は順序付き capture と frame failure injection を提供し、production display/device backend は実装・選択・起動していない。focused displayd tests は74件。

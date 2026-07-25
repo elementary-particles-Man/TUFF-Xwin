@@ -1,4 +1,4 @@
-use crate::{Result, WaylandObjectId, WireError};
+use crate::WaylandObjectId;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
