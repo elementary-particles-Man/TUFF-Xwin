@@ -22,7 +22,9 @@ use waybroker_common::{
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
 const FRAMEBUFFER_WIDTH: u32 = 1920;
 const FRAMEBUFFER_HEIGHT: u32 = 1080;
-const BACKGROUND_PIXEL: u32 = 0;
+const BACKGROUND_PIXEL: u32 = 0xFF00_0000;
+const WL_SHM_FORMAT_ARGB8888: u32 = 0;
+const WL_SHM_FORMAT_XRGB8888: u32 = 1;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -446,13 +448,24 @@ async fn handle_display_command(
                     state.zero_damage_skipped_count += 1;
                 } else {
                     ensure_framebuffer(&mut state.framebuffer);
-                    let stats = compose_damage_rects(
-                        &mut state.framebuffer,
+                    if let Err(reason) = validate_surface_pixels_for_damage(
                         &state.pixel_transport,
                         &surfaces,
                         &damage_rects,
-                    )
-                    .map_err(|reason| anyhow::anyhow!(reason))?;
+                    ) {
+                        return Ok(DisplayEvent::Rejected { reason });
+                    }
+                    let mut scratch = state.framebuffer.clone();
+                    let stats = match compose_damage_rects(
+                        &mut scratch,
+                        &state.pixel_transport,
+                        &surfaces,
+                        &damage_rects,
+                    ) {
+                        Ok(stats) => stats,
+                        Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
+                    };
+                    state.framebuffer = scratch;
                     damaged_pixels = stats.damaged_pixels;
                     copied_bytes = stats.copied_bytes;
                 }
@@ -1518,6 +1531,28 @@ struct CompositionStats {
     copied_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PixelFormatPolicy {
+    PremultipliedArgb8888,
+    OpaqueXrgb8888,
+}
+
+impl PixelFormatPolicy {
+    fn from_wire_format(format: u32) -> std::result::Result<Self, String> {
+        match format {
+            WL_SHM_FORMAT_ARGB8888 => Ok(Self::PremultipliedArgb8888),
+            WL_SHM_FORMAT_XRGB8888 => Ok(Self::OpaqueXrgb8888),
+            other => Err(format!("unsupported pixel format {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourcePixel {
+    Opaque(u32),
+    Premultiplied { a: u8, r: u8, g: u8, b: u8 },
+}
+
 fn checked_add_i32_u32(value: i32, delta: u32) -> Option<i32> {
     let sum = value as i64 + delta as i64;
     i32::try_from(sum).ok()
@@ -1660,6 +1695,49 @@ fn compose_damage_rects(
     Ok(stats)
 }
 
+fn validate_surface_pixels_for_damage(
+    store: &PixelTransportStore,
+    surfaces: &[waybroker_common::SurfaceSnapshot],
+    damage_rects: &[RendererRect],
+) -> std::result::Result<(), String> {
+    for damage in damage_rects {
+        for surface in surfaces {
+            let Some(surface_bounds) = surface_output_bounds(surface) else {
+                continue;
+            };
+            let Some(copy_rect) = surface_bounds.intersect(*damage) else {
+                continue;
+            };
+            validate_surface_pixel_rect(store, surface, copy_rect)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_surface_pixel_rect(
+    store: &PixelTransportStore,
+    surface: &waybroker_common::SurfaceSnapshot,
+    rect: RendererRect,
+) -> std::result::Result<(), String> {
+    let Some(handle) = surface.pixel_transport.as_ref() else {
+        return Ok(());
+    };
+    let payload = store.lookup(handle).ok_or_else(|| missing_payload_reason(handle))?;
+    PixelFormatPolicy::from_wire_format(payload.format)?;
+    if payload.width == 0 || payload.height == 0 {
+        return Err(format!("invalid zero-sized pixel payload for surface {}", surface.id));
+    }
+    if payload.stride < payload.width.saturating_mul(4) {
+        return Err(format!("invalid stride {} for surface {}", payload.stride, surface.id));
+    }
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
+            source_pixel_offset(payload, surface, x, y)?;
+        }
+    }
+    Ok(())
+}
+
 fn fill_framebuffer_rect(
     framebuffer: &mut [u32],
     rect: RendererRect,
@@ -1690,9 +1768,10 @@ fn copy_surface_rect(
             let index = row_start
                 .checked_add(x as usize)
                 .ok_or_else(|| "framebuffer offset overflow".to_string())?;
-            framebuffer[index] =
+            let src =
                 pixel_for_surface(store, surface, &surface.placement, x as usize, y as usize)?
-                    .unwrap_or(fallback_pixel);
+                    .unwrap_or(SourcePixel::Opaque(fallback_pixel));
+            framebuffer[index] = compose_source_over(src, framebuffer[index]);
         }
     }
     Ok(())
@@ -1712,30 +1791,111 @@ fn fallback_surface_pixel(surface: &waybroker_common::SurfaceSnapshot) -> u32 {
     if surface.id.contains("panel") { 0xFF0000FF } else { 0xFFFF0000 }
 }
 
+fn missing_payload_reason(handle: &waybroker_common::PixelTransportHandle) -> String {
+    format!(
+        "missing pixel payload for client {} surface {} buffer {} scene {}",
+        handle.client_id, handle.surface_id, handle.buffer_generation, handle.scene_generation
+    )
+}
+
 fn pixel_for_surface(
     store: &PixelTransportStore,
     surface: &waybroker_common::SurfaceSnapshot,
     placement: &waybroker_common::SurfacePlacement,
     x: usize,
     y: usize,
-) -> std::result::Result<Option<u32>, String> {
+) -> std::result::Result<Option<SourcePixel>, String> {
     let Some(handle) = surface.pixel_transport.as_ref() else { return Ok(None) };
-    let payload = store.lookup(handle).ok_or_else(|| {
-        format!(
-            "missing pixel payload for client {} surface {} buffer {} scene {}",
-            handle.client_id, handle.surface_id, handle.buffer_generation, handle.scene_generation
-        )
-    })?;
+    let payload = store.lookup(handle).ok_or_else(|| missing_payload_reason(handle))?;
     let local_x = (x as i32 - placement.x).max(0) as u32;
     let local_y = (y as i32 - placement.y).max(0) as u32;
     if local_x >= payload.width || local_y >= payload.height {
         return Ok(None);
     }
-    let offset = local_y as usize * payload.stride as usize + local_x as usize * 4;
-    Ok(payload
+    let offset = source_pixel_offset(payload, surface, x as i32, y as i32)?;
+    let bytes = payload
         .pixels
         .get(offset..offset + 4)
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("slice length checked"))))
+        .ok_or_else(|| format!("pixel payload is too short for surface {}", surface.id))?;
+    let word = u32::from_le_bytes(bytes.try_into().expect("slice length checked"));
+    decode_source_pixel(word, PixelFormatPolicy::from_wire_format(payload.format)?).map(Some)
+}
+
+fn source_pixel_offset(
+    payload: &PixelTransportPayload,
+    surface: &waybroker_common::SurfaceSnapshot,
+    x: i32,
+    y: i32,
+) -> std::result::Result<usize, String> {
+    let local_x =
+        x.checked_sub(surface.placement.x).ok_or_else(|| "source x offset overflow".to_string())?;
+    let local_y =
+        y.checked_sub(surface.placement.y).ok_or_else(|| "source y offset overflow".to_string())?;
+    if local_x < 0 || local_y < 0 {
+        return Err(format!("source coordinate outside surface {}", surface.id));
+    }
+    let local_x = local_x as u32;
+    let local_y = local_y as u32;
+    if local_x >= payload.width || local_y >= payload.height {
+        return Err(format!("source coordinate outside payload {}", surface.id));
+    }
+    let row = (local_y as usize)
+        .checked_mul(payload.stride as usize)
+        .ok_or_else(|| "source row offset overflow".to_string())?;
+    let col = (local_x as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "source column offset overflow".to_string())?;
+    let offset = row.checked_add(col).ok_or_else(|| "source pixel offset overflow".to_string())?;
+    let end = offset.checked_add(4).ok_or_else(|| "source pixel end overflow".to_string())?;
+    if end > payload.pixels.len() {
+        return Err(format!("pixel payload is too short for surface {}", surface.id));
+    }
+    Ok(offset)
+}
+
+fn decode_source_pixel(
+    word: u32,
+    policy: PixelFormatPolicy,
+) -> std::result::Result<SourcePixel, String> {
+    match policy {
+        PixelFormatPolicy::OpaqueXrgb8888 => {
+            Ok(SourcePixel::Opaque(0xFF00_0000 | (word & 0x00FF_FFFF)))
+        }
+        PixelFormatPolicy::PremultipliedArgb8888 => {
+            let a = ((word >> 24) & 0xFF) as u8;
+            let r = ((word >> 16) & 0xFF) as u8;
+            let g = ((word >> 8) & 0xFF) as u8;
+            let b = (word & 0xFF) as u8;
+            if r > a || g > a || b > a {
+                return Err(format!("non-premultiplied ARGB8888 pixel r={r} g={g} b={b} a={a}"));
+            }
+            Ok(SourcePixel::Premultiplied { a, r, g, b })
+        }
+    }
+}
+
+fn compose_source_over(src: SourcePixel, dst: u32) -> u32 {
+    match src {
+        SourcePixel::Opaque(pixel) => 0xFF00_0000 | (pixel & 0x00FF_FFFF),
+        SourcePixel::Premultiplied { a: 0, .. } => dst,
+        SourcePixel::Premultiplied { a: 255, r, g, b } => {
+            0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+        }
+        SourcePixel::Premultiplied { a, r, g, b } => {
+            let inv = 255u32 - a as u32;
+            let dst_r = (dst >> 16) & 0xFF;
+            let dst_g = (dst >> 8) & 0xFF;
+            let dst_b = dst & 0xFF;
+            let out_r = r as u32 + div255_rounded(dst_r * inv);
+            let out_g = g as u32 + div255_rounded(dst_g * inv);
+            let out_b = b as u32 + div255_rounded(dst_b * inv);
+            0xFF00_0000 | (out_r.min(255) << 16) | (out_g.min(255) << 8) | out_b.min(255)
+        }
+    }
+}
+
+fn div255_rounded(value: u32) -> u32 {
+    (value + 127) / 255
 }
 
 fn verify_pixel_payloads_available(
@@ -3347,7 +3507,7 @@ exit 0
         .unwrap();
 
         assert!(matches!(commit, DisplayEvent::SceneCommitted { .. }));
-        assert_eq!(state.framebuffer[0], 0x11223344);
+        assert_eq!(state.framebuffer[0], 0xFF223344);
         let snapshot = state.last_scene.as_ref().unwrap();
         assert!(snapshot.surfaces[0].pixel_transport.is_some());
         assert!(!serde_json::to_string(snapshot).unwrap().contains("\"pixels\""));
@@ -3428,6 +3588,17 @@ exit 0
         height: u32,
         stride: u32,
     ) -> waybroker_common::PixelTransportPayload {
+        test_payload_with_format(handle, pixels, width, height, stride, WL_SHM_FORMAT_XRGB8888)
+    }
+
+    fn test_payload_with_format(
+        handle: waybroker_common::PixelTransportHandle,
+        pixels: Vec<u32>,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: u32,
+    ) -> waybroker_common::PixelTransportPayload {
         let mut bytes = vec![0u8; stride as usize * height as usize];
         for (i, pixel) in pixels.into_iter().enumerate() {
             let row = i as u32 / width;
@@ -3441,7 +3612,7 @@ exit 0
             width,
             height,
             stride,
-            format: 1,
+            format,
         }
     }
 
@@ -3498,6 +3669,47 @@ exit 0
         .unwrap()
     }
 
+    #[test]
+    fn alpha_source_over_vectors_are_exact_and_opaque_framebuffer_normalized() {
+        assert_eq!(
+            compose_source_over(SourcePixel::Premultiplied { a: 0, r: 0, g: 0, b: 0 }, 0xFF112233),
+            0xFF112233
+        );
+        assert_eq!(
+            compose_source_over(
+                SourcePixel::Premultiplied { a: 255, r: 1, g: 2, b: 3 },
+                0xFF112233
+            ),
+            0xFF010203
+        );
+        assert_eq!(
+            compose_source_over(
+                SourcePixel::Premultiplied { a: 128, r: 128, g: 0, b: 0 },
+                0xFF0000FF
+            ),
+            0xFF80007F
+        );
+        assert_eq!(compose_source_over(SourcePixel::Opaque(0x00123456), 0), 0xFF123456);
+    }
+
+    #[test]
+    fn pixel_format_policy_decodes_argb_and_xrgb_channel_order() {
+        assert_eq!(
+            decode_source_pixel(0x80800000, PixelFormatPolicy::PremultipliedArgb8888).unwrap(),
+            SourcePixel::Premultiplied { a: 128, r: 128, g: 0, b: 0 }
+        );
+        assert_eq!(
+            decode_source_pixel(0x00010203, PixelFormatPolicy::OpaqueXrgb8888).unwrap(),
+            SourcePixel::Opaque(0xFF010203)
+        );
+        assert_eq!(
+            decode_source_pixel(0xAA010203, PixelFormatPolicy::OpaqueXrgb8888).unwrap(),
+            SourcePixel::Opaque(0xFF010203)
+        );
+        assert!(decode_source_pixel(0x40800000, PixelFormatPolicy::PremultipliedArgb8888).is_err());
+        assert!(PixelFormatPolicy::from_wire_format(99).is_err());
+    }
+
     #[tokio::test]
     async fn damage_limited_composition_updates_only_small_rect() {
         let mut state = DisplayState::new_test();
@@ -3522,7 +3734,7 @@ exit 0
         ));
 
         let changed = framebuffer_offset(1, 1).unwrap();
-        assert_eq!(state.framebuffer[changed], 0x22222222);
+        assert_eq!(state.framebuffer[changed], 0xFF222222);
         for (index, pixel) in state.framebuffer.iter().enumerate().take(8_000) {
             if index != changed {
                 assert_eq!(*pixel, before[index], "unexpected framebuffer change at {index}");
@@ -3575,7 +3787,54 @@ exit 0
             DisplayEvent::SceneCommitted { .. }
         ));
 
-        assert_eq!(state.framebuffer[framebuffer_offset(1, 1).unwrap()], 0xAABBCCDD);
+        assert_eq!(state.framebuffer[framebuffer_offset(1, 1).unwrap()], 0xFFBBCCDD);
+        assert_eq!(state.framebuffer[framebuffer_offset(0, 1).unwrap()], BACKGROUND_PIXEL);
+    }
+
+    #[tokio::test]
+    async fn non_tight_stride_alpha_partial_copy_blends_from_source_stride() {
+        let mut state = DisplayState::new_test();
+        let bottom_handle = test_handle(1, "bottom", 1, 1);
+        let bottom = test_surface("bottom", 0, 0, 3, 2, 1, Some(bottom_handle.clone()));
+        let handle = test_handle(2, "surface-1", 1, 1);
+        let mut surface = test_surface("surface-1", 0, 0, 3, 2, 2, Some(handle.clone()));
+        surface.damage_rects = vec![waybroker_common::Rect { x: 1, y: 1, width: 1, height: 1 }];
+        ensure_framebuffer(&mut state.framebuffer);
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![
+                bottom.clone(),
+                test_surface("surface-1", 0, 0, 3, 2, 2, Some(handle.clone())),
+            ],
+            scene_epoch: 1,
+            scene_generation: 1,
+            commit_id: 1,
+            unix_timestamp: 1,
+        });
+        let payload = test_payload_with_format(
+            handle,
+            vec![0, 0, 0, 0, 0x80800000, 0],
+            3,
+            2,
+            16,
+            WL_SHM_FORMAT_ARGB8888,
+        );
+
+        assert!(matches!(
+            commit_test_scene(
+                &mut state,
+                vec![bottom, surface],
+                vec![test_payload(bottom_handle, vec![0x000000FF; 6], 3, 2, 12), payload],
+                2
+            )
+            .await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(state.framebuffer[framebuffer_offset(1, 1).unwrap()], 0xFF80007F);
         assert_eq!(state.framebuffer[framebuffer_offset(0, 1).unwrap()], BACKGROUND_PIXEL);
     }
 
@@ -3604,6 +3863,108 @@ exit 0
         ));
 
         assert_eq!(state.framebuffer[framebuffer_offset(1, 1).unwrap()], 0xFF0000FF);
+    }
+
+    #[tokio::test]
+    async fn translucent_overlap_uses_canonical_back_to_front_order() {
+        let mut state = DisplayState::new_test();
+        let bottom_handle = test_handle(1, "bottom", 1, 1);
+        let bottom = test_surface("bottom", 0, 0, 2, 2, 1, Some(bottom_handle.clone()));
+        let top_handle = test_handle(2, "top", 1, 2);
+        let mut top = test_surface("top", 0, 0, 2, 2, 2, Some(top_handle.clone()));
+        top.damage_rects = vec![waybroker_common::Rect { x: 0, y: 0, width: 1, height: 1 }];
+
+        assert!(matches!(
+            commit_test_scene(
+                &mut state,
+                vec![bottom.clone()],
+                vec![test_payload(bottom_handle.clone(), vec![0x000000FF; 4], 2, 2, 8)],
+                1
+            )
+            .await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+        assert!(matches!(
+            commit_test_scene(
+                &mut state,
+                vec![bottom, top],
+                vec![
+                    test_payload(bottom_handle, vec![0x000000FF; 4], 2, 2, 8),
+                    test_payload_with_format(
+                        top_handle,
+                        vec![0x80800000; 4],
+                        2,
+                        2,
+                        8,
+                        WL_SHM_FORMAT_ARGB8888
+                    )
+                ],
+                2
+            )
+            .await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(state.framebuffer[framebuffer_offset(0, 0).unwrap()], 0xFF80007F);
+    }
+
+    #[tokio::test]
+    async fn three_layer_translucent_composition_is_deterministic() {
+        let mut state = DisplayState::new_test();
+        let bottom_h = test_handle(1, "bottom", 1, 1);
+        let middle_h = test_handle(2, "middle", 1, 1);
+        let top_h = test_handle(3, "top", 1, 1);
+        let bottom = test_surface("bottom", 0, 0, 1, 1, 1, Some(bottom_h.clone()));
+        let middle = test_surface("middle", 0, 0, 1, 1, 2, Some(middle_h.clone()));
+        let top = test_surface("top", 0, 0, 1, 1, 3, Some(top_h.clone()));
+
+        assert!(matches!(
+            commit_test_scene(
+                &mut state,
+                vec![bottom, middle, top],
+                vec![
+                    test_payload(bottom_h, vec![0x000000FF], 1, 1, 4),
+                    test_payload_with_format(
+                        middle_h,
+                        vec![0x80008000],
+                        1,
+                        1,
+                        4,
+                        WL_SHM_FORMAT_ARGB8888
+                    ),
+                    test_payload_with_format(
+                        top_h,
+                        vec![0x40400000],
+                        1,
+                        1,
+                        4,
+                        WL_SHM_FORMAT_ARGB8888
+                    )
+                ],
+                1
+            )
+            .await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(state.framebuffer[framebuffer_offset(0, 0).unwrap()], 0xFF40605F);
+    }
+
+    #[tokio::test]
+    async fn clipped_translucent_surface_blends_only_inside_output_bounds() {
+        let mut state = DisplayState::new_test();
+        let handle = test_handle(1, "surface-1", 1, 1);
+        let surface = test_surface("surface-1", -1, -1, 2, 2, 1, Some(handle.clone()));
+        let payload =
+            test_payload_with_format(handle, vec![0x80800000; 4], 2, 2, 8, WL_SHM_FORMAT_ARGB8888);
+
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![surface], vec![payload], 1).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(state.framebuffer[framebuffer_offset(0, 0).unwrap()], 0xFF800000);
+        assert_eq!(state.framebuffer[framebuffer_offset(1, 0).unwrap()], BACKGROUND_PIXEL);
     }
 
     #[tokio::test]
@@ -3662,6 +4023,36 @@ exit 0
         let stale_payload = test_payload(stale_handle, vec![0x22222222; 4], 2, 2, 8);
 
         let event = commit_test_scene(&mut state, vec![surface], vec![stale_payload], 1).await;
+
+        assert!(matches!(event, DisplayEvent::Rejected { .. }));
+        assert_eq!(state.framebuffer, before);
+    }
+
+    #[tokio::test]
+    async fn unsupported_or_malformed_alpha_payload_rejects_without_framebuffer_mutation() {
+        let mut state = DisplayState::new_test();
+        ensure_framebuffer(&mut state.framebuffer);
+        state.framebuffer[framebuffer_offset(0, 0).unwrap()] = 0xDEADBEEF;
+        let before = state.framebuffer.clone();
+        let handle = test_handle(1, "surface-1", 1, 1);
+        let surface = test_surface("surface-1", 0, 0, 1, 1, 1, Some(handle.clone()));
+        let unsupported = test_payload_with_format(handle.clone(), vec![0], 1, 1, 4, 99);
+
+        let event =
+            commit_test_scene(&mut state, vec![surface.clone()], vec![unsupported], 1).await;
+
+        assert!(matches!(event, DisplayEvent::Rejected { .. }));
+        assert_eq!(state.framebuffer, before);
+
+        let malformed = waybroker_common::PixelTransportPayload {
+            handle,
+            pixels: vec![0, 0, 0],
+            width: 1,
+            height: 1,
+            stride: 4,
+            format: WL_SHM_FORMAT_ARGB8888,
+        };
+        let event = commit_test_scene(&mut state, vec![surface], vec![malformed], 2).await;
 
         assert!(matches!(event, DisplayEvent::Rejected { .. }));
         assert_eq!(state.framebuffer, before);

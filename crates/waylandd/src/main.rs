@@ -2190,7 +2190,7 @@ mod tests {
         let pool_id = wayland_wire::WaylandObjectId(4);
         let buffer_id = wayland_wire::WaylandObjectId(5);
         core.shm.create_pool_from_fake(pool_id, 16);
-        core.shm.create_buffer(buffer_id, pool_id, 0, 2, 2, 8, 1).unwrap();
+        core.shm.create_buffer(buffer_id, pool_id, 0, 2, 2, 8, 0).unwrap();
         core.surfaces.surfaces.insert(
             surface_id,
             wayland_wire::surface::SurfaceInstance {
@@ -2218,6 +2218,7 @@ mod tests {
         assert!(surfaces[0].pixel_transport.is_some());
         assert_eq!(surfaces[0].pixel_transport.as_ref().unwrap(), &payloads[0].handle);
         assert_eq!(payloads[0].pixels.len(), 16);
+        assert_eq!(payloads[0].format, 0);
     }
 
     #[test]
@@ -2257,6 +2258,7 @@ mod tests {
         assert_eq!(surfaces.len(), 1);
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].handle.surface_id, surfaces[0].id);
+        assert_eq!(payloads[0].format, 1);
     }
 
     #[test]
@@ -2285,7 +2287,7 @@ mod tests {
                     width: 2,
                     height: 2,
                     stride: 8,
-                    format: 1,
+                    format: 0,
                 }],
                 reason: "displayd unavailable".into(),
             }),
@@ -2295,6 +2297,7 @@ mod tests {
 
         assert_eq!(surfaces[0].damage_rects, vec![damage]);
         assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].format, 0);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # HANDOFF
 
-更新日: `2026-07-21`
+更新日: `2026-07-26`
 対象 repository: `/media/flux/THPDOC/Develop/TUFF-Xwin`
 
 ## 完了した主要タスク
@@ -51,6 +51,16 @@
     *   `PixelTransportStore` から payload を lookup し、missing/stale payload は framebuffer を部分更新せず reject する。
     *   copied-byte / damaged-pixel accounting は effective damage region の面積ベースに更新。
     *   `waylandd` の production SHM damage は surface-local metadata として保持し、pending replay でも damage と payload bundle を維持する。
+    *   検証は headless/mock の Cargo tests のみで行い、production desktop/display server は起動していない。
+
+9.  **Alpha-aware Damage-limited Composition**
+    *   `displayd` の final pixel write 境界を opaque-only copy から alpha-aware source-over composition へ拡張。
+    *   `wl_shm` の `ARGB8888(0)` は premultiplied alpha、`XRGB8888(1)` は未使用 alpha byte を無視する opaque format として明示分類。
+    *   framebuffer は opaque output として扱い、背景および合成結果の alpha byte は `0xFF` に正規化。
+    *   alpha-bearing payload は integer arithmetic の deterministic source-over で合成し、alpha 0 は destination 保持、alpha 255 は exact replacement とする。
+    *   unsupported format、non-premultiplied ARGB、malformed stride/short payload、missing/stale payload は framebuffer を部分更新せず `Rejected` とする。
+    *   damage-limited reconstruction、checked clipping、non-tight stride、canonical back-to-front replay、pending replay、PixelTransport separation は維持。
+    *   `waylandd` の SHM format は `PixelTransportPayload.format` として維持され、pending replay でも format と damage metadata を保持する。
     *   検証は headless/mock の Cargo tests のみで行い、production desktop/display server は起動していない。
 
 ## 次のステップへの申し送り
