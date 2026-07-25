@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
     };
 
     let mut record_backend = FakeRecordBackend;
-    let mut display_backend = FakeDisplayBackend;
+    let mut display_backend = MockDisplayBackend::default();
 
     let listener = if let Some(socket_path) = &config.socket_path {
         waybroker_common::bind_explicit_unix_socket(socket_path.clone())?
@@ -390,16 +390,6 @@ async fn handle_display_command(
                     ),
                 });
             }
-            if scene_generation != 0 {
-                if scene_epoch > state.last_scene_epoch {
-                    state.last_scene_epoch = scene_epoch;
-                    state.last_scene_generation = scene_generation;
-                } else if scene_epoch == state.last_scene_epoch
-                    && scene_generation > state.last_scene_generation
-                {
-                    state.last_scene_generation = scene_generation;
-                }
-            }
             if let Err(err) = submit_pixel_payloads(&mut state.pixel_transport, pixel_payloads) {
                 return Ok(DisplayEvent::Rejected {
                     reason: format!("pixel transport rejected payload: {err:?}"),
@@ -493,7 +483,35 @@ async fn handle_display_command(
                         Ok(stats) => stats,
                         Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
                     };
+                    let frame_id = state.next_frame_id;
+                    let request = FramePublication {
+                        frame_id,
+                        output_id: state.output.output_id.clone(),
+                        output_generation: state.output.generation,
+                        scene_generation,
+                        geometry: OutputGeometry {
+                            output_id: state.output.output_id.clone(),
+                            width: state.output.width,
+                            height: state.output.height,
+                            stride: state.output.stride,
+                            format: state.output.format,
+                            origin_x: state.output.origin_x,
+                            origin_y: state.output.origin_y,
+                            output_generation: state.output.generation,
+                        },
+                        format: state.output.format,
+                        stride: state.output.stride,
+                        pixels: std::sync::Arc::<[u32]>::from(scratch.clone()),
+                        damage: damage_rects,
+                    };
+                    if let Err(error) = display_backend.publish_frame(request) {
+                        return Ok(DisplayEvent::Rejected {
+                            reason: format!("display backend publication failed: {error}"),
+                        });
+                    }
                     state.framebuffer = scratch;
+                    state.published_frame_id = frame_id;
+                    state.next_frame_id = frame_id.saturating_add(1);
                     damaged_pixels = stats.damaged_pixels;
                     copied_bytes = stats.copied_bytes;
                 }
@@ -557,6 +575,16 @@ async fn handle_display_command(
             }
 
             let commit_id = state.next_commit_id;
+            if scene_generation != 0 {
+                if scene_epoch > state.last_scene_epoch {
+                    state.last_scene_epoch = scene_epoch;
+                    state.last_scene_generation = scene_generation;
+                } else if scene_epoch == state.last_scene_epoch
+                    && scene_generation > state.last_scene_generation
+                {
+                    state.last_scene_generation = scene_generation;
+                }
+            }
             let snapshot = CommittedSceneState {
                 source,
                 target: target.clone(),
@@ -711,6 +739,8 @@ struct DisplayState {
     zero_damage_skipped_count: u64,
     direct_scanout_count: u64,
     composition_frame_count: u64,
+    next_frame_id: u64,
+    published_frame_id: u64,
     framebuffer: Vec<u32>,
     output: OutputState,
     pixel_transport: PixelTransportStore,
@@ -792,6 +822,35 @@ trait DisplayBackend {
     fn enumerate_outputs(&self) -> Result<Vec<OutputMode>>;
     fn set_mode(&mut self, output: &str, mode: &OutputMode) -> Result<()>;
     fn set_gamma(&mut self, output: &str, red: &[u16], green: &[u16], blue: &[u16]) -> Result<()>;
+    fn publish_frame(&mut self, request: FramePublication) -> Result<()>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FramePublication {
+    frame_id: u64,
+    output_id: String,
+    output_generation: u64,
+    scene_generation: u64,
+    geometry: OutputGeometry,
+    format: u32,
+    stride: u32,
+    pixels: std::sync::Arc<[u32]>,
+    damage: Vec<RendererRect>,
+}
+
+#[derive(Default)]
+struct MockDisplayBackend {
+    publications: Vec<FramePublication>,
+    fail_on_frame: Option<u64>,
+}
+
+impl MockDisplayBackend {
+    fn set_fail_on_frame(&mut self, frame_id: u64) {
+        self.fail_on_frame = Some(frame_id);
+    }
+    fn publications(&self) -> &[FramePublication] {
+        &self.publications
+    }
 }
 
 struct FakeDisplayBackend;
@@ -809,6 +868,32 @@ impl DisplayBackend for FakeDisplayBackend {
         if red.len() != green.len() || green.len() != blue.len() {
             bail!("gamma LUT size mismatch");
         }
+        Ok(())
+    }
+
+    fn publish_frame(&mut self, _request: FramePublication) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl DisplayBackend for MockDisplayBackend {
+    fn enumerate_outputs(&self) -> Result<Vec<OutputMode>> {
+        Ok(vec![stub_output_mode()])
+    }
+    fn set_mode(&mut self, _output: &str, _mode: &OutputMode) -> Result<()> {
+        Ok(())
+    }
+    fn set_gamma(&mut self, _output: &str, red: &[u16], green: &[u16], blue: &[u16]) -> Result<()> {
+        if red.len() != green.len() || green.len() != blue.len() {
+            bail!("gamma LUT size mismatch");
+        }
+        Ok(())
+    }
+    fn publish_frame(&mut self, request: FramePublication) -> Result<()> {
+        if self.fail_on_frame == Some(request.frame_id) {
+            bail!("mock publication failure for frame {}", request.frame_id);
+        }
+        self.publications.push(request);
         Ok(())
     }
 }
@@ -1500,6 +1585,8 @@ impl DisplayState {
             zero_damage_skipped_count: 0,
             direct_scanout_count: 0,
             composition_frame_count: 0,
+            next_frame_id: 1,
+            published_frame_id: 0,
             framebuffer: Vec::new(),
             output: OutputState {
                 output_id: "eDP-1".into(),
@@ -1557,6 +1644,8 @@ impl DisplayState {
             zero_damage_skipped_count: 0,
             direct_scanout_count: 0,
             composition_frame_count: 0,
+            next_frame_id: 1,
+            published_frame_id: 0,
             framebuffer: Vec::new(),
             output: OutputState {
                 output_id: "eDP-1".into(),
@@ -3772,11 +3861,28 @@ exit 0
         pixel_payloads: Vec<waybroker_common::PixelTransportPayload>,
         scene_generation: u64,
     ) -> DisplayEvent {
+        let mut display_backend = MockDisplayBackend::default();
+        commit_test_scene_with_backend(
+            state,
+            surfaces,
+            pixel_payloads,
+            scene_generation,
+            &mut display_backend,
+        )
+        .await
+    }
+
+    async fn commit_test_scene_with_backend(
+        state: &mut DisplayState,
+        surfaces: Vec<waybroker_common::SurfaceSnapshot>,
+        pixel_payloads: Vec<waybroker_common::PixelTransportPayload>,
+        scene_generation: u64,
+        display_backend: &mut dyn DisplayBackend,
+    ) -> DisplayEvent {
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
         let mut clock = FakePresentationClock::default();
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
-        let mut display_backend = FakeDisplayBackend;
         handle_display_command(
             DisplayCommand::CommitScene {
                 target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
@@ -3794,7 +3900,7 @@ exit 0
             &mut clock,
             &capture_backend,
             &mut record_backend,
-            &mut display_backend,
+            display_backend,
         )
         .await
         .unwrap()
@@ -4320,5 +4426,97 @@ exit 0
             unix_timestamp: 0,
         };
         assert_ne!(output.generation, scene.scene_generation);
+    }
+
+    #[tokio::test]
+    async fn actual_commit_path_publishes_immutable_frame_in_order() {
+        let mut state = DisplayState::new_test();
+        let mut backend = MockDisplayBackend::default();
+        let first = commit_test_scene_with_backend(
+            &mut state,
+            vec![test_surface("one", 0, 0, 2, 2, 1, None)],
+            vec![],
+            1,
+            &mut backend,
+        )
+        .await;
+        let second = commit_test_scene_with_backend(
+            &mut state,
+            vec![test_surface("two", 2, 0, 2, 2, 1, None)],
+            vec![],
+            2,
+            &mut backend,
+        )
+        .await;
+        assert!(matches!(first, DisplayEvent::SceneCommitted { .. }));
+        assert!(matches!(second, DisplayEvent::SceneCommitted { .. }));
+        assert_eq!(
+            backend.publications().iter().map(|p| p.frame_id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(backend.publications()[0].scene_generation, 1);
+        assert_eq!(backend.publications()[1].scene_generation, 2);
+        assert!(!backend.publications()[0].damage.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_publication_preserves_renderer_state_and_retries_same_scene() {
+        let mut state = DisplayState::new_test();
+        let before = state.framebuffer.clone();
+        let mut failing = MockDisplayBackend::default();
+        failing.set_fail_on_frame(1);
+        let rejected = commit_test_scene_with_backend(
+            &mut state,
+            vec![test_surface("one", 0, 0, 2, 2, 1, None)],
+            vec![],
+            1,
+            &mut failing,
+        )
+        .await;
+        assert!(matches!(rejected, DisplayEvent::Rejected { .. }));
+        assert_eq!(state.framebuffer, before);
+        assert_eq!(state.published_frame_id, 0);
+        assert_eq!(state.last_scene_generation, 0);
+
+        let mut retry = MockDisplayBackend::default();
+        let accepted = commit_test_scene_with_backend(
+            &mut state,
+            vec![test_surface("one", 0, 0, 2, 2, 1, None)],
+            vec![],
+            1,
+            &mut retry,
+        )
+        .await;
+        assert!(matches!(accepted, DisplayEvent::SceneCommitted { .. }));
+        assert_eq!(retry.publications()[0].frame_id, 1);
+    }
+
+    #[test]
+    fn mock_retains_immutable_frame_across_resize() {
+        let mut backend = MockDisplayBackend::default();
+        let pixels = std::sync::Arc::<[u32]>::from(vec![0xFF112233, 0xFF445566]);
+        backend
+            .publish_frame(FramePublication {
+                frame_id: 1,
+                output_id: "test".into(),
+                output_generation: 1,
+                scene_generation: 1,
+                geometry: OutputGeometry {
+                    output_id: "test".into(),
+                    width: 2,
+                    height: 1,
+                    stride: 8,
+                    format: WL_SHM_FORMAT_XRGB8888,
+                    origin_x: 0,
+                    origin_y: 0,
+                    output_generation: 1,
+                },
+                format: WL_SHM_FORMAT_XRGB8888,
+                stride: 8,
+                pixels: pixels.clone(),
+                damage: vec![],
+            })
+            .unwrap();
+        assert_eq!(&*backend.publications()[0].pixels, &*pixels);
     }
 }

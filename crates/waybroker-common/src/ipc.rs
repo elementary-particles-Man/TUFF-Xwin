@@ -141,7 +141,7 @@ pub enum DisplayCommand {
     ResumeBegin,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputGeometry {
     pub output_id: String,
     pub width: u32,

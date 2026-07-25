@@ -1,5 +1,9 @@
 # HANDOFF
 
+## DisplayBackend boundary implementation (2026-07-26)
+
+`feature/display-backend-boundary` にて、displayd の CPU 合成後 publication を `FramePublication` と `DisplayBackend::publish_frame` の immutable boundary に分離した。publication は output identity、validated geometry、stride、format、owned `Arc<[u32]>` framebuffer、damage、scene/output generation、単調増加 frame identity を保持する。実際の displayd main path は `MockDisplayBackend` を明示選択し、backend 成功後だけ active framebuffer、published frame identity、scene snapshot/generation を更新する。失敗時は renderer state と retry 条件を保持する。Mock は順序付き capture と frame failure injection を提供し、production display/device backend は実装・選択・起動していない。focused displayd tests は74件。
+
 ## Variable output geometry implementation (2026-07-26)
 
 `feature/variable-output-geometry` にて、`waybroker-common` の `DisplayCommand::ConfigureOutput` と `OutputGeometry`（output identity、幅、高さ、stride、format、origin、output_generation）を追加し、`displayd` の CPU 合成を検証済み出力状態へ移行した。framebuffer は stride から checked に算出し、初回設定・resize・stride変更は旧バッファを公開せず次回合成で full repaint を行う。surface/damage は output origin を含む global 座標から local framebuffer 座標へ checked translation し、既存の canonical ordering、PixelTransport、premultiplied alpha、damage-limited replay を維持する。不正 geometry、overflow、unsupported format、stale generation は拒否する。負 origin、padding stride、generation 独立性のテストを追加した。production display/backend は起動していない。
