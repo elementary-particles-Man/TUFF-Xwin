@@ -1,5 +1,9 @@
 # HANDOFF
 
+## Per-output retry isolation (2026-07-26)
+
+`feature/multi-output-routing-correction` の既存未commit実装を保持し、retry isolation のまとまりとして完成・commitした。`OutputRuntime` に pending damage、last published scene generation、generation/frame-bound retry state を追加し、backend failure 時は該当 output だけを保留する。成功済み output は同一 scene generation の retry で再出版せず、frame identity は成功時だけ進む。MockDisplayBackend に output-specific failure injection と、A 成功/B 失敗後に B だけ retry する focused test を追加した。registry-only state migration（`state.output` / `state.framebuffer`撤去）と typed partial publication result は後続タスクとして分離する。production display/backend は未接触。
+
 ## Logical multi-output routing (2026-07-26)
 
 `feature/multi-output-routing` にて typed `BTreeMap` output registry と `OutputRuntime`（geometry、framebuffer、per-output frame identity/publication state）を追加した。`ConfigureOutput` は output_id 単位で作成・再構成し、`RemoveOutput` は generation 検証後に対象 output の resources/retry state を解放する。registry が複数 output を持つ場合、canonical scene を複製せず stable output_id 順に各 viewport の bounds/damage を算出し、global scene 座標を output-local framebuffer へ変換して独立 composition/publication する。同一 surface の複数 output clipping、publication order、output removal を focused test で確認した。MockDisplayBackend のみを使用し、production display/backend は未接触。

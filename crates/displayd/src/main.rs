@@ -779,13 +779,30 @@ async fn handle_multi_output_commit(
     let output_ids: Vec<String> = state.outputs.keys().cloned().collect();
     for output_id in output_ids {
         let runtime = state.outputs.get_mut(&output_id).expect("output id collected from registry");
+        if runtime.last_published_scene_generation == scene_generation
+            && runtime.pending_damage.is_empty()
+            && runtime
+                .retry
+                .as_ref()
+                .map(|retry| {
+                    retry.scene_generation == scene_generation
+                        && retry.output_generation == runtime.state.generation
+                        && retry.frame_id < runtime.next_frame_id
+                })
+                .unwrap_or(true)
+        {
+            continue;
+        }
         let bounds = runtime.state.bounds();
-        let damage = effective_damage_rects(
+        let mut damage = effective_damage_rects(
             previous.as_ref(),
             &surfaces,
             framebuffer_is_initialized(&runtime.framebuffer, &runtime.state),
             bounds,
         );
+        damage.extend(runtime.pending_damage.iter().copied());
+        damage.sort_by_key(|rect| (rect.y0, rect.x0, rect.y1, rect.x1));
+        damage.dedup();
         if damage.is_empty() {
             continue;
         }
@@ -815,22 +832,34 @@ async fn handle_multi_output_commit(
             origin_y: runtime.state.origin_y,
             output_generation: runtime.state.generation,
         };
-        display_backend
-            .publish_frame(FramePublication {
-                frame_id,
-                output_id: output_id.clone(),
-                output_generation: runtime.state.generation,
+        let publication = display_backend.publish_frame(FramePublication {
+            frame_id,
+            output_id: output_id.clone(),
+            output_generation: runtime.state.generation,
+            scene_generation,
+            geometry,
+            format: runtime.state.format,
+            stride: runtime.state.stride,
+            pixels: std::sync::Arc::<[u32]>::from(scratch.clone()),
+            damage: damage.clone(),
+        });
+        if let Err(error) = publication {
+            runtime.retry = Some(OutputRetryState {
                 scene_generation,
-                geometry,
-                format: runtime.state.format,
-                stride: runtime.state.stride,
-                pixels: std::sync::Arc::<[u32]>::from(scratch.clone()),
-                damage,
-            })
-            .map_err(|error| anyhow::anyhow!("output {output_id} publication failed: {error}"))?;
+                output_generation: runtime.state.generation,
+                frame_id,
+            });
+            runtime.pending_damage = damage;
+            return Ok(DisplayEvent::Rejected {
+                reason: format!("output {output_id} publication failed: {error}"),
+            });
+        }
         runtime.framebuffer = scratch;
         runtime.published_frame_id = frame_id;
         runtime.next_frame_id = frame_id.saturating_add(1);
+        runtime.last_published_scene_generation = scene_generation;
+        runtime.pending_damage.clear();
+        runtime.retry = None;
         let _ = stats;
     }
     let commit_id = state.next_commit_id;
@@ -904,11 +933,29 @@ struct OutputRuntime {
     framebuffer: Vec<u32>,
     next_frame_id: u64,
     published_frame_id: u64,
+    last_published_scene_generation: u64,
+    pending_damage: Vec<RendererRect>,
+    retry: Option<OutputRetryState>,
+}
+
+#[derive(Debug, Clone)]
+struct OutputRetryState {
+    scene_generation: u64,
+    output_generation: u64,
+    frame_id: u64,
 }
 
 impl OutputRuntime {
     fn new(state: OutputState) -> Self {
-        Self { state, framebuffer: Vec::new(), next_frame_id: 1, published_frame_id: 0 }
+        Self {
+            state,
+            framebuffer: Vec::new(),
+            next_frame_id: 1,
+            published_frame_id: 0,
+            last_published_scene_generation: 0,
+            pending_damage: Vec::new(),
+            retry: None,
+        }
     }
 }
 
@@ -1006,12 +1053,17 @@ struct FramePublication {
 struct MockDisplayBackend {
     publications: Vec<FramePublication>,
     fail_on_frame: Option<u64>,
+    fail_on_output: Option<String>,
 }
 
 impl MockDisplayBackend {
     #[cfg(test)]
     fn set_fail_on_frame(&mut self, frame_id: u64) {
         self.fail_on_frame = Some(frame_id);
+    }
+    #[cfg(test)]
+    fn set_fail_on_output(&mut self, output_id: impl Into<String>) {
+        self.fail_on_output = Some(output_id.into());
     }
     #[cfg(test)]
     fn publications(&self) -> &[FramePublication] {
@@ -1058,7 +1110,9 @@ impl DisplayBackend for MockDisplayBackend {
         Ok(())
     }
     fn publish_frame(&mut self, request: FramePublication) -> Result<()> {
-        if self.fail_on_frame == Some(request.frame_id) {
+        if self.fail_on_frame == Some(request.frame_id)
+            || self.fail_on_output.as_deref() == Some(request.output_id.as_str())
+        {
             bail!("mock publication failure for frame {}", request.frame_id);
         }
         self.publications.push(request);
@@ -4755,5 +4809,54 @@ exit 0
         assert!(matches!(removed, DisplayEvent::BlankApplied { .. }));
         assert!(!state.outputs.contains_key("right"));
         assert!(state.outputs.contains_key("eDP-1"));
+    }
+
+    #[tokio::test]
+    async fn multi_output_retry_does_not_republish_successful_output() {
+        let mut state = DisplayState::new_test();
+        state.outputs.insert(
+            "right".into(),
+            OutputRuntime::new(
+                OutputState::validate(&OutputGeometry {
+                    output_id: "right".into(),
+                    width: 4,
+                    height: 2,
+                    stride: 16,
+                    format: WL_SHM_FORMAT_XRGB8888,
+                    origin_x: 1920,
+                    origin_y: 0,
+                    output_generation: 1,
+                })
+                .unwrap(),
+            ),
+        );
+        let mut failing = MockDisplayBackend::default();
+        failing.set_fail_on_output("right");
+        let rejected = commit_test_scene_with_backend(
+            &mut state,
+            vec![test_surface("spanning", 1918, 0, 8, 2, 1, None)],
+            vec![],
+            1,
+            &mut failing,
+        )
+        .await;
+        assert!(matches!(rejected, DisplayEvent::Rejected { .. }));
+        assert_eq!(failing.publications().len(), 1);
+        assert_eq!(state.outputs["eDP-1"].published_frame_id, 1);
+        assert!(state.outputs["right"].retry.is_some());
+
+        let mut retry = MockDisplayBackend::default();
+        let accepted = commit_test_scene_with_backend(
+            &mut state,
+            vec![test_surface("spanning", 1918, 0, 8, 2, 1, None)],
+            vec![],
+            1,
+            &mut retry,
+        )
+        .await;
+        assert!(matches!(accepted, DisplayEvent::SceneCommitted { .. }));
+        assert_eq!(retry.publications().len(), 1);
+        assert_eq!(retry.publications()[0].output_id, "right");
+        assert_eq!(state.outputs["eDP-1"].published_frame_id, 1);
     }
 }
