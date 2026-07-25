@@ -1,5 +1,9 @@
 # HANDOFF
 
+## Logical multi-output routing (2026-07-26)
+
+`feature/multi-output-routing` にて typed `BTreeMap` output registry と `OutputRuntime`（geometry、framebuffer、per-output frame identity/publication state）を追加した。`ConfigureOutput` は output_id 単位で作成・再構成し、`RemoveOutput` は generation 検証後に対象 output の resources/retry state を解放する。registry が複数 output を持つ場合、canonical scene を複製せず stable output_id 順に各 viewport の bounds/damage を算出し、global scene 座標を output-local framebuffer へ変換して独立 composition/publication する。同一 surface の複数 output clipping、publication order、output removal を focused test で確認した。MockDisplayBackend のみを使用し、production display/backend は未接触。
+
 ## Clippy baseline cleanup (2026-07-26)
 
 `feature/clippy-baseline-cleanup` で初期 Clippy 12件だった `xwin-sec` の `derivable_impls` を、enum の `Unknown` default variant と context struct の `derive(Default)` へ同値変換した。追加で検出された workspace Clippy 指摘も、MSRV互換の局所修正、不要 clone/import/mut、manager の `Default` derive、test assertions、API形状を維持すべき large enum / dependency injection / protocol argument の狭い説明付き allow で解消した。`cargo clippy --all-targets --all-features -- -D warnings` は0件で成功。production display/backend は未接触。

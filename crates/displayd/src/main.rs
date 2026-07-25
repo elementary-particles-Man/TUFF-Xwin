@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     env, fs,
     io::BufReader,
     path::{Path, PathBuf},
@@ -352,7 +352,8 @@ async fn handle_display_command(
             if next.generation <= state.output.generation {
                 return Ok(DisplayEvent::Rejected { reason: "stale output generation".into() });
             }
-            state.output = next;
+            state.output = next.clone();
+            state.outputs.insert(geometry.output_id.clone(), OutputRuntime::new(next));
             // Keep the replacement unpublished until the next successful composition;
             // an empty active buffer also forces the required full repaint.
             state.framebuffer = Vec::new();
@@ -365,6 +366,19 @@ async fn handle_display_command(
                     refresh_hz: 0,
                 },
             })
+        }
+        DisplayCommand::RemoveOutput { output_id, output_generation } => {
+            let Some(runtime) = state.outputs.get(&output_id) else {
+                return Ok(DisplayEvent::Rejected { reason: "unknown output".into() });
+            };
+            if runtime.state.generation != output_generation {
+                return Ok(DisplayEvent::Rejected { reason: "stale output generation".into() });
+            }
+            state.outputs.remove(&output_id);
+            if state.output.output_id == output_id {
+                state.framebuffer.clear();
+            }
+            Ok(DisplayEvent::BlankApplied { output: Some(output_id) })
         }
         DisplayCommand::SetMode { output, mode } => {
             display_backend.set_mode(&output, &mode)?;
@@ -380,6 +394,22 @@ async fn handle_display_command(
             scene_epoch,
             scene_generation,
         } => {
+            if state.outputs.len() > 1 {
+                return handle_multi_output_commit(
+                    target,
+                    focus,
+                    selection,
+                    surfaces,
+                    pixel_payloads,
+                    scene_epoch,
+                    scene_generation,
+                    source,
+                    config,
+                    state,
+                    display_backend,
+                )
+                .await;
+            }
             if scene_generation_is_stale(
                 state.last_scene_epoch,
                 state.last_scene_generation,
@@ -719,6 +749,121 @@ async fn handle_display_command(
     }
 }
 
+// Explicitly carries the shared scene inputs and isolated publication dependency.
+#[allow(clippy::too_many_arguments)]
+async fn handle_multi_output_commit(
+    target: waybroker_common::CommitTarget,
+    focus: waybroker_common::FocusTarget,
+    selection: waybroker_common::WaylandSelectionState,
+    surfaces: Vec<waybroker_common::SurfaceSnapshot>,
+    pixel_payloads: Vec<PixelTransportPayload>,
+    scene_epoch: u64,
+    scene_generation: u64,
+    source: ServiceRole,
+    config: &Config,
+    state: &mut DisplayState,
+    display_backend: &mut dyn DisplayBackend,
+) -> Result<DisplayEvent> {
+    if scene_generation != 0
+        && scene_epoch == state.last_scene_epoch
+        && scene_generation <= state.last_scene_generation
+    {
+        return Ok(DisplayEvent::Rejected { reason: "stale scene generation".into() });
+    }
+    submit_pixel_payloads(&mut state.pixel_transport, pixel_payloads)
+        .map_err(|error| anyhow::anyhow!("pixel transport rejected payload: {error:?}"))?;
+    verify_pixel_payloads_available(&state.pixel_transport, &surfaces)
+        .map_err(|reason| anyhow::anyhow!(reason))?;
+
+    let previous = state.last_scene.clone();
+    let output_ids: Vec<String> = state.outputs.keys().cloned().collect();
+    for output_id in output_ids {
+        let runtime = state.outputs.get_mut(&output_id).expect("output id collected from registry");
+        let bounds = runtime.state.bounds();
+        let damage = effective_damage_rects(
+            previous.as_ref(),
+            &surfaces,
+            framebuffer_is_initialized(&runtime.framebuffer, &runtime.state),
+            bounds,
+        );
+        if damage.is_empty() {
+            continue;
+        }
+        validate_surface_pixels_for_damage(&state.pixel_transport, &surfaces, &damage)
+            .map_err(|reason| anyhow::anyhow!(reason))?;
+        let mut scratch = if framebuffer_is_initialized(&runtime.framebuffer, &runtime.state) {
+            runtime.framebuffer.clone()
+        } else {
+            vec![BACKGROUND_PIXEL; runtime.state.framebuffer_words()]
+        };
+        let stats = compose_damage_rects(
+            &mut scratch,
+            &runtime.state,
+            &state.pixel_transport,
+            &surfaces,
+            &damage,
+        )
+        .map_err(|reason| anyhow::anyhow!(reason))?;
+        let frame_id = runtime.next_frame_id;
+        let geometry = OutputGeometry {
+            output_id: runtime.state.output_id.clone(),
+            width: runtime.state.width,
+            height: runtime.state.height,
+            stride: runtime.state.stride,
+            format: runtime.state.format,
+            origin_x: runtime.state.origin_x,
+            origin_y: runtime.state.origin_y,
+            output_generation: runtime.state.generation,
+        };
+        display_backend
+            .publish_frame(FramePublication {
+                frame_id,
+                output_id: output_id.clone(),
+                output_generation: runtime.state.generation,
+                scene_generation,
+                geometry,
+                format: runtime.state.format,
+                stride: runtime.state.stride,
+                pixels: std::sync::Arc::<[u32]>::from(scratch.clone()),
+                damage,
+            })
+            .map_err(|error| anyhow::anyhow!("output {output_id} publication failed: {error}"))?;
+        runtime.framebuffer = scratch;
+        runtime.published_frame_id = frame_id;
+        runtime.next_frame_id = frame_id.saturating_add(1);
+        let _ = stats;
+    }
+    let commit_id = state.next_commit_id;
+    let scene = CommittedSceneState {
+        source,
+        target,
+        focus,
+        selection,
+        surfaces,
+        scene_epoch,
+        scene_generation,
+        commit_id,
+        unix_timestamp: now_unix_timestamp(),
+    };
+    let event_target = scene.target.clone();
+    let event_focus = scene.focus.clone();
+    let event_selection = scene.selection.clone();
+    let event_surface_count = scene.surfaces.len();
+    state.record_commit(scene)?;
+    println!(
+        "service=displayd op=multi_output_commit event=success commit_id={commit_id} outputs={}",
+        state.outputs.len()
+    );
+    let _ = config;
+    Ok(DisplayEvent::SceneCommitted {
+        target: event_target,
+        focus: event_focus,
+        selection: event_selection,
+        surface_count: event_surface_count,
+        commit_id,
+    })
+}
+
 fn scene_generation_is_stale(
     last_epoch: u64,
     last_generation: u64,
@@ -749,7 +894,22 @@ struct DisplayState {
     published_frame_id: u64,
     framebuffer: Vec<u32>,
     output: OutputState,
+    outputs: BTreeMap<String, OutputRuntime>,
     pixel_transport: PixelTransportStore,
+}
+
+#[derive(Debug, Clone)]
+struct OutputRuntime {
+    state: OutputState,
+    framebuffer: Vec<u32>,
+    next_frame_id: u64,
+    published_frame_id: u64,
+}
+
+impl OutputRuntime {
+    fn new(state: OutputState) -> Self {
+        Self { state, framebuffer: Vec::new(), next_frame_id: 1, published_frame_id: 0 }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1602,6 +1762,7 @@ impl DisplayState {
                 origin_y: 0,
                 generation: 0,
             },
+            outputs: default_output_registry(),
             pixel_transport: PixelTransportStore::default(),
         })
     }
@@ -1661,9 +1822,24 @@ impl DisplayState {
                 origin_y: 0,
                 generation: 0,
             },
+            outputs: default_output_registry(),
             pixel_transport: PixelTransportStore::default(),
         }
     }
+}
+
+fn default_output_registry() -> BTreeMap<String, OutputRuntime> {
+    let state = OutputState {
+        output_id: "eDP-1".into(),
+        width: 1920,
+        height: 1080,
+        stride: 1920 * 4,
+        format: WL_SHM_FORMAT_XRGB8888,
+        origin_x: 0,
+        origin_y: 0,
+        generation: 0,
+    };
+    BTreeMap::from([(state.output_id.clone(), OutputRuntime::new(state))])
 }
 
 fn submit_pixel_payloads(
@@ -4517,5 +4693,67 @@ exit 0
             })
             .unwrap();
         assert_eq!(&*backend.publications()[0].pixels, &*pixels);
+    }
+
+    #[tokio::test]
+    async fn multi_output_routes_spanning_surface_and_removes_independently() {
+        let mut state = DisplayState::new_test();
+        let config =
+            Config { session_instance_id: "multi-output-test".into(), ..Default::default() };
+        let capture = FakeCaptureBackend;
+        let mut record = FakeRecordBackend;
+        let mut display = MockDisplayBackend::default();
+        let mut clock = FakePresentationClock::default();
+        let geometry = OutputGeometry {
+            output_id: "right".into(),
+            width: 4,
+            height: 2,
+            stride: 32,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 1920,
+            origin_y: 0,
+            output_generation: 1,
+        };
+        let configured = handle_display_command(
+            DisplayCommand::ConfigureOutput { geometry },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture,
+            &mut record,
+            &mut display,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(configured, DisplayEvent::ModeApplied { .. }));
+        let surface = test_surface("spanning", 1918, 0, 8, 2, 1, None);
+        let result =
+            commit_test_scene_with_backend(&mut state, vec![surface], vec![], 1, &mut display)
+                .await;
+        assert!(matches!(result, DisplayEvent::SceneCommitted { .. }));
+        assert_eq!(display.publications().len(), 2);
+        assert_eq!(display.publications()[0].output_id, "eDP-1");
+        assert_eq!(display.publications()[1].output_id, "right");
+        assert_eq!(display.publications()[0].output_generation, 0);
+        assert_eq!(display.publications()[1].output_generation, 1);
+
+        let removed = handle_display_command(
+            DisplayCommand::RemoveOutput { output_id: "right".into(), output_generation: 1 },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture,
+            &mut record,
+            &mut display,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(removed, DisplayEvent::BlankApplied { .. }));
+        assert!(!state.outputs.contains_key("right"));
+        assert!(state.outputs.contains_key("eDP-1"));
     }
 }

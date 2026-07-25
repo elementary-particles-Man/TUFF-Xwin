@@ -94,6 +94,10 @@ pub enum DisplayCommand {
     ConfigureOutput {
         geometry: OutputGeometry,
     },
+    RemoveOutput {
+        output_id: String,
+        output_generation: u64,
+    },
     SetMode {
         output: String,
         mode: OutputMode,
