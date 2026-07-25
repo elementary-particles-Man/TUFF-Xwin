@@ -1,5 +1,9 @@
 # HANDOFF
 
+## Registry-only output state migration (2026-07-26)
+
+`feature/registry-only-output-state` で、active displayd composition/publication/configuration path を `BTreeMap<String, OutputRuntime>` の registry に移行した。`DisplayState` から active な `output` と `framebuffer` fields を削除し、output geometry、framebuffer、frame identity、pending damage、retry state は registry entry から解決する。CommitScene は stable output_id 順に registry entry を処理し、既存の A-success/B-failure retry isolation を保持する。既存の単一 output legacy statement block は compile-time disabled として残り、typed partial publication result は後続タスク。production display/backend は未接触。
+
 ## Per-output retry isolation (2026-07-26)
 
 `feature/multi-output-routing-correction` の既存未commit実装を保持し、retry isolation のまとまりとして完成・commitした。`OutputRuntime` に pending damage、last published scene generation、generation/frame-bound retry state を追加し、backend failure 時は該当 output だけを保留する。成功済み output は同一 scene generation の retry で再出版せず、frame identity は成功時だけ進む。MockDisplayBackend に output-specific failure injection と、A 成功/B 失敗後に B だけ retry する focused test を追加した。registry-only state migration（`state.output` / `state.framebuffer`撤去）と typed partial publication result は後続タスクとして分離する。production display/backend は未接触。

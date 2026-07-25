@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     };
 
     let mut state = DisplayState::load(&config.session_instance_id)?;
-    let mut clock = FakePresentationClock::default();
+    let mut clock = FakePresentationClock;
 
     let capture_backend: Box<dyn CaptureBackend> = match config.capture_backend {
         CaptureBackendType::Fake => Box::new(FakeCaptureBackend),
@@ -349,14 +349,15 @@ async fn handle_display_command(
                 Ok(value) => value,
                 Err(error) => return Ok(DisplayEvent::Rejected { reason: error.to_string() }),
             };
-            if next.generation <= state.output.generation {
+            if state
+                .outputs
+                .get(&geometry.output_id)
+                .map(|runtime| next.generation <= runtime.state.generation)
+                .unwrap_or(false)
+            {
                 return Ok(DisplayEvent::Rejected { reason: "stale output generation".into() });
             }
-            state.output = next.clone();
             state.outputs.insert(geometry.output_id.clone(), OutputRuntime::new(next));
-            // Keep the replacement unpublished until the next successful composition;
-            // an empty active buffer also forces the required full repaint.
-            state.framebuffer = Vec::new();
             Ok(DisplayEvent::ModeApplied {
                 output: geometry.output_id.clone(),
                 mode: OutputMode {
@@ -375,9 +376,6 @@ async fn handle_display_command(
                 return Ok(DisplayEvent::Rejected { reason: "stale output generation".into() });
             }
             state.outputs.remove(&output_id);
-            if state.output.output_id == output_id {
-                state.framebuffer.clear();
-            }
             Ok(DisplayEvent::BlankApplied { output: Some(output_id) })
         }
         DisplayCommand::SetMode { output, mode } => {
@@ -394,304 +392,314 @@ async fn handle_display_command(
             scene_epoch,
             scene_generation,
         } => {
-            if state.outputs.len() > 1 {
-                return handle_multi_output_commit(
+            return handle_multi_output_commit(
+                target,
+                focus,
+                selection,
+                surfaces,
+                pixel_payloads,
+                scene_epoch,
+                scene_generation,
+                source,
+                config,
+                state,
+                clock,
+                display_backend,
+            )
+            .await;
+            #[cfg(any())]
+            {
+                if scene_generation_is_stale(
+                    state.last_scene_epoch,
+                    state.last_scene_generation,
+                    scene_epoch,
+                    scene_generation,
+                ) {
+                    return Ok(DisplayEvent::Rejected {
+                        reason: format!(
+                            "stale scene epoch {} generation {}; latest is epoch {} generation {}",
+                            scene_epoch,
+                            scene_generation,
+                            state.last_scene_epoch,
+                            state.last_scene_generation
+                        ),
+                    });
+                }
+                if let Err(err) = submit_pixel_payloads(&mut state.pixel_transport, pixel_payloads)
+                {
+                    return Ok(DisplayEvent::Rejected {
+                        reason: format!("pixel transport rejected payload: {err:?}"),
+                    });
+                }
+                if let Err(reason) =
+                    verify_pixel_payloads_available(&state.pixel_transport, &surfaces)
+                {
+                    return Ok(DisplayEvent::Rejected { reason });
+                }
+                let start_time = std::time::Instant::now();
+                let mut skipped = false;
+                let mut is_direct_scanout = false;
+
+                // 1. zero-damage check
+                if let Some(last_scene) = &state.last_scene {
+                    if last_scene.surfaces.len() == surfaces.len() {
+                        let mut all_match = true;
+                        for (s1, s2) in last_scene.surfaces.iter().zip(surfaces.iter()) {
+                            if s1.id != s2.id
+                                || s1.placement != s2.placement
+                                || s1.buffer_generation != s2.buffer_generation
+                                || !s1.damage_rects.is_empty()
+                                || !s2.damage_rects.is_empty()
+                            {
+                                all_match = false;
+                                break;
+                            }
+                        }
+                        if all_match {
+                            skipped = true;
+                            state.zero_damage_skipped_count += 1;
+                        }
+                    }
+                }
+
+                // 2. direct scanout check (single fullscreen surface)
+                if surfaces.len() == 1 && !skipped {
+                    let surf = &surfaces[0];
+                    if surf.placement.x == 0
+                        && surf.placement.y == 0
+                        && surf.placement.width == state.output.width
+                        && surf.placement.height == state.output.height
+                    {
+                        is_direct_scanout = true;
+                        state.direct_scanout_count += 1;
+                    }
+                }
+
+                if !skipped && !is_direct_scanout {
+                    state.composition_frame_count += 1;
+                }
+
+                let composition_target_count = if is_direct_scanout { 0 } else { 1 };
+                let scanout_buffer_count = if is_direct_scanout { 1 } else { 0 };
+
+                let mut damaged_pixels = 0u64;
+                let mut copied_bytes = 0u64;
+
+                if !skipped {
+                    let output_bounds = state.output.bounds();
+                    let damage_rects = effective_damage_rects(
+                        state.last_scene.as_ref(),
+                        &surfaces,
+                        framebuffer_is_initialized(&state.framebuffer, &state.output),
+                        output_bounds,
+                    );
+                    if damage_rects.is_empty() {
+                        skipped = true;
+                        state.zero_damage_skipped_count += 1;
+                    } else {
+                        if let Err(reason) = validate_surface_pixels_for_damage(
+                            &state.pixel_transport,
+                            &surfaces,
+                            &damage_rects,
+                        ) {
+                            return Ok(DisplayEvent::Rejected { reason });
+                        }
+                        let mut scratch =
+                            if framebuffer_is_initialized(&state.framebuffer, &state.output) {
+                                state.outputs["eDP-1"].framebuffer.clone()
+                            } else {
+                                vec![BACKGROUND_PIXEL; state.output.framebuffer_words()]
+                            };
+                        let stats = match compose_damage_rects(
+                            &mut scratch,
+                            &state.output,
+                            &state.pixel_transport,
+                            &surfaces,
+                            &damage_rects,
+                        ) {
+                            Ok(stats) => stats,
+                            Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
+                        };
+                        let frame_id = state.next_frame_id;
+                        let request = FramePublication {
+                            frame_id,
+                            output_id: state.output.output_id.clone(),
+                            output_generation: state.output.generation,
+                            scene_generation,
+                            geometry: OutputGeometry {
+                                output_id: state.output.output_id.clone(),
+                                width: state.output.width,
+                                height: state.output.height,
+                                stride: state.output.stride,
+                                format: state.output.format,
+                                origin_x: state.output.origin_x,
+                                origin_y: state.output.origin_y,
+                                output_generation: state.output.generation,
+                            },
+                            format: state.output.format,
+                            stride: state.output.stride,
+                            pixels: std::sync::Arc::<[u32]>::from(scratch.clone()),
+                            damage: damage_rects,
+                        };
+                        if let Err(error) = display_backend.publish_frame(request) {
+                            return Ok(DisplayEvent::Rejected {
+                                reason: format!("display backend publication failed: {error}"),
+                            });
+                        }
+                        state.framebuffer = scratch;
+                        state.published_frame_id = frame_id;
+                        state.next_frame_id = frame_id.saturating_add(1);
+                        damaged_pixels = stats.damaged_pixels;
+                        copied_bytes = stats.copied_bytes;
+                    }
+                }
+
+                let surface_words: Vec<u32> = surfaces
+                    .iter()
+                    .flat_map(|surface| {
+                        [
+                            surface.placement.x as u32,
+                            surface.placement.y as u32,
+                            surface.placement.width,
+                            surface.placement.height,
+                            surface.placement.z as u32,
+                            u32::from(surface.placement.visible),
+                        ]
+                    })
+                    .collect();
+
+                let mut vulkan_recording_time_ns = 0;
+                let mut queue_submit_time_ns = 0;
+                let mut fence_wait_time_ns = 0;
+                let mut gpu_alloc_bytes = 0;
+                let mut peak_gpu_alloc = state.peak_gpu_alloc;
+
+                if let Some(vulkan) = vulkan {
+                    if !skipped {
+                        let submit_start = std::time::Instant::now();
+                        let handle = vulkan.submit_batch(VulkanBatchSubmission {
+                            workload: VulkanWorkloadClass::SceneComposition,
+                            payload_len: surface_words.len() * std::mem::size_of::<u32>(),
+                            surface_words: Some(surface_words),
+                            timeout: Duration::from_millis(50),
+                            requires_zeroize: false,
+                            allows_gpu: true,
+                        });
+                        vulkan_recording_time_ns = submit_start.elapsed().as_nanos() as u64 / 2;
+                        queue_submit_time_ns = submit_start.elapsed().as_nanos() as u64 / 2;
+
+                        let wait_start = std::time::Instant::now();
+                        let result = vulkan.wait_for_completion(handle).await;
+                        fence_wait_time_ns = wait_start.elapsed().as_nanos() as u64;
+
+                        println!(
+                            "service=displayd op=vulkan_scene_composition event=completed workload={:?} path={:?} fallback_reason={:?} surfaces={}",
+                            result.workload,
+                            result.path,
+                            result.fallback_reason,
+                            surfaces.len(),
+                        );
+                    }
+                    gpu_alloc_bytes = if config.use_vulkan { 128 * 1024 * 1024 } else { 0 };
+                    if gpu_alloc_bytes > peak_gpu_alloc {
+                        peak_gpu_alloc = gpu_alloc_bytes;
+                        state.peak_gpu_alloc = peak_gpu_alloc;
+                    }
+                } else {
+                    if state.peak_gpu_alloc > 0 && state.released_alloc_count == 0 {
+                        state.released_alloc_count += 1;
+                    }
+                }
+
+                let commit_id = state.next_commit_id;
+                if scene_generation != 0 {
+                    if scene_epoch > state.last_scene_epoch {
+                        state.last_scene_epoch = scene_epoch;
+                        state.last_scene_generation = scene_generation;
+                    } else if scene_epoch == state.last_scene_epoch
+                        && scene_generation > state.last_scene_generation
+                    {
+                        state.last_scene_generation = scene_generation;
+                    }
+                }
+                let snapshot = CommittedSceneState {
+                    source,
+                    target: target.clone(),
+                    focus: focus.clone(),
+                    selection: selection.clone(),
+                    surfaces: surfaces.clone(),
+                    scene_epoch,
+                    scene_generation,
+                    commit_id,
+                    unix_timestamp: now_unix_timestamp(),
+                };
+                let surface_count = snapshot.surfaces.len();
+                state.record_commit(snapshot)?;
+                state.next_commit_id += 1;
+
+                let feedback = DisplayEvent::FramePresented {
+                    commit_id,
+                    timestamp: clock.now(),
+                    refresh_ns: 16_666_666,
+                    seq: clock.current_seq(),
+                    flags: 0,
+                };
+                state.presentation_feedbacks.insert(commit_id, feedback);
+
+                let elapsed_ns = start_time.elapsed().as_nanos() as u64;
+                let cpu_composition_ns = if vulkan.is_some() { 0 } else { elapsed_ns };
+
+                println!(
+                    "performance_metrics: frame_build_time_ns={} cpu_composition_time_ns={} vulkan_recording_time_ns={} queue_submit_time_ns={} fence_wait_time_ns={} presentation_latency_ns={} copied_bytes={} damaged_pixels={} full_frame_redraw_count={} skipped_frame_count={}",
+                    elapsed_ns,
+                    cpu_composition_ns,
+                    vulkan_recording_time_ns,
+                    queue_submit_time_ns,
+                    fence_wait_time_ns,
+                    elapsed_ns,
+                    copied_bytes,
+                    damaged_pixels,
+                    if skipped || is_direct_scanout { 0 } else { 1 },
+                    state.zero_damage_skipped_count
+                );
+
+                println!(
+                    "gpu_metrics: current_gpu_allocation_bytes={} peak_gpu_allocation_bytes={} dedicated_bytes={} shared_bytes={} pinned_bytes={} staging_bytes={} imported_client_buffer_count={} composition_target_count={} scanout_buffer_count={} surface_residency_count={} generation_residency_count={} pool_current_size={} pool_capacity={} released_allocation_count={} zero_damage_skipped_frame_count={} direct_scanout_frame_count={} composition_frame_count={}",
+                    gpu_alloc_bytes,
+                    peak_gpu_alloc,
+                    gpu_alloc_bytes,
+                    0,
+                    0,
+                    0,
+                    surface_count,
+                    composition_target_count,
+                    scanout_buffer_count,
+                    surface_count,
+                    1,
+                    16,
+                    32,
+                    state.released_alloc_count,
+                    state.zero_damage_skipped_count,
+                    state.direct_scanout_count,
+                    state.composition_frame_count
+                );
+
+                println!(
+                    "service=displayd op=commit_scene event=success commit_id={} surfaces={} path={} session_instance_id={} skipped={}",
+                    commit_id,
+                    surface_count,
+                    state.snapshot_path.display(),
+                    config.session_instance_id,
+                    skipped
+                );
+                Ok(DisplayEvent::SceneCommitted {
                     target,
                     focus,
                     selection,
-                    surfaces,
-                    pixel_payloads,
-                    scene_epoch,
-                    scene_generation,
-                    source,
-                    config,
-                    state,
-                    display_backend,
-                )
-                .await;
-            }
-            if scene_generation_is_stale(
-                state.last_scene_epoch,
-                state.last_scene_generation,
-                scene_epoch,
-                scene_generation,
-            ) {
-                return Ok(DisplayEvent::Rejected {
-                    reason: format!(
-                        "stale scene epoch {} generation {}; latest is epoch {} generation {}",
-                        scene_epoch,
-                        scene_generation,
-                        state.last_scene_epoch,
-                        state.last_scene_generation
-                    ),
-                });
-            }
-            if let Err(err) = submit_pixel_payloads(&mut state.pixel_transport, pixel_payloads) {
-                return Ok(DisplayEvent::Rejected {
-                    reason: format!("pixel transport rejected payload: {err:?}"),
-                });
-            }
-            if let Err(reason) = verify_pixel_payloads_available(&state.pixel_transport, &surfaces)
-            {
-                return Ok(DisplayEvent::Rejected { reason });
-            }
-            let start_time = std::time::Instant::now();
-            let mut skipped = false;
-            let mut is_direct_scanout = false;
-
-            // 1. zero-damage check
-            if let Some(last_scene) = &state.last_scene {
-                if last_scene.surfaces.len() == surfaces.len() {
-                    let mut all_match = true;
-                    for (s1, s2) in last_scene.surfaces.iter().zip(surfaces.iter()) {
-                        if s1.id != s2.id
-                            || s1.placement != s2.placement
-                            || s1.buffer_generation != s2.buffer_generation
-                            || !s1.damage_rects.is_empty()
-                            || !s2.damage_rects.is_empty()
-                        {
-                            all_match = false;
-                            break;
-                        }
-                    }
-                    if all_match {
-                        skipped = true;
-                        state.zero_damage_skipped_count += 1;
-                    }
-                }
-            }
-
-            // 2. direct scanout check (single fullscreen surface)
-            if surfaces.len() == 1 && !skipped {
-                let surf = &surfaces[0];
-                if surf.placement.x == 0
-                    && surf.placement.y == 0
-                    && surf.placement.width == state.output.width
-                    && surf.placement.height == state.output.height
-                {
-                    is_direct_scanout = true;
-                    state.direct_scanout_count += 1;
-                }
-            }
-
-            if !skipped && !is_direct_scanout {
-                state.composition_frame_count += 1;
-            }
-
-            let composition_target_count = if is_direct_scanout { 0 } else { 1 };
-            let scanout_buffer_count = if is_direct_scanout { 1 } else { 0 };
-
-            let mut damaged_pixels = 0u64;
-            let mut copied_bytes = 0u64;
-
-            if !skipped {
-                let output_bounds = state.output.bounds();
-                let damage_rects = effective_damage_rects(
-                    state.last_scene.as_ref(),
-                    &surfaces,
-                    framebuffer_is_initialized(&state.framebuffer, &state.output),
-                    output_bounds,
-                );
-                if damage_rects.is_empty() {
-                    skipped = true;
-                    state.zero_damage_skipped_count += 1;
-                } else {
-                    if let Err(reason) = validate_surface_pixels_for_damage(
-                        &state.pixel_transport,
-                        &surfaces,
-                        &damage_rects,
-                    ) {
-                        return Ok(DisplayEvent::Rejected { reason });
-                    }
-                    let mut scratch =
-                        if framebuffer_is_initialized(&state.framebuffer, &state.output) {
-                            state.framebuffer.clone()
-                        } else {
-                            vec![BACKGROUND_PIXEL; state.output.framebuffer_words()]
-                        };
-                    let stats = match compose_damage_rects(
-                        &mut scratch,
-                        &state.output,
-                        &state.pixel_transport,
-                        &surfaces,
-                        &damage_rects,
-                    ) {
-                        Ok(stats) => stats,
-                        Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
-                    };
-                    let frame_id = state.next_frame_id;
-                    let request = FramePublication {
-                        frame_id,
-                        output_id: state.output.output_id.clone(),
-                        output_generation: state.output.generation,
-                        scene_generation,
-                        geometry: OutputGeometry {
-                            output_id: state.output.output_id.clone(),
-                            width: state.output.width,
-                            height: state.output.height,
-                            stride: state.output.stride,
-                            format: state.output.format,
-                            origin_x: state.output.origin_x,
-                            origin_y: state.output.origin_y,
-                            output_generation: state.output.generation,
-                        },
-                        format: state.output.format,
-                        stride: state.output.stride,
-                        pixels: std::sync::Arc::<[u32]>::from(scratch.clone()),
-                        damage: damage_rects,
-                    };
-                    if let Err(error) = display_backend.publish_frame(request) {
-                        return Ok(DisplayEvent::Rejected {
-                            reason: format!("display backend publication failed: {error}"),
-                        });
-                    }
-                    state.framebuffer = scratch;
-                    state.published_frame_id = frame_id;
-                    state.next_frame_id = frame_id.saturating_add(1);
-                    damaged_pixels = stats.damaged_pixels;
-                    copied_bytes = stats.copied_bytes;
-                }
-            }
-
-            let surface_words: Vec<u32> = surfaces
-                .iter()
-                .flat_map(|surface| {
-                    [
-                        surface.placement.x as u32,
-                        surface.placement.y as u32,
-                        surface.placement.width,
-                        surface.placement.height,
-                        surface.placement.z as u32,
-                        u32::from(surface.placement.visible),
-                    ]
+                    surface_count,
+                    commit_id,
                 })
-                .collect();
-
-            let mut vulkan_recording_time_ns = 0;
-            let mut queue_submit_time_ns = 0;
-            let mut fence_wait_time_ns = 0;
-            let mut gpu_alloc_bytes = 0;
-            let mut peak_gpu_alloc = state.peak_gpu_alloc;
-
-            if let Some(vulkan) = vulkan {
-                if !skipped {
-                    let submit_start = std::time::Instant::now();
-                    let handle = vulkan.submit_batch(VulkanBatchSubmission {
-                        workload: VulkanWorkloadClass::SceneComposition,
-                        payload_len: surface_words.len() * std::mem::size_of::<u32>(),
-                        surface_words: Some(surface_words),
-                        timeout: Duration::from_millis(50),
-                        requires_zeroize: false,
-                        allows_gpu: true,
-                    });
-                    vulkan_recording_time_ns = submit_start.elapsed().as_nanos() as u64 / 2;
-                    queue_submit_time_ns = submit_start.elapsed().as_nanos() as u64 / 2;
-
-                    let wait_start = std::time::Instant::now();
-                    let result = vulkan.wait_for_completion(handle).await;
-                    fence_wait_time_ns = wait_start.elapsed().as_nanos() as u64;
-
-                    println!(
-                        "service=displayd op=vulkan_scene_composition event=completed workload={:?} path={:?} fallback_reason={:?} surfaces={}",
-                        result.workload,
-                        result.path,
-                        result.fallback_reason,
-                        surfaces.len(),
-                    );
-                }
-                gpu_alloc_bytes = if config.use_vulkan { 128 * 1024 * 1024 } else { 0 };
-                if gpu_alloc_bytes > peak_gpu_alloc {
-                    peak_gpu_alloc = gpu_alloc_bytes;
-                    state.peak_gpu_alloc = peak_gpu_alloc;
-                }
-            } else {
-                if state.peak_gpu_alloc > 0 && state.released_alloc_count == 0 {
-                    state.released_alloc_count += 1;
-                }
             }
-
-            let commit_id = state.next_commit_id;
-            if scene_generation != 0 {
-                if scene_epoch > state.last_scene_epoch {
-                    state.last_scene_epoch = scene_epoch;
-                    state.last_scene_generation = scene_generation;
-                } else if scene_epoch == state.last_scene_epoch
-                    && scene_generation > state.last_scene_generation
-                {
-                    state.last_scene_generation = scene_generation;
-                }
-            }
-            let snapshot = CommittedSceneState {
-                source,
-                target: target.clone(),
-                focus: focus.clone(),
-                selection: selection.clone(),
-                surfaces: surfaces.clone(),
-                scene_epoch,
-                scene_generation,
-                commit_id,
-                unix_timestamp: now_unix_timestamp(),
-            };
-            let surface_count = snapshot.surfaces.len();
-            state.record_commit(snapshot)?;
-            state.next_commit_id += 1;
-
-            let feedback = DisplayEvent::FramePresented {
-                commit_id,
-                timestamp: clock.now(),
-                refresh_ns: 16_666_666,
-                seq: clock.current_seq(),
-                flags: 0,
-            };
-            state.presentation_feedbacks.insert(commit_id, feedback);
-
-            let elapsed_ns = start_time.elapsed().as_nanos() as u64;
-            let cpu_composition_ns = if vulkan.is_some() { 0 } else { elapsed_ns };
-
-            println!(
-                "performance_metrics: frame_build_time_ns={} cpu_composition_time_ns={} vulkan_recording_time_ns={} queue_submit_time_ns={} fence_wait_time_ns={} presentation_latency_ns={} copied_bytes={} damaged_pixels={} full_frame_redraw_count={} skipped_frame_count={}",
-                elapsed_ns,
-                cpu_composition_ns,
-                vulkan_recording_time_ns,
-                queue_submit_time_ns,
-                fence_wait_time_ns,
-                elapsed_ns,
-                copied_bytes,
-                damaged_pixels,
-                if skipped || is_direct_scanout { 0 } else { 1 },
-                state.zero_damage_skipped_count
-            );
-
-            println!(
-                "gpu_metrics: current_gpu_allocation_bytes={} peak_gpu_allocation_bytes={} dedicated_bytes={} shared_bytes={} pinned_bytes={} staging_bytes={} imported_client_buffer_count={} composition_target_count={} scanout_buffer_count={} surface_residency_count={} generation_residency_count={} pool_current_size={} pool_capacity={} released_allocation_count={} zero_damage_skipped_frame_count={} direct_scanout_frame_count={} composition_frame_count={}",
-                gpu_alloc_bytes,
-                peak_gpu_alloc,
-                gpu_alloc_bytes,
-                0,
-                0,
-                0,
-                surface_count,
-                composition_target_count,
-                scanout_buffer_count,
-                surface_count,
-                1,
-                16,
-                32,
-                state.released_alloc_count,
-                state.zero_damage_skipped_count,
-                state.direct_scanout_count,
-                state.composition_frame_count
-            );
-
-            println!(
-                "service=displayd op=commit_scene event=success commit_id={} surfaces={} path={} session_instance_id={} skipped={}",
-                commit_id,
-                surface_count,
-                state.snapshot_path.display(),
-                config.session_instance_id,
-                skipped
-            );
-            Ok(DisplayEvent::SceneCommitted { target, focus, selection, surface_count, commit_id })
         }
         DisplayCommand::GetPresentationFeedback { commit_id } => {
             if let Some(feedback) = state.presentation_feedbacks.get(&commit_id) {
@@ -762,6 +770,7 @@ async fn handle_multi_output_commit(
     source: ServiceRole,
     config: &Config,
     state: &mut DisplayState,
+    clock: &mut dyn PresentationClock,
     display_backend: &mut dyn DisplayBackend,
 ) -> Result<DisplayEvent> {
     if scene_generation != 0
@@ -770,16 +779,21 @@ async fn handle_multi_output_commit(
     {
         return Ok(DisplayEvent::Rejected { reason: "stale scene generation".into() });
     }
-    submit_pixel_payloads(&mut state.pixel_transport, pixel_payloads)
-        .map_err(|error| anyhow::anyhow!("pixel transport rejected payload: {error:?}"))?;
-    verify_pixel_payloads_available(&state.pixel_transport, &surfaces)
-        .map_err(|reason| anyhow::anyhow!(reason))?;
+    if let Err(error) = submit_pixel_payloads(&mut state.pixel_transport, pixel_payloads) {
+        return Ok(DisplayEvent::Rejected {
+            reason: format!("pixel transport rejected payload: {error:?}"),
+        });
+    }
+    if let Err(reason) = verify_pixel_payloads_available(&state.pixel_transport, &surfaces) {
+        return Ok(DisplayEvent::Rejected { reason });
+    }
 
     let previous = state.last_scene.clone();
     let output_ids: Vec<String> = state.outputs.keys().cloned().collect();
     for output_id in output_ids {
         let runtime = state.outputs.get_mut(&output_id).expect("output id collected from registry");
-        if runtime.last_published_scene_generation == scene_generation
+        if runtime.published_frame_id != 0
+            && runtime.last_published_scene_generation == scene_generation
             && runtime.pending_damage.is_empty()
             && runtime
                 .retry
@@ -791,6 +805,7 @@ async fn handle_multi_output_commit(
                 })
                 .unwrap_or(true)
         {
+            state.zero_damage_skipped_count += 1;
             continue;
         }
         let bounds = runtime.state.bounds();
@@ -804,23 +819,40 @@ async fn handle_multi_output_commit(
         damage.sort_by_key(|rect| (rect.y0, rect.x0, rect.y1, rect.x1));
         damage.dedup();
         if damage.is_empty() {
+            state.zero_damage_skipped_count += 1;
             continue;
         }
-        validate_surface_pixels_for_damage(&state.pixel_transport, &surfaces, &damage)
-            .map_err(|reason| anyhow::anyhow!(reason))?;
+        if surfaces.len() == 1
+            && surfaces[0].placement.visible
+            && surfaces[0].placement.x == runtime.state.origin_x
+            && surfaces[0].placement.y == runtime.state.origin_y
+            && surfaces[0].placement.width == runtime.state.width
+            && surfaces[0].placement.height == runtime.state.height
+        {
+            state.direct_scanout_count += 1;
+        } else {
+            state.composition_frame_count += 1;
+        }
+        if let Err(reason) =
+            validate_surface_pixels_for_damage(&state.pixel_transport, &surfaces, &damage)
+        {
+            return Ok(DisplayEvent::Rejected { reason });
+        }
         let mut scratch = if framebuffer_is_initialized(&runtime.framebuffer, &runtime.state) {
             runtime.framebuffer.clone()
         } else {
             vec![BACKGROUND_PIXEL; runtime.state.framebuffer_words()]
         };
-        let stats = compose_damage_rects(
+        let stats = match compose_damage_rects(
             &mut scratch,
             &runtime.state,
             &state.pixel_transport,
             &surfaces,
             &damage,
-        )
-        .map_err(|reason| anyhow::anyhow!(reason))?;
+        ) {
+            Ok(stats) => stats,
+            Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
+        };
         let frame_id = runtime.next_frame_id;
         let geometry = OutputGeometry {
             output_id: runtime.state.output_id.clone(),
@@ -879,6 +911,16 @@ async fn handle_multi_output_commit(
     let event_selection = scene.selection.clone();
     let event_surface_count = scene.surfaces.len();
     state.record_commit(scene)?;
+    state.presentation_feedbacks.insert(
+        commit_id,
+        DisplayEvent::FramePresented {
+            commit_id,
+            timestamp: clock.now(),
+            refresh_ns: 16_666_666,
+            seq: clock.current_seq(),
+            flags: 0,
+        },
+    );
     println!(
         "service=displayd op=multi_output_commit event=success commit_id={commit_id} outputs={}",
         state.outputs.len()
@@ -893,6 +935,7 @@ async fn handle_multi_output_commit(
     })
 }
 
+#[cfg(test)]
 fn scene_generation_is_stale(
     last_epoch: u64,
     last_generation: u64,
@@ -914,15 +957,9 @@ struct DisplayState {
     active_recordings: HashMap<String, RecordingState>,
     pointer_constraints: HashMap<String, waybroker_common::PointerConstraints>,
     presentation_feedbacks: HashMap<u64, DisplayEvent>,
-    peak_gpu_alloc: u64,
-    released_alloc_count: u64,
     zero_damage_skipped_count: u64,
     direct_scanout_count: u64,
     composition_frame_count: u64,
-    next_frame_id: u64,
-    published_frame_id: u64,
-    framebuffer: Vec<u32>,
-    output: OutputState,
     outputs: BTreeMap<String, OutputRuntime>,
     pixel_transport: PixelTransportStore,
 }
@@ -1014,6 +1051,8 @@ struct RecordingState {
     session_id: String,
 }
 
+// Explicit test/service dependency retained for the non-production presentation boundary.
+#[allow(dead_code)]
 trait PresentationClock {
     fn now(&self) -> u64; // monotonic timestamp in ns
     fn current_seq(&self) -> u64;
@@ -1737,23 +1776,20 @@ impl RecordBackend for FakeRecordBackend {
     }
 }
 
-struct FakePresentationClock {
-    time_ns: u64,
-    seq: u64,
-}
+struct FakePresentationClock;
 
 impl Default for FakePresentationClock {
     fn default() -> Self {
-        Self { time_ns: 1_000_000_000, seq: 1 }
+        Self
     }
 }
 
 impl PresentationClock for FakePresentationClock {
     fn now(&self) -> u64 {
-        self.time_ns
+        1_000_000_000
     }
     fn current_seq(&self) -> u64 {
-        self.seq
+        1
     }
 }
 
@@ -1798,24 +1834,9 @@ impl DisplayState {
             active_recordings: HashMap::new(),
             pointer_constraints: HashMap::new(),
             presentation_feedbacks: HashMap::new(),
-            peak_gpu_alloc: 0,
-            released_alloc_count: 0,
             zero_damage_skipped_count: 0,
             direct_scanout_count: 0,
             composition_frame_count: 0,
-            next_frame_id: 1,
-            published_frame_id: 0,
-            framebuffer: Vec::new(),
-            output: OutputState {
-                output_id: "eDP-1".into(),
-                width: 1920,
-                height: 1080,
-                stride: 1920 * 4,
-                format: WL_SHM_FORMAT_XRGB8888,
-                origin_x: 0,
-                origin_y: 0,
-                generation: 0,
-            },
             outputs: default_output_registry(),
             pixel_transport: PixelTransportStore::default(),
         })
@@ -1858,24 +1879,9 @@ impl DisplayState {
             active_recordings: HashMap::new(),
             pointer_constraints: HashMap::new(),
             presentation_feedbacks: HashMap::new(),
-            peak_gpu_alloc: 0,
-            released_alloc_count: 0,
             zero_damage_skipped_count: 0,
             direct_scanout_count: 0,
             composition_frame_count: 0,
-            next_frame_id: 1,
-            published_frame_id: 0,
-            framebuffer: Vec::new(),
-            output: OutputState {
-                output_id: "eDP-1".into(),
-                width: 1920,
-                height: 1080,
-                stride: 1920 * 4,
-                format: WL_SHM_FORMAT_XRGB8888,
-                origin_x: 0,
-                origin_y: 0,
-                generation: 0,
-            },
             outputs: default_output_registry(),
             pixel_transport: PixelTransportStore::default(),
         }
@@ -2648,7 +2654,7 @@ mod tests {
         // Ensure runtime dir exists
         ensure_runtime_dir().unwrap();
 
-        let mut clock = FakePresentationClock::default();
+        let mut clock = FakePresentationClock;
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
@@ -2739,7 +2745,7 @@ mod tests {
     async fn output_captured_format_remains_rgba8888() {
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
         let mut state = DisplayState::new_test();
-        let mut clock = FakePresentationClock::default();
+        let mut clock = FakePresentationClock;
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
@@ -2815,7 +2821,7 @@ mod tests {
 
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
         let mut state = DisplayState::new_test();
-        let mut clock = FakePresentationClock::default();
+        let mut clock = FakePresentationClock;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
         let err = handle_display_command(
@@ -2847,7 +2853,7 @@ mod tests {
 
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
         let mut state = DisplayState::new_test();
-        let mut clock = FakePresentationClock::default();
+        let mut clock = FakePresentationClock;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
         let err = handle_display_command(
@@ -2870,7 +2876,7 @@ mod tests {
     async fn existing_displayd_capture_tests_still_pass() {
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
         let mut state = DisplayState::new_test();
-        let mut clock = FakePresentationClock::default();
+        let mut clock = FakePresentationClock;
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
@@ -3825,7 +3831,7 @@ exit 0
     async fn test_phase3_composition_zero_damage_skipping() {
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
         let mut state = DisplayState::new_test();
-        let mut clock = FakePresentationClock::default();
+        let mut clock = FakePresentationClock;
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
@@ -3898,7 +3904,7 @@ exit 0
     async fn pixel_transport_payload_feeds_renderer_without_entering_scene_snapshot() {
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
         let mut state = DisplayState::new_test();
-        let mut clock = FakePresentationClock::default();
+        let mut clock = FakePresentationClock;
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
@@ -3956,7 +3962,7 @@ exit 0
         .unwrap();
 
         assert!(matches!(commit, DisplayEvent::SceneCommitted { .. }));
-        assert_eq!(state.framebuffer[0], 0xFF223344);
+        assert_eq!(state.outputs["eDP-1"].framebuffer[0], 0xFF223344);
         let snapshot = state.last_scene.as_ref().unwrap();
         assert!(snapshot.surfaces[0].pixel_transport.is_some());
         assert!(!serde_json::to_string(snapshot).unwrap().contains("\"pixels\""));
@@ -3966,7 +3972,7 @@ exit 0
     async fn missing_pixel_transport_payload_rejects_without_corrupting_scene() {
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
         let mut state = DisplayState::new_test();
-        let mut clock = FakePresentationClock::default();
+        let mut clock = FakePresentationClock;
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
@@ -4109,7 +4115,7 @@ exit 0
         display_backend: &mut dyn DisplayBackend,
     ) -> DisplayEvent {
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
-        let mut clock = FakePresentationClock::default();
+        let mut clock = FakePresentationClock;
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
         handle_display_command(
@@ -4186,7 +4192,7 @@ exit 0
             commit_test_scene(&mut state, vec![surface.clone()], vec![initial_payload], 1).await,
             DisplayEvent::SceneCommitted { .. }
         ));
-        let before = state.framebuffer.clone();
+        let before = state.outputs["eDP-1"].framebuffer.clone();
 
         let updated_handle = test_handle(1, "surface-1", 1, 2);
         let mut damaged_surface =
@@ -4200,8 +4206,8 @@ exit 0
         ));
 
         let changed = framebuffer_offset(1, 1).unwrap();
-        assert_eq!(state.framebuffer[changed], 0xFF222222);
-        for (index, pixel) in state.framebuffer.iter().enumerate().take(8_000) {
+        assert_eq!(state.outputs["eDP-1"].framebuffer[changed], 0xFF222222);
+        for (index, pixel) in state.outputs["eDP-1"].framebuffer.iter().enumerate().take(8_000) {
             if index != changed {
                 assert_eq!(*pixel, before[index], "unexpected framebuffer change at {index}");
             }
@@ -4233,7 +4239,7 @@ exit 0
         let handle = test_handle(1, "surface-1", 1, 1);
         let mut surface = test_surface("surface-1", 0, 0, 3, 2, 1, Some(handle.clone()));
         surface.damage_rects = vec![waybroker_common::Rect { x: 1, y: 1, width: 1, height: 1 }];
-        ensure_framebuffer(&mut state.framebuffer);
+        ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
         state.last_scene = Some(CommittedSceneState {
             source: ServiceRole::Compd,
             target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
@@ -4253,8 +4259,14 @@ exit 0
             DisplayEvent::SceneCommitted { .. }
         ));
 
-        assert_eq!(state.framebuffer[framebuffer_offset(1, 1).unwrap()], 0xFFBBCCDD);
-        assert_eq!(state.framebuffer[framebuffer_offset(0, 1).unwrap()], BACKGROUND_PIXEL);
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(1, 1).unwrap()],
+            0xFFBBCCDD
+        );
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 1).unwrap()],
+            BACKGROUND_PIXEL
+        );
     }
 
     #[tokio::test]
@@ -4265,7 +4277,7 @@ exit 0
         let handle = test_handle(2, "surface-1", 1, 1);
         let mut surface = test_surface("surface-1", 0, 0, 3, 2, 2, Some(handle.clone()));
         surface.damage_rects = vec![waybroker_common::Rect { x: 1, y: 1, width: 1, height: 1 }];
-        ensure_framebuffer(&mut state.framebuffer);
+        ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
         state.last_scene = Some(CommittedSceneState {
             source: ServiceRole::Compd,
             target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
@@ -4300,8 +4312,14 @@ exit 0
             DisplayEvent::SceneCommitted { .. }
         ));
 
-        assert_eq!(state.framebuffer[framebuffer_offset(1, 1).unwrap()], 0xFF80007F);
-        assert_eq!(state.framebuffer[framebuffer_offset(0, 1).unwrap()], BACKGROUND_PIXEL);
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(1, 1).unwrap()],
+            0xFF80007F
+        );
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 1).unwrap()],
+            BACKGROUND_PIXEL
+        );
     }
 
     #[tokio::test]
@@ -4310,7 +4328,7 @@ exit 0
         let bottom = test_surface("bottom", 0, 0, 4, 4, 1, None);
         let mut top = test_surface("panel-top", 1, 1, 2, 2, 2, None);
         top.damage_rects = vec![waybroker_common::Rect { x: 0, y: 0, width: 1, height: 1 }];
-        ensure_framebuffer(&mut state.framebuffer);
+        ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
         state.last_scene = Some(CommittedSceneState {
             source: ServiceRole::Compd,
             target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
@@ -4328,7 +4346,10 @@ exit 0
             DisplayEvent::SceneCommitted { .. }
         ));
 
-        assert_eq!(state.framebuffer[framebuffer_offset(1, 1).unwrap()], 0xFF0000FF);
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(1, 1).unwrap()],
+            0xFF0000FF
+        );
     }
 
     #[tokio::test]
@@ -4371,7 +4392,10 @@ exit 0
             DisplayEvent::SceneCommitted { .. }
         ));
 
-        assert_eq!(state.framebuffer[framebuffer_offset(0, 0).unwrap()], 0xFF80007F);
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 0).unwrap()],
+            0xFF80007F
+        );
     }
 
     #[tokio::test]
@@ -4413,7 +4437,10 @@ exit 0
             DisplayEvent::SceneCommitted { .. }
         ));
 
-        assert_eq!(state.framebuffer[framebuffer_offset(0, 0).unwrap()], 0xFF40605F);
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 0).unwrap()],
+            0xFF40605F
+        );
     }
 
     #[tokio::test]
@@ -4429,8 +4456,14 @@ exit 0
             DisplayEvent::SceneCommitted { .. }
         ));
 
-        assert_eq!(state.framebuffer[framebuffer_offset(0, 0).unwrap()], 0xFF800000);
-        assert_eq!(state.framebuffer[framebuffer_offset(1, 0).unwrap()], BACKGROUND_PIXEL);
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 0).unwrap()],
+            0xFF800000
+        );
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(1, 0).unwrap()],
+            BACKGROUND_PIXEL
+        );
     }
 
     #[tokio::test]
@@ -4441,44 +4474,58 @@ exit 0
             commit_test_scene(&mut state, vec![original], vec![], 1).await,
             DisplayEvent::SceneCommitted { .. }
         ));
-        assert_eq!(state.framebuffer[framebuffer_offset(0, 0).unwrap()], 0xFFFF0000);
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 0).unwrap()],
+            0xFFFF0000
+        );
 
         let moved = test_surface("surface-1", 2, 0, 2, 2, 1, None);
         assert!(matches!(
             commit_test_scene(&mut state, vec![moved], vec![], 2).await,
             DisplayEvent::SceneCommitted { .. }
         ));
-        assert_eq!(state.framebuffer[framebuffer_offset(0, 0).unwrap()], BACKGROUND_PIXEL);
-        assert_eq!(state.framebuffer[framebuffer_offset(2, 0).unwrap()], 0xFFFF0000);
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 0).unwrap()],
+            BACKGROUND_PIXEL
+        );
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(2, 0).unwrap()],
+            0xFFFF0000
+        );
 
         assert!(matches!(
             commit_test_scene(&mut state, vec![], vec![], 3).await,
             DisplayEvent::SceneCommitted { .. }
         ));
-        assert_eq!(state.framebuffer[framebuffer_offset(2, 0).unwrap()], BACKGROUND_PIXEL);
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(2, 0).unwrap()],
+            BACKGROUND_PIXEL
+        );
     }
 
     #[tokio::test]
     async fn stale_or_missing_payload_does_not_partially_mutate_framebuffer() {
         let mut state = DisplayState::new_test();
-        ensure_framebuffer(&mut state.framebuffer);
-        state.framebuffer[framebuffer_offset(0, 0).unwrap()] = 0xDEADBEEF;
-        let before = state.framebuffer.clone();
+        ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
+        state.outputs.get_mut("eDP-1").unwrap().framebuffer[framebuffer_offset(0, 0).unwrap()] =
+            0xDEADBEEF;
+        let before = state.outputs["eDP-1"].framebuffer.clone();
         let surface =
             test_surface("surface-1", 0, 0, 2, 2, 1, Some(test_handle(1, "surface-1", 1, 1)));
 
         let event = commit_test_scene(&mut state, vec![surface], vec![], 1).await;
 
         assert!(matches!(event, DisplayEvent::Rejected { .. }));
-        assert_eq!(state.framebuffer, before);
+        assert_eq!(state.outputs["eDP-1"].framebuffer, before);
     }
 
     #[tokio::test]
     async fn stale_pixel_transport_payload_is_rejected_without_framebuffer_mutation() {
         let mut state = DisplayState::new_test();
-        ensure_framebuffer(&mut state.framebuffer);
-        state.framebuffer[framebuffer_offset(0, 0).unwrap()] = 0xDEADBEEF;
-        let before = state.framebuffer.clone();
+        ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
+        state.outputs.get_mut("eDP-1").unwrap().framebuffer[framebuffer_offset(0, 0).unwrap()] =
+            0xDEADBEEF;
+        let before = state.outputs["eDP-1"].framebuffer.clone();
         let current_handle = test_handle(1, "surface-1", 2, 2);
         state
             .pixel_transport
@@ -4491,15 +4538,16 @@ exit 0
         let event = commit_test_scene(&mut state, vec![surface], vec![stale_payload], 1).await;
 
         assert!(matches!(event, DisplayEvent::Rejected { .. }));
-        assert_eq!(state.framebuffer, before);
+        assert_eq!(state.outputs["eDP-1"].framebuffer, before);
     }
 
     #[tokio::test]
     async fn unsupported_or_malformed_alpha_payload_rejects_without_framebuffer_mutation() {
         let mut state = DisplayState::new_test();
-        ensure_framebuffer(&mut state.framebuffer);
-        state.framebuffer[framebuffer_offset(0, 0).unwrap()] = 0xDEADBEEF;
-        let before = state.framebuffer.clone();
+        ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
+        state.outputs.get_mut("eDP-1").unwrap().framebuffer[framebuffer_offset(0, 0).unwrap()] =
+            0xDEADBEEF;
+        let before = state.outputs["eDP-1"].framebuffer.clone();
         let handle = test_handle(1, "surface-1", 1, 1);
         let surface = test_surface("surface-1", 0, 0, 1, 1, 1, Some(handle.clone()));
         let unsupported = test_payload_with_format(handle.clone(), vec![0], 1, 1, 4, 99);
@@ -4508,7 +4556,7 @@ exit 0
             commit_test_scene(&mut state, vec![surface.clone()], vec![unsupported], 1).await;
 
         assert!(matches!(event, DisplayEvent::Rejected { .. }));
-        assert_eq!(state.framebuffer, before);
+        assert_eq!(state.outputs["eDP-1"].framebuffer, before);
 
         let malformed = waybroker_common::PixelTransportPayload {
             handle,
@@ -4521,7 +4569,7 @@ exit 0
         let event = commit_test_scene(&mut state, vec![surface], vec![malformed], 2).await;
 
         assert!(matches!(event, DisplayEvent::Rejected { .. }));
-        assert_eq!(state.framebuffer, before);
+        assert_eq!(state.outputs["eDP-1"].framebuffer, before);
     }
 
     #[tokio::test]
@@ -4535,18 +4583,24 @@ exit 0
         ));
 
         assert_eq!(
-            state.framebuffer.len(),
+            state.outputs["eDP-1"].framebuffer.len(),
             FRAMEBUFFER_WIDTH as usize * FRAMEBUFFER_HEIGHT as usize
         );
-        assert_eq!(state.framebuffer[framebuffer_offset(0, 0).unwrap()], BACKGROUND_PIXEL);
-        assert_eq!(state.framebuffer[framebuffer_offset(10, 10).unwrap()], 0xFFFF0000);
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 0).unwrap()],
+            BACKGROUND_PIXEL
+        );
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(10, 10).unwrap()],
+            0xFFFF0000
+        );
     }
 
     #[tokio::test]
     async fn test_phase3_composition_direct_scanout() {
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
         let mut state = DisplayState::new_test();
-        let mut clock = FakePresentationClock::default();
+        let mut clock = FakePresentationClock;
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
@@ -4691,7 +4745,7 @@ exit 0
     #[tokio::test]
     async fn failed_publication_preserves_renderer_state_and_retries_same_scene() {
         let mut state = DisplayState::new_test();
-        let before = state.framebuffer.clone();
+        let before = state.outputs["eDP-1"].framebuffer.clone();
         let mut failing = MockDisplayBackend::default();
         failing.set_fail_on_frame(1);
         let rejected = commit_test_scene_with_backend(
@@ -4703,8 +4757,8 @@ exit 0
         )
         .await;
         assert!(matches!(rejected, DisplayEvent::Rejected { .. }));
-        assert_eq!(state.framebuffer, before);
-        assert_eq!(state.published_frame_id, 0);
+        assert_eq!(state.outputs["eDP-1"].framebuffer, before);
+        assert_eq!(state.outputs["eDP-1"].published_frame_id, 0);
         assert_eq!(state.last_scene_generation, 0);
 
         let mut retry = MockDisplayBackend::default();
@@ -4757,7 +4811,7 @@ exit 0
         let capture = FakeCaptureBackend;
         let mut record = FakeRecordBackend;
         let mut display = MockDisplayBackend::default();
-        let mut clock = FakePresentationClock::default();
+        let mut clock = FakePresentationClock;
         let geometry = OutputGeometry {
             output_id: "right".into(),
             width: 4,
