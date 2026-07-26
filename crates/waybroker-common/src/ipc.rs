@@ -192,6 +192,8 @@ pub enum DisplayEvent {
         selection: WaylandSelectionState,
         surface_count: usize,
         commit_id: u64,
+        #[serde(default)]
+        publication: Option<ScenePublicationResult>,
     },
     SceneSnapshot {
         snapshot: Option<CommittedSceneState>,
@@ -239,6 +241,92 @@ pub enum DisplayEvent {
         reason: String,
     },
     ResumeStarted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScenePublicationResult {
+    pub scene_accepted: bool,
+    pub scene_generation: u64,
+    pub outputs: Vec<OutputPublicationResult>,
+}
+
+impl ScenePublicationResult {
+    pub fn validate(&self) -> Result<(), String> {
+        let mut ids = std::collections::BTreeSet::new();
+        for output in &self.outputs {
+            if !ids.insert(output.output_id.as_str()) {
+                return Err(format!("duplicate publication output {}", output.output_id));
+            }
+            if output.scene_generation != self.scene_generation {
+                return Err(format!(
+                    "publication scene generation mismatch for {}",
+                    output.output_id
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod publication_result_tests {
+    use super::*;
+
+    #[test]
+    fn publication_result_round_trips_and_rejects_duplicates() {
+        let result = ScenePublicationResult {
+            scene_accepted: true,
+            scene_generation: 7,
+            outputs: vec![
+                OutputPublicationResult {
+                    output_id: "a".into(),
+                    output_generation: 3,
+                    frame_id: 4,
+                    scene_generation: 7,
+                    outcome: OutputPublicationOutcome::Published,
+                },
+                OutputPublicationResult {
+                    output_id: "b".into(),
+                    output_generation: 5,
+                    frame_id: 2,
+                    scene_generation: 7,
+                    outcome: OutputPublicationOutcome::Failed(PublicationFailure::BackendRejected),
+                },
+            ],
+        };
+        result.validate().unwrap();
+        let decoded: ScenePublicationResult =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        assert_eq!(decoded, result);
+        let mut duplicate = result.clone();
+        duplicate.outputs[1].output_id = "a".into();
+        assert!(duplicate.validate().is_err());
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputPublicationResult {
+    pub output_id: String,
+    pub output_generation: u64,
+    pub frame_id: u64,
+    pub scene_generation: u64,
+    pub outcome: OutputPublicationOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutputPublicationOutcome {
+    Published,
+    Failed(PublicationFailure),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublicationFailure {
+    BackendRejected,
+    StaleOutputGeneration,
+    StaleRetryState,
+    MalformedPublicationState,
+    OutputUnavailable,
+    RendererRejected,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -12,10 +12,11 @@ use vulkan_backend::{
 };
 use waybroker_common::{
     CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputGeometry,
-    OutputMode, PixelTransportError, PixelTransportPayload, PixelTransportStore, ServiceBanner,
-    ServiceEndpoint, ServiceRole, ServiceStream, accel::global_accel_policy, bind_service_socket,
-    ensure_runtime_dir, now_unix_timestamp, read_json_line, sanitize_artifact_filename,
-    send_json_line, session_artifact_path, validate_artifact_filename,
+    OutputMode, OutputPublicationOutcome, OutputPublicationResult, PixelTransportError,
+    PixelTransportPayload, PixelTransportStore, PublicationFailure, ScenePublicationResult,
+    ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, accel::global_accel_policy,
+    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
+    sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
@@ -631,6 +632,7 @@ async fn handle_display_command(
                     scene_epoch,
                     scene_generation,
                     commit_id,
+                    publication: None,
                     unix_timestamp: now_unix_timestamp(),
                 };
                 let surface_count = snapshot.surfaces.len();
@@ -773,9 +775,17 @@ async fn handle_multi_output_commit(
     clock: &mut dyn PresentationClock,
     display_backend: &mut dyn DisplayBackend,
 ) -> Result<DisplayEvent> {
+    let retrying = state.outputs.values().any(|runtime| {
+        runtime
+            .retry
+            .as_ref()
+            .map(|retry| retry.scene_generation == scene_generation)
+            .unwrap_or(false)
+    });
     if scene_generation != 0
         && scene_epoch == state.last_scene_epoch
         && scene_generation <= state.last_scene_generation
+        && !retrying
     {
         return Ok(DisplayEvent::Rejected { reason: "stale scene generation".into() });
     }
@@ -790,6 +800,7 @@ async fn handle_multi_output_commit(
 
     let previous = state.last_scene.clone();
     let output_ids: Vec<String> = state.outputs.keys().cloned().collect();
+    let mut publication_results = Vec::new();
     for output_id in output_ids {
         let runtime = state.outputs.get_mut(&output_id).expect("output id collected from registry");
         if runtime.published_frame_id != 0
@@ -875,16 +886,21 @@ async fn handle_multi_output_commit(
             pixels: std::sync::Arc::<[u32]>::from(scratch.clone()),
             damage: damage.clone(),
         });
-        if let Err(error) = publication {
+        if let Err(_error) = publication {
             runtime.retry = Some(OutputRetryState {
                 scene_generation,
                 output_generation: runtime.state.generation,
                 frame_id,
             });
             runtime.pending_damage = damage;
-            return Ok(DisplayEvent::Rejected {
-                reason: format!("output {output_id} publication failed: {error}"),
+            publication_results.push(OutputPublicationResult {
+                output_id: output_id.clone(),
+                output_generation: runtime.state.generation,
+                frame_id,
+                scene_generation,
+                outcome: OutputPublicationOutcome::Failed(PublicationFailure::BackendRejected),
             });
+            break;
         }
         runtime.framebuffer = scratch;
         runtime.published_frame_id = frame_id;
@@ -892,6 +908,13 @@ async fn handle_multi_output_commit(
         runtime.last_published_scene_generation = scene_generation;
         runtime.pending_damage.clear();
         runtime.retry = None;
+        publication_results.push(OutputPublicationResult {
+            output_id: output_id.clone(),
+            output_generation: runtime.state.generation,
+            frame_id,
+            scene_generation,
+            outcome: OutputPublicationOutcome::Published,
+        });
         let _ = stats;
     }
     let commit_id = state.next_commit_id;
@@ -926,12 +949,19 @@ async fn handle_multi_output_commit(
         state.outputs.len()
     );
     let _ = config;
+    let publication = ScenePublicationResult {
+        scene_accepted: true,
+        scene_generation,
+        outputs: publication_results,
+    };
+    publication.validate().map_err(|error| anyhow::anyhow!(error))?;
     Ok(DisplayEvent::SceneCommitted {
         target: event_target,
         focus: event_focus,
         selection: event_selection,
         surface_count: event_surface_count,
         commit_id,
+        publication: Some(publication),
     })
 }
 
@@ -4756,10 +4786,10 @@ exit 0
             &mut failing,
         )
         .await;
-        assert!(matches!(rejected, DisplayEvent::Rejected { .. }));
+        assert!(matches!(rejected, DisplayEvent::SceneCommitted { publication: Some(_), .. }));
         assert_eq!(state.outputs["eDP-1"].framebuffer, before);
         assert_eq!(state.outputs["eDP-1"].published_frame_id, 0);
-        assert_eq!(state.last_scene_generation, 0);
+        assert_eq!(state.last_scene_generation, 1);
 
         let mut retry = MockDisplayBackend::default();
         let accepted = commit_test_scene_with_backend(
@@ -4894,7 +4924,7 @@ exit 0
             &mut failing,
         )
         .await;
-        assert!(matches!(rejected, DisplayEvent::Rejected { .. }));
+        assert!(matches!(rejected, DisplayEvent::SceneCommitted { publication: Some(_), .. }));
         assert_eq!(failing.publications().len(), 1);
         assert_eq!(state.outputs["eDP-1"].published_frame_id, 1);
         assert!(state.outputs["right"].retry.is_some());

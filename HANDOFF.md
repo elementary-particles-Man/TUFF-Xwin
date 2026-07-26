@@ -1,5 +1,9 @@
 # HANDOFF
 
+## Typed partial publication results (2026-07-26)
+
+`feature/typed-partial-publication-result` にて `ScenePublicationResult`、`OutputPublicationResult`、`OutputPublicationOutcome`、`PublicationFailure` を waybroker-common IPC 型として追加した。`SceneCommitted` に optional typed publication payload を追加し、displayd の multi-output commit/retry path は canonical scene を一度受け入れた後、stable output_id 順の per-output outcome を返す。backend failure は `Failed(BackendRejected)` として記録し、成功 output の事実を保持する。result validation は duplicate output_id と scene generation mismatch を拒否し、serde round-trip test を追加した。registry-only output state と retry isolation を保持し、production display/backend は未接触。
+
 ## Registry-only output state migration (2026-07-26)
 
 `feature/registry-only-output-state` で、active displayd composition/publication/configuration path を `BTreeMap<String, OutputRuntime>` の registry に移行した。`DisplayState` から active な `output` と `framebuffer` fields を削除し、output geometry、framebuffer、frame identity、pending damage、retry state は registry entry から解決する。CommitScene は stable output_id 順に registry entry を処理し、既存の A-success/B-failure retry isolation を保持する。既存の単一 output legacy statement block は compile-time disabled として残り、typed partial publication result は後続タスク。production display/backend は未接触。
