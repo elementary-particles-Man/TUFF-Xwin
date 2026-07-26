@@ -9,8 +9,9 @@ pub use ipc::{
     CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget,
     ForeignToplevelHandle, HealthState, ImeBridgeMode, ImeCommand, ImeEvent, ImeStatus,
     IpcEnvelope, LayerMetadata, LockCommand, LockState, MessageKind, OutputGeometry, OutputMode,
-    OutputPublicationOutcome, OutputPublicationResult, PointerConstraints, PublicationFailure,
-    Rect, ResumeStage, ScenePublicationResult, SessionCommand, SurfacePlacement,
+    OutputPublicationOutcome, OutputPublicationResult, OutputReadiness, OutputReadinessState,
+    PointerConstraints, PublicationFailure, Rect, ResumeStage, ScenePublicationResult,
+    ServiceReadiness, ServiceReadinessState, SessionCommand, SurfacePlacement,
     SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand, WaylandCommand, WaylandEvent,
     WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
 };

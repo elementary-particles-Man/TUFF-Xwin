@@ -97,6 +97,12 @@
 
 ## 次のステップへの申し送り
 
+10. **Liveness と display readiness の typed boundary**
+    * `DisplayCommand::GetLiveness` / `GetReadiness` と対応する typed event を追加。
+    * `ServiceReadiness` と `OutputReadiness` は既存の `OutputRuntime` から都度導出し、重複する mutable readiness state は保持しない。
+    * ConfigureOutput 後は awaiting publication、generation-matched publication 後のみ Ready、retry は対象 output 単位で RetryPending とする。
+    * zero output は live だが display-ready ではない。production display backend には接続していない。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 

@@ -12,9 +12,10 @@ use vulkan_backend::{
 };
 use waybroker_common::{
     CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputGeometry,
-    OutputMode, OutputPublicationOutcome, OutputPublicationResult, PixelTransportError,
-    PixelTransportPayload, PixelTransportStore, PublicationFailure, ScenePublicationResult,
-    ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, accel::global_accel_policy,
+    OutputMode, OutputPublicationOutcome, OutputPublicationResult, OutputReadiness,
+    OutputReadinessState, PixelTransportError, PixelTransportPayload, PixelTransportStore,
+    PublicationFailure, ScenePublicationResult, ServiceBanner, ServiceEndpoint, ServiceReadiness,
+    ServiceReadinessState, ServiceRole, ServiceStream, accel::global_accel_policy,
     bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
     sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
 };
@@ -339,6 +340,12 @@ async fn handle_display_command(
     display_backend: &mut dyn DisplayBackend,
 ) -> Result<DisplayEvent> {
     match command {
+        DisplayCommand::GetLiveness => Ok(DisplayEvent::Liveness { responsive: true }),
+        DisplayCommand::GetReadiness => {
+            // The deterministic CPU renderer is always available; Vulkan is only acceleration.
+            let _ = vulkan;
+            Ok(DisplayEvent::Readiness(readiness_from_state(state, true)))
+        }
         DisplayCommand::EnumerateOutputs => {
             let outputs = display_backend.enumerate_outputs()?;
             println!("service=displayd op=enumerate_outputs event=success count={}", outputs.len());
@@ -1932,6 +1939,63 @@ fn default_output_registry() -> BTreeMap<String, OutputRuntime> {
     BTreeMap::from([(state.output_id.clone(), OutputRuntime::new(state))])
 }
 
+fn readiness_from_state(state: &DisplayState, renderer_available: bool) -> ServiceReadiness {
+    let outputs: Vec<OutputReadiness> = state
+        .outputs
+        .iter()
+        .map(|(output_id, runtime)| {
+            let retry_pending = runtime.retry.is_some();
+            let output_state = if retry_pending {
+                OutputReadinessState::RetryPending
+            } else if runtime.published_frame_id != 0 && runtime.pending_damage.is_empty() {
+                OutputReadinessState::Ready
+            } else {
+                OutputReadinessState::ConfiguredAwaitingPublication
+            };
+            OutputReadiness {
+                output_id: output_id.clone(),
+                output_generation: runtime.state.generation,
+                state: output_state,
+                last_published_frame_id: runtime.published_frame_id,
+                last_published_scene_generation: runtime.last_published_scene_generation,
+                pending_damage: !runtime.pending_damage.is_empty(),
+                retry_pending,
+            }
+        })
+        .collect();
+    let ready = outputs.iter().filter(|o| o.state == OutputReadinessState::Ready).count();
+    let retry = outputs.iter().filter(|o| o.retry_pending).count();
+    let failed = outputs
+        .iter()
+        .filter(|o| {
+            matches!(
+                o.state,
+                OutputReadinessState::PublicationFailed | OutputReadinessState::RetryPending
+            )
+        })
+        .count();
+    let state_value = if !renderer_available || outputs.is_empty() {
+        ServiceReadinessState::LiveNotReady
+    } else if ready == outputs.len() {
+        ServiceReadinessState::Ready
+    } else if ready > 0 {
+        ServiceReadinessState::PartiallyReady
+    } else {
+        ServiceReadinessState::Failed
+    };
+    ServiceReadiness {
+        ipc_available: true,
+        canonical_scene_available: true,
+        renderer_available,
+        configured_output_count: outputs.len(),
+        ready_output_count: ready,
+        failed_output_count: failed,
+        retry_pending_output_count: retry,
+        state: state_value,
+        outputs,
+    }
+}
+
 fn submit_pixel_payloads(
     store: &mut PixelTransportStore,
     payloads: Vec<PixelTransportPayload>,
@@ -2660,6 +2724,58 @@ impl Drop for SocketGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_is_derived_from_registry_and_zero_outputs_are_not_ready() {
+        let mut state = DisplayState::new_test();
+        state.outputs.clear();
+        let readiness = readiness_from_state(&state, true);
+        assert_eq!(readiness.configured_output_count, 0);
+        assert_eq!(readiness.state, ServiceReadinessState::LiveNotReady);
+        readiness.validate().unwrap();
+    }
+
+    #[test]
+    fn configure_starts_awaiting_publication_and_publication_makes_only_that_output_ready() {
+        let mut state = DisplayState::new_test();
+        state.outputs.clear();
+        let geometry = OutputGeometry {
+            output_id: "left".into(),
+            width: 16,
+            height: 16,
+            stride: 64,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 2,
+        };
+        let runtime = OutputRuntime::new(OutputState::validate(&geometry).unwrap());
+        state.outputs.insert("left".into(), runtime);
+        let readiness = readiness_from_state(&state, true);
+        assert_eq!(readiness.outputs[0].state, OutputReadinessState::ConfiguredAwaitingPublication);
+        state.outputs.get_mut("left").unwrap().published_frame_id = 1;
+        state.outputs.get_mut("left").unwrap().last_published_scene_generation = 7;
+        let readiness = readiness_from_state(&state, true);
+        assert_eq!(readiness.outputs[0].state, OutputReadinessState::Ready);
+        assert_eq!(readiness.outputs[0].output_generation, 2);
+        assert_eq!(readiness.outputs[0].last_published_scene_generation, 7);
+    }
+
+    #[test]
+    fn retry_pending_isolated_to_failed_output() {
+        let mut state = DisplayState::new_test();
+        let right = state.outputs.remove("eDP-1").unwrap();
+        state.outputs.insert("a".into(), right.clone());
+        state.outputs.insert("b".into(), right);
+        state.outputs.get_mut("a").unwrap().published_frame_id = 3;
+        state.outputs.get_mut("b").unwrap().retry =
+            Some(OutputRetryState { scene_generation: 8, output_generation: 1, frame_id: 1 });
+        let readiness = readiness_from_state(&state, true);
+        assert_eq!(readiness.outputs[0].state, OutputReadinessState::Ready);
+        assert_eq!(readiness.outputs[1].state, OutputReadinessState::RetryPending);
+        assert_eq!(readiness.ready_output_count, 1);
+        assert_eq!(readiness.retry_pending_output_count, 1);
+    }
 
     #[test]
     fn rejects_only_older_nonzero_scene_generations() {

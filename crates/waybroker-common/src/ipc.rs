@@ -90,6 +90,8 @@ pub enum ImeEvent {
 // IPC values remain inline to preserve the established wire shape and public API.
 #[allow(clippy::large_enum_variant)]
 pub enum DisplayCommand {
+    GetLiveness,
+    GetReadiness,
     EnumerateOutputs,
     ConfigureOutput {
         geometry: OutputGeometry,
@@ -178,6 +180,10 @@ pub struct Rect {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum DisplayEvent {
+    Liveness {
+        responsive: bool,
+    },
+    Readiness(ServiceReadiness),
     OutputInventory {
         outputs: Vec<OutputMode>,
     },
@@ -244,6 +250,92 @@ pub enum DisplayEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceReadiness {
+    pub ipc_available: bool,
+    pub canonical_scene_available: bool,
+    pub renderer_available: bool,
+    pub configured_output_count: usize,
+    pub ready_output_count: usize,
+    pub failed_output_count: usize,
+    pub retry_pending_output_count: usize,
+    pub state: ServiceReadinessState,
+    pub outputs: Vec<OutputReadiness>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServiceReadinessState {
+    LiveNotReady,
+    Ready,
+    PartiallyReady,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputReadiness {
+    pub output_id: String,
+    pub output_generation: u64,
+    pub state: OutputReadinessState,
+    pub last_published_frame_id: u64,
+    pub last_published_scene_generation: u64,
+    pub pending_damage: bool,
+    pub retry_pending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutputReadinessState {
+    ConfiguredAwaitingPublication,
+    Ready,
+    PublicationFailed,
+    RetryPending,
+    Reconfiguring,
+}
+
+impl ServiceReadiness {
+    pub fn validate(&self) -> Result<(), String> {
+        let mut ids = std::collections::BTreeSet::new();
+        for output in &self.outputs {
+            if !ids.insert(output.output_id.as_str()) {
+                return Err(format!("duplicate readiness output {}", output.output_id));
+            }
+            if output.retry_pending && output.state != OutputReadinessState::RetryPending {
+                return Err(format!("retry state mismatch for {}", output.output_id));
+            }
+            if output.state == OutputReadinessState::Ready
+                && (output.retry_pending || output.pending_damage)
+            {
+                return Err(format!("ready output has pending work {}", output.output_id));
+            }
+        }
+        if self.configured_output_count != self.outputs.len()
+            || self.ready_output_count
+                != self.outputs.iter().filter(|o| o.state == OutputReadinessState::Ready).count()
+            || self.retry_pending_output_count
+                != self.outputs.iter().filter(|o| o.retry_pending).count()
+            || self.failed_output_count
+                != self
+                    .outputs
+                    .iter()
+                    .filter(|o| {
+                        matches!(
+                            o.state,
+                            OutputReadinessState::PublicationFailed
+                                | OutputReadinessState::RetryPending
+                        )
+                    })
+                    .count()
+        {
+            return Err("readiness counts are inconsistent".into());
+        }
+        if self.state == ServiceReadinessState::Ready && self.ready_output_count == 0 {
+            return Err("ready service has no ready output".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScenePublicationResult {
     pub scene_accepted: bool,
     pub scene_generation: u64,
@@ -301,6 +393,58 @@ mod publication_result_tests {
         let mut duplicate = result.clone();
         duplicate.outputs[1].output_id = "a".into();
         assert!(duplicate.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[test]
+    fn readiness_round_trips_and_validates_counts() {
+        let value = ServiceReadiness {
+            ipc_available: true,
+            canonical_scene_available: true,
+            renderer_available: true,
+            configured_output_count: 1,
+            ready_output_count: 1,
+            failed_output_count: 0,
+            retry_pending_output_count: 0,
+            state: ServiceReadinessState::Ready,
+            outputs: vec![OutputReadiness {
+                output_id: "a".into(),
+                output_generation: 4,
+                state: OutputReadinessState::Ready,
+                last_published_frame_id: 9,
+                last_published_scene_generation: 12,
+                pending_damage: false,
+                retry_pending: false,
+            }],
+        };
+        value.validate().unwrap();
+        let decoded: ServiceReadiness =
+            serde_json::from_str(&serde_json::to_string(&value).unwrap()).unwrap();
+        assert_eq!(decoded, value);
+        let mut malformed = value;
+        malformed.ready_output_count = 0;
+        assert!(malformed.validate().is_err());
+    }
+
+    #[test]
+    fn zero_outputs_are_live_but_not_ready() {
+        let value = ServiceReadiness {
+            ipc_available: true,
+            canonical_scene_available: true,
+            renderer_available: true,
+            configured_output_count: 0,
+            ready_output_count: 0,
+            failed_output_count: 0,
+            retry_pending_output_count: 0,
+            state: ServiceReadinessState::LiveNotReady,
+            outputs: vec![],
+        };
+        value.validate().unwrap();
+        assert_ne!(value.state, ServiceReadinessState::Ready);
     }
 }
 
