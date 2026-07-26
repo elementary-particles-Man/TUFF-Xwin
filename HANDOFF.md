@@ -103,6 +103,11 @@
     * ConfigureOutput 後は awaiting publication、generation-matched publication 後のみ Ready、retry は対象 output 単位で RetryPending とする。
     * zero output は live だが display-ready ではない。production display backend には接続していない。
 
+11. **Authoritative CI validation gate**
+    * push と pull request の CI で fmt、`cargo check --all-targets`（`-D warnings`）、`cargo test --all-targets`、全 features の Clippy、`bash scripts/dev-check.sh` を独立した必須 step として実行する。
+    * CI は `DISPLAY` / `WAYLAND_DISPLAY` を空にし、専用の空 runtime directory を使うため、production display system へ接続しない。
+    * 既存の `scripts/dev-check.sh` は Git 上で executable（100755）であり、CI では bash 経由で実行する。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 
