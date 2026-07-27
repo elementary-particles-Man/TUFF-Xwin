@@ -92,6 +92,10 @@ pub enum ImeEvent {
 pub enum DisplayCommand {
     GetLiveness,
     GetReadiness,
+    CompletePresentation {
+        token: PresentationToken,
+        outcome: PresentationCompletion,
+    },
     EnumerateOutputs,
     ConfigureOutput {
         geometry: OutputGeometry,
@@ -184,6 +188,10 @@ pub enum DisplayEvent {
         responsive: bool,
     },
     Readiness(ServiceReadiness),
+    PresentationCompleted {
+        token: PresentationToken,
+        outcome: PresentationCompletion,
+    },
     OutputInventory {
         outputs: Vec<OutputMode>,
     },
@@ -249,6 +257,39 @@ pub enum DisplayEvent {
     ResumeStarted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PresentationToken {
+    pub backend_instance_id: u64,
+    pub sequence: u64,
+    pub output_id: String,
+    pub output_generation: u64,
+    pub scene_generation: u64,
+    pub frame_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum PresentationCompletion {
+    Presented,
+    Failed { reason: PublicationFailure },
+    Superseded,
+    StaleGeneration,
+    UnknownToken,
+    BackendUnavailable,
+}
+
+impl PresentationToken {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.backend_instance_id == 0 || self.sequence == 0 || self.output_id.is_empty() {
+            return Err("malformed presentation token".into());
+        }
+        if self.frame_id == 0 {
+            return Err("presentation token has invalid frame".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceReadiness {
     pub ipc_available: bool,
@@ -286,6 +327,7 @@ pub struct OutputReadiness {
 #[serde(rename_all = "kebab-case")]
 pub enum OutputReadinessState {
     ConfiguredAwaitingPublication,
+    SubmittedAwaitingPresentation,
     Ready,
     PublicationFailed,
     RetryPending,
@@ -446,6 +488,25 @@ mod readiness_tests {
         value.validate().unwrap();
         assert_ne!(value.state, ServiceReadinessState::Ready);
     }
+
+    #[test]
+    fn presentation_token_and_completion_round_trip() {
+        let token = PresentationToken {
+            backend_instance_id: 3,
+            sequence: 4,
+            output_id: "a".into(),
+            output_generation: 0,
+            scene_generation: 9,
+            frame_id: 7,
+        };
+        token.validate().unwrap();
+        let completion =
+            PresentationCompletion::Failed { reason: PublicationFailure::BackendRejected };
+        let encoded = serde_json::to_string(&(token.clone(), completion.clone())).unwrap();
+        let decoded: (PresentationToken, PresentationCompletion) =
+            serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, (token, completion));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,6 +521,7 @@ pub struct OutputPublicationResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputPublicationOutcome {
     Published,
+    Submitted { token: PresentationToken },
     Failed(PublicationFailure),
 }
 

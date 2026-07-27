@@ -14,14 +14,16 @@ use waybroker_common::{
     CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputGeometry,
     OutputMode, OutputPublicationOutcome, OutputPublicationResult, OutputReadiness,
     OutputReadinessState, PixelTransportError, PixelTransportPayload, PixelTransportStore,
-    PublicationFailure, ScenePublicationResult, ServiceBanner, ServiceEndpoint, ServiceReadiness,
-    ServiceReadinessState, ServiceRole, ServiceStream, accel::global_accel_policy,
-    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
-    sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
+    PresentationCompletion, PresentationToken, PublicationFailure, ScenePublicationResult,
+    ServiceBanner, ServiceEndpoint, ServiceReadiness, ServiceReadinessState, ServiceRole,
+    ServiceStream, accel::global_accel_policy, bind_service_socket, ensure_runtime_dir,
+    now_unix_timestamp, read_json_line, sanitize_artifact_filename, send_json_line,
+    session_artifact_path, validate_artifact_filename,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
 const BACKGROUND_PIXEL: u32 = 0xFF00_0000;
+const MOCK_BACKEND_INSTANCE_ID: u64 = 1;
 #[cfg(test)]
 const FRAMEBUFFER_WIDTH: u32 = 1920;
 #[cfg(test)]
@@ -345,6 +347,11 @@ async fn handle_display_command(
             // The deterministic CPU renderer is always available; Vulkan is only acceleration.
             let _ = vulkan;
             Ok(DisplayEvent::Readiness(readiness_from_state(state, true)))
+        }
+        DisplayCommand::CompletePresentation { token, outcome } => {
+            display_backend.retire_submission(&token);
+            let result = complete_presentation(state, token.clone(), outcome.clone());
+            Ok(DisplayEvent::PresentationCompleted { token, outcome: result })
         }
         DisplayCommand::EnumerateOutputs => {
             let outputs = display_backend.enumerate_outputs()?;
@@ -882,7 +889,7 @@ async fn handle_multi_output_commit(
             origin_y: runtime.state.origin_y,
             output_generation: runtime.state.generation,
         };
-        let publication = display_backend.publish_frame(FramePublication {
+        let frame = FramePublication {
             frame_id,
             output_id: output_id.clone(),
             output_generation: runtime.state.generation,
@@ -892,7 +899,8 @@ async fn handle_multi_output_commit(
             stride: runtime.state.stride,
             pixels: std::sync::Arc::<[u32]>::from(scratch.clone()),
             damage: damage.clone(),
-        });
+        };
+        let publication = display_backend.submit_frame(frame.clone());
         if let Err(_error) = publication {
             runtime.retry = Some(OutputRetryState {
                 scene_generation,
@@ -909,19 +917,35 @@ async fn handle_multi_output_commit(
             });
             break;
         }
-        runtime.framebuffer = scratch;
-        runtime.published_frame_id = frame_id;
+        let token = publication.expect("submission result checked above");
+        runtime.submitted_frame_id = frame_id;
+        if let Some(previous) = runtime.outstanding.take() {
+            runtime.superseded_tokens.push(previous.token);
+            if runtime.superseded_tokens.len() > 2 {
+                runtime.superseded_tokens.remove(0);
+            }
+        }
+        runtime.outstanding = Some(OutstandingPresentation { token: token.clone(), frame });
         runtime.next_frame_id = frame_id.saturating_add(1);
-        runtime.last_published_scene_generation = scene_generation;
-        runtime.pending_damage.clear();
-        runtime.retry = None;
+        let output_generation = runtime.state.generation;
         publication_results.push(OutputPublicationResult {
             output_id: output_id.clone(),
-            output_generation: runtime.state.generation,
+            output_generation,
             frame_id,
             scene_generation,
-            outcome: OutputPublicationOutcome::Published,
+            outcome: OutputPublicationOutcome::Submitted { token },
         });
+        let auto_complete = display_backend.submission_completes_immediately();
+        let completion_token = match publication_results.last().map(|result| &result.outcome) {
+            Some(OutputPublicationOutcome::Submitted { token }) => Some(token.clone()),
+            _ => None,
+        };
+        let _ = runtime;
+        if auto_complete {
+            if let Some(token) = completion_token {
+                let _ = complete_presentation(state, token, PresentationCompletion::Presented);
+            }
+        }
         let _ = stats;
     }
     let commit_id = state.next_commit_id;
@@ -1010,6 +1034,15 @@ struct OutputRuntime {
     last_published_scene_generation: u64,
     pending_damage: Vec<RendererRect>,
     retry: Option<OutputRetryState>,
+    submitted_frame_id: u64,
+    outstanding: Option<OutstandingPresentation>,
+    superseded_tokens: Vec<PresentationToken>,
+}
+
+#[derive(Debug, Clone)]
+struct OutstandingPresentation {
+    token: PresentationToken,
+    frame: FramePublication,
 }
 
 #[derive(Debug, Clone)]
@@ -1029,6 +1062,9 @@ impl OutputRuntime {
             last_published_scene_generation: 0,
             pending_damage: Vec::new(),
             retry: None,
+            submitted_frame_id: 0,
+            outstanding: None,
+            superseded_tokens: Vec::new(),
         }
     }
 }
@@ -1110,6 +1146,22 @@ trait DisplayBackend {
     fn set_mode(&mut self, output: &str, mode: &OutputMode) -> Result<()>;
     fn set_gamma(&mut self, output: &str, red: &[u16], green: &[u16], blue: &[u16]) -> Result<()>;
     fn publish_frame(&mut self, request: FramePublication) -> Result<()>;
+    fn submission_completes_immediately(&self) -> bool {
+        false
+    }
+    fn retire_submission(&mut self, _token: &PresentationToken) {}
+    fn submit_frame(&mut self, request: FramePublication) -> Result<PresentationToken> {
+        let token = PresentationToken {
+            backend_instance_id: 1,
+            sequence: request.frame_id,
+            output_id: request.output_id.clone(),
+            output_generation: request.output_generation,
+            scene_generation: request.scene_generation,
+            frame_id: request.frame_id,
+        };
+        self.publish_frame(request)?;
+        Ok(token)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1125,11 +1177,26 @@ struct FramePublication {
     damage: Vec<RendererRect>,
 }
 
-#[derive(Default)]
 struct MockDisplayBackend {
     publications: Vec<FramePublication>,
     fail_on_frame: Option<u64>,
     fail_on_output: Option<String>,
+    auto_complete: bool,
+    next_token_sequence: u64,
+    pending_submissions: BTreeMap<PresentationToken, FramePublication>,
+}
+
+impl Default for MockDisplayBackend {
+    fn default() -> Self {
+        Self {
+            publications: Vec::new(),
+            fail_on_frame: None,
+            fail_on_output: None,
+            auto_complete: false,
+            next_token_sequence: 1,
+            pending_submissions: BTreeMap::new(),
+        }
+    }
 }
 
 impl MockDisplayBackend {
@@ -1142,8 +1209,18 @@ impl MockDisplayBackend {
         self.fail_on_output = Some(output_id.into());
     }
     #[cfg(test)]
+    #[allow(dead_code)]
+    fn set_auto_complete(&mut self, enabled: bool) {
+        self.auto_complete = enabled;
+    }
+    #[cfg(test)]
     fn publications(&self) -> &[FramePublication] {
         &self.publications
+    }
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn pending_submissions(&self) -> usize {
+        self.pending_submissions.len()
     }
 }
 
@@ -1170,6 +1247,10 @@ impl DisplayBackend for FakeDisplayBackend {
     fn publish_frame(&mut self, _request: FramePublication) -> Result<()> {
         Ok(())
     }
+
+    fn submission_completes_immediately(&self) -> bool {
+        true
+    }
 }
 
 impl DisplayBackend for MockDisplayBackend {
@@ -1193,6 +1274,33 @@ impl DisplayBackend for MockDisplayBackend {
         }
         self.publications.push(request);
         Ok(())
+    }
+    fn submission_completes_immediately(&self) -> bool {
+        self.auto_complete
+    }
+    fn submit_frame(&mut self, request: FramePublication) -> Result<PresentationToken> {
+        if self.fail_on_frame == Some(request.frame_id)
+            || self.fail_on_output.as_deref() == Some(request.output_id.as_str())
+        {
+            bail!("mock submission failure for frame {}", request.frame_id);
+        }
+        let token = PresentationToken {
+            backend_instance_id: MOCK_BACKEND_INSTANCE_ID,
+            sequence: self.next_token_sequence,
+            output_id: request.output_id.clone(),
+            output_generation: request.output_generation,
+            scene_generation: request.scene_generation,
+            frame_id: request.frame_id,
+        };
+        self.next_token_sequence = self.next_token_sequence.saturating_add(1);
+        self.publications.push(request.clone());
+        if !self.auto_complete {
+            self.pending_submissions.insert(token.clone(), request);
+        }
+        Ok(token)
+    }
+    fn retire_submission(&mut self, token: &PresentationToken) {
+        self.pending_submissions.remove(token);
     }
 }
 
@@ -1947,6 +2055,8 @@ fn readiness_from_state(state: &DisplayState, renderer_available: bool) -> Servi
             let retry_pending = runtime.retry.is_some();
             let output_state = if retry_pending {
                 OutputReadinessState::RetryPending
+            } else if runtime.outstanding.is_some() {
+                OutputReadinessState::SubmittedAwaitingPresentation
             } else if runtime.published_frame_id != 0 && runtime.pending_damage.is_empty() {
                 OutputReadinessState::Ready
             } else {
@@ -1993,6 +2103,59 @@ fn readiness_from_state(state: &DisplayState, renderer_available: bool) -> Servi
         retry_pending_output_count: retry,
         state: state_value,
         outputs,
+    }
+}
+
+fn complete_presentation(
+    state: &mut DisplayState,
+    token: PresentationToken,
+    outcome: PresentationCompletion,
+) -> PresentationCompletion {
+    if token.validate().is_err() {
+        return PresentationCompletion::UnknownToken;
+    }
+    if token.backend_instance_id != MOCK_BACKEND_INSTANCE_ID {
+        return PresentationCompletion::UnknownToken;
+    }
+    let Some(runtime) = state.outputs.get_mut(&token.output_id) else {
+        return PresentationCompletion::UnknownToken;
+    };
+    if let Some(index) = runtime.superseded_tokens.iter().position(|old| old == &token) {
+        runtime.superseded_tokens.remove(index);
+        return PresentationCompletion::Superseded;
+    }
+    if runtime.state.generation != token.output_generation {
+        return PresentationCompletion::StaleGeneration;
+    }
+    let Some(outstanding) = runtime.outstanding.clone() else {
+        if runtime.published_frame_id == token.frame_id {
+            return PresentationCompletion::Presented;
+        }
+        return PresentationCompletion::UnknownToken;
+    };
+    if outstanding.token != token {
+        return PresentationCompletion::UnknownToken;
+    }
+    runtime.outstanding = None;
+    match outcome {
+        PresentationCompletion::Presented => {
+            runtime.framebuffer = outstanding.frame.pixels.to_vec();
+            runtime.published_frame_id = token.frame_id;
+            runtime.last_published_scene_generation = token.scene_generation;
+            runtime.pending_damage.clear();
+            runtime.retry = None;
+            PresentationCompletion::Presented
+        }
+        PresentationCompletion::Failed { reason } => {
+            runtime.pending_damage = outstanding.frame.damage;
+            runtime.retry = Some(OutputRetryState {
+                scene_generation: token.scene_generation,
+                output_generation: token.output_generation,
+                frame_id: token.frame_id,
+            });
+            PresentationCompletion::Failed { reason }
+        }
+        other => other,
     }
 }
 
@@ -2775,6 +2938,58 @@ mod tests {
         assert_eq!(readiness.outputs[1].state, OutputReadinessState::RetryPending);
         assert_eq!(readiness.ready_output_count, 1);
         assert_eq!(readiness.retry_pending_output_count, 1);
+    }
+
+    #[test]
+    fn submission_is_not_ready_until_matching_completion() {
+        let mut state = DisplayState::new_test();
+        let runtime = state.outputs.get_mut("eDP-1").unwrap();
+        let token = PresentationToken {
+            backend_instance_id: 1,
+            sequence: 1,
+            output_id: "eDP-1".into(),
+            output_generation: runtime.state.generation,
+            scene_generation: 4,
+            frame_id: 1,
+        };
+        let frame = FramePublication {
+            frame_id: 1,
+            output_id: "eDP-1".into(),
+            output_generation: runtime.state.generation,
+            scene_generation: 4,
+            geometry: OutputGeometry {
+                output_id: "eDP-1".into(),
+                width: runtime.state.width,
+                height: runtime.state.height,
+                stride: runtime.state.stride,
+                format: runtime.state.format,
+                origin_x: runtime.state.origin_x,
+                origin_y: runtime.state.origin_y,
+                output_generation: runtime.state.generation,
+            },
+            format: runtime.state.format,
+            stride: runtime.state.stride,
+            pixels: std::sync::Arc::from(vec![BACKGROUND_PIXEL; runtime.state.framebuffer_words()]),
+            damage: vec![],
+        };
+        runtime.submitted_frame_id = 1;
+        runtime.outstanding = Some(OutstandingPresentation { token: token.clone(), frame });
+        assert_eq!(
+            readiness_from_state(&state, true).outputs[0].state,
+            OutputReadinessState::SubmittedAwaitingPresentation
+        );
+        assert_eq!(
+            complete_presentation(&mut state, token.clone(), PresentationCompletion::Presented),
+            PresentationCompletion::Presented
+        );
+        assert_eq!(
+            readiness_from_state(&state, true).outputs[0].state,
+            OutputReadinessState::Ready
+        );
+        assert_eq!(
+            complete_presentation(&mut state, token, PresentationCompletion::Presented),
+            PresentationCompletion::Presented
+        );
     }
 
     #[test]
@@ -4243,6 +4458,7 @@ exit 0
         scene_generation: u64,
     ) -> DisplayEvent {
         let mut display_backend = MockDisplayBackend::default();
+        display_backend.set_auto_complete(true);
         commit_test_scene_with_backend(
             state,
             surfaces,
@@ -4861,6 +5077,7 @@ exit 0
     async fn actual_commit_path_publishes_immutable_frame_in_order() {
         let mut state = DisplayState::new_test();
         let mut backend = MockDisplayBackend::default();
+        backend.set_auto_complete(true);
         let first = commit_test_scene_with_backend(
             &mut state,
             vec![test_surface("one", 0, 0, 2, 2, 1, None)],
@@ -4893,6 +5110,7 @@ exit 0
         let mut state = DisplayState::new_test();
         let before = state.outputs["eDP-1"].framebuffer.clone();
         let mut failing = MockDisplayBackend::default();
+        failing.set_auto_complete(true);
         failing.set_fail_on_frame(1);
         let rejected = commit_test_scene_with_backend(
             &mut state,
@@ -4908,6 +5126,7 @@ exit 0
         assert_eq!(state.last_scene_generation, 1);
 
         let mut retry = MockDisplayBackend::default();
+        retry.set_auto_complete(true);
         let accepted = commit_test_scene_with_backend(
             &mut state,
             vec![test_surface("one", 0, 0, 2, 2, 1, None)],
@@ -4957,6 +5176,7 @@ exit 0
         let capture = FakeCaptureBackend;
         let mut record = FakeRecordBackend;
         let mut display = MockDisplayBackend::default();
+        display.set_auto_complete(true);
         let mut clock = FakePresentationClock;
         let geometry = OutputGeometry {
             output_id: "right".into(),
@@ -5031,6 +5251,7 @@ exit 0
             ),
         );
         let mut failing = MockDisplayBackend::default();
+        failing.set_auto_complete(true);
         failing.set_fail_on_output("right");
         let rejected = commit_test_scene_with_backend(
             &mut state,
@@ -5046,6 +5267,7 @@ exit 0
         assert!(state.outputs["right"].retry.is_some());
 
         let mut retry = MockDisplayBackend::default();
+        retry.set_auto_complete(true);
         let accepted = commit_test_scene_with_backend(
             &mut state,
             vec![test_surface("spanning", 1918, 0, 8, 2, 1, None)],

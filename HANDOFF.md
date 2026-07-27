@@ -108,6 +108,13 @@
     * CI は `DISPLAY` / `WAYLAND_DISPLAY` を空にし、専用の空 runtime directory を使うため、production display system へ接続しない。
     * 既存の `scripts/dev-check.sh` は Git 上で executable（100755）であり、CI では bash 経由で実行する。
 
+12. **Frame submission と presentation completion の分離**
+    * `PresentationToken` を output、generation、scene、frame、backend instance に束縛し、submission 成功と completion を typed state として分離した。
+    * `OutputRuntime` は outstanding immutable frame、submitted frame identity、presented frame identity を output 単位で保持する。
+    * readiness は submission 後を `SubmittedAwaitingPresentation`、matching `Presented` completion 後だけを `Ready` とする。
+    * duplicate、unknown、cross-output、stale generation completion は fail-closed。superseded token は newer frame を後退させない。
+    * MockDisplayBackend は deterministic pending submission と bounded token retention を持つ。production display backend は追加・接続していない。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 
