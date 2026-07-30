@@ -25,6 +25,7 @@ impl IpcEnvelope {
 pub enum MessageKind {
     DisplayCommand(DisplayCommand),
     DisplayEvent(DisplayEvent),
+    BackendOutputEvent(BackendOutputEvent),
     WaylandCommand(WaylandCommand),
     WaylandEvent(WaylandEvent),
     LockCommand(LockCommand),
@@ -368,6 +369,42 @@ pub enum OutputReadinessState {
     PublicationFailed,
     RetryPending,
     Reconfiguring,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "kebab-case")]
+pub enum BackendOutputEvent {
+    Connected {
+        backend_instance_id: u64,
+        backend_output_id: String,
+        event_sequence: u64,
+        geometry: OutputGeometry,
+        cadence: PresentationCadence,
+    },
+    Reconfigured {
+        backend_instance_id: u64,
+        backend_output_id: String,
+        event_sequence: u64,
+        geometry: OutputGeometry,
+        cadence: PresentationCadence,
+    },
+    Disabled {
+        backend_instance_id: u64,
+        backend_output_id: String,
+        event_sequence: u64,
+        output_generation: u64,
+    },
+    Disconnected {
+        backend_instance_id: u64,
+        backend_output_id: String,
+        event_sequence: u64,
+        output_generation: u64,
+    },
+    BackendReset {
+        backend_instance_id: u64,
+        event_sequence: u64,
+    },
 }
 
 impl ServiceReadiness {

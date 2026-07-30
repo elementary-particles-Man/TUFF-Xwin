@@ -146,6 +146,13 @@
     * headless capture は presented frame のみを noninteractive に artifact 化する。allocation、mapping、copy、atomic publish、completion の test-only failure injection と、multi-output／generation／output removal isolation を追加した。
     * DRM、KMS、Wayland host compositor、X11、Vulkan presentation、portal capture、physical display は未実装または未実行。
 
+18. **Backend-driven output lifecycle**
+    * `BackendOutputEvent` に Connected、Reconfigured、Disabled、Disconnected、BackendReset を追加し、backend instance、stable backend output identity、event sequence、generation、geometry、cadence を typed に運ぶ。
+    * `DisplayBackend::poll_output_events` は bounded queue を返し、displayd が sequence／identity／generation を検証した後、単一の transactional lifecycle transition で registry を更新する。manual ConfigureOutput／RemoveOutput も同じ transition を使う。
+    * headless backend は明示的な `TUFF_XWIN_DISPLAY_BACKEND=headless-shm` 選択時に Connected event を生成し、Mock backend は test-controlled queue を持つ。duplicate sequence は idempotent、backward sequence、identity collision、stale generation は fail-closed。
+    * reconfigure は full damage と新 generation、disable は Disabled readiness と submission 停止、disconnect/reset は backend-owned runtime／shared-memory／token state を除去する。canonical scene と PixelTransportStore は保持する。
+    * physical output discovery、DRM、KMS、host Wayland、X11、Vulkan presentation、real portal capture は実装・実行していない。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 

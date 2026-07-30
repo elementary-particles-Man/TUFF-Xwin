@@ -6,15 +6,16 @@ mod transport;
 
 pub use accel::{AccelPolicy, SimdFlavor};
 pub use ipc::{
-    CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget,
-    ForeignToplevelHandle, HealthState, ImeBridgeMode, ImeCommand, ImeEvent, ImeStatus,
-    IpcEnvelope, LayerMetadata, LockCommand, LockState, MessageKind, OutputGeometry, OutputMode,
-    OutputPublicationOutcome, OutputPublicationResult, OutputReadiness, OutputReadinessState,
-    PointerConstraints, PresentationCadence, PresentationCompletion, PresentationSchedulerState,
-    PresentationToken, PublicationFailure, Rect, ResumeStage, ScenePublicationResult,
-    ServiceReadiness, ServiceReadinessState, SessionCommand, SurfacePlacement,
-    SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand, WaylandCommand, WaylandEvent,
-    WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
+    BackendOutputEvent, CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent,
+    FocusTarget, ForeignToplevelHandle, HealthState, ImeBridgeMode, ImeCommand, ImeEvent,
+    ImeStatus, IpcEnvelope, LayerMetadata, LockCommand, LockState, MessageKind, OutputGeometry,
+    OutputMode, OutputPublicationOutcome, OutputPublicationResult, OutputReadiness,
+    OutputReadinessState, PointerConstraints, PresentationCadence, PresentationCompletion,
+    PresentationSchedulerState, PresentationToken, PublicationFailure, Rect, ResumeStage,
+    ScenePublicationResult, ServiceReadiness, ServiceReadinessState, SessionCommand,
+    SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand, WaylandCommand,
+    WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
+    WaylandSurfaceState,
 };
 pub use pixel_transport::{
     PixelTransportError, PixelTransportHandle, PixelTransportPayload, PixelTransportStore,
@@ -86,10 +87,11 @@ impl ServiceBanner {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope,
-        MessageKind, OutputMode, ServiceBanner, ServiceRole, SurfacePlacement,
-        SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
-        WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
+        BackendOutputEvent, CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent,
+        FocusTarget, IpcEnvelope, MessageKind, OutputGeometry, OutputMode, PresentationCadence,
+        ServiceBanner, ServiceRole, SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot,
+        WaylandCommand, WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState,
+        WaylandSurfaceRole, WaylandSurfaceState,
     };
 
     #[test]
@@ -192,6 +194,34 @@ mod tests {
 
         assert!(json.contains("\"kind\":\"display-event\""));
         assert!(json.contains("\"op\":\"output-inventory\""));
+    }
+
+    #[test]
+    fn roundtrips_backend_output_lifecycle_event() {
+        let event = BackendOutputEvent::Connected {
+            backend_instance_id: 2,
+            backend_output_id: "headless-0".into(),
+            event_sequence: 4,
+            geometry: OutputGeometry {
+                output_id: "headless-0".into(),
+                width: 64,
+                height: 32,
+                stride: 256,
+                format: 1,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation: 3,
+            },
+            cadence: PresentationCadence { period_ns: 16_666_667 },
+        };
+        let envelope = IpcEnvelope::new(
+            ServiceRole::Displayd,
+            ServiceRole::Compd,
+            MessageKind::BackendOutputEvent(event),
+        );
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let decoded: IpcEnvelope = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, envelope);
     }
 
     #[test]

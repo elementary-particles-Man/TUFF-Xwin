@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     env, fs,
     io::BufReader,
     path::{Path, PathBuf},
@@ -14,14 +14,15 @@ use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
 };
 use waybroker_common::{
-    CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputGeometry,
-    OutputMode, OutputPublicationOutcome, OutputPublicationResult, OutputReadiness,
-    OutputReadinessState, PixelTransportError, PixelTransportPayload, PixelTransportStore,
-    PresentationCadence, PresentationCompletion, PresentationSchedulerState, PresentationToken,
-    PublicationFailure, ScenePublicationResult, ServiceBanner, ServiceEndpoint, ServiceReadiness,
-    ServiceReadinessState, ServiceRole, ServiceStream, accel::global_accel_policy,
-    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
-    sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
+    BackendOutputEvent, CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope,
+    MessageKind, OutputGeometry, OutputMode, OutputPublicationOutcome, OutputPublicationResult,
+    OutputReadiness, OutputReadinessState, PixelTransportError, PixelTransportPayload,
+    PixelTransportStore, PresentationCadence, PresentationCompletion, PresentationSchedulerState,
+    PresentationToken, PublicationFailure, ScenePublicationResult, ServiceBanner, ServiceEndpoint,
+    ServiceReadiness, ServiceReadinessState, ServiceRole, ServiceStream,
+    accel::global_accel_policy, bind_service_socket, ensure_runtime_dir, now_unix_timestamp,
+    read_json_line, sanitize_artifact_filename, send_json_line, session_artifact_path,
+    validate_artifact_filename,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
@@ -59,6 +60,9 @@ async fn main() -> Result<()> {
     };
 
     let mut state = DisplayState::load(&config.session_instance_id)?;
+    if config.display_backend == DisplayBackendType::HeadlessShm {
+        state.outputs.clear();
+    }
     let mut clock = FakePresentationClock;
 
     let capture_backend: Box<dyn CaptureBackend> = match config.capture_backend {
@@ -76,7 +80,20 @@ async fn main() -> Result<()> {
     let mut record_backend = FakeRecordBackend;
     let mut display_backend: Box<dyn DisplayBackend> = match config.display_backend {
         DisplayBackendType::Mock => Box::new(MockDisplayBackend::default()),
-        DisplayBackendType::HeadlessShm => Box::new(HeadlessShmDisplayBackend::default()),
+        DisplayBackendType::HeadlessShm => {
+            let mut backend = HeadlessShmDisplayBackend::default();
+            backend.queue_connected_output(OutputGeometry {
+                output_id: "headless-0".into(),
+                width: 1920,
+                height: 1080,
+                stride: 1920 * 4,
+                format: WL_SHM_FORMAT_XRGB8888,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation: 1,
+            });
+            Box::new(backend)
+        }
         DisplayBackendType::Unavailable => bail!("production display backend is unavailable"),
     };
 
@@ -294,6 +311,7 @@ async fn handle_client(
     record_backend: &mut dyn RecordBackend,
     display_backend: &mut dyn DisplayBackend,
 ) -> Result<()> {
+    apply_backend_output_events(state, display_backend)?;
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
@@ -311,6 +329,118 @@ async fn handle_client(
     )
     .await?;
     send_json_line(&mut stream, &response)?;
+    Ok(())
+}
+
+fn apply_backend_output_events(
+    state: &mut DisplayState,
+    display_backend: &mut dyn DisplayBackend,
+) -> Result<()> {
+    for event in display_backend.poll_output_events()? {
+        apply_backend_output_event(state, display_backend, event)?;
+    }
+    Ok(())
+}
+
+fn apply_backend_output_event(
+    state: &mut DisplayState,
+    display_backend: &mut dyn DisplayBackend,
+    event: BackendOutputEvent,
+) -> Result<()> {
+    let (backend_instance_id, sequence) = match &event {
+        BackendOutputEvent::Connected { backend_instance_id, event_sequence, .. }
+        | BackendOutputEvent::Reconfigured { backend_instance_id, event_sequence, .. }
+        | BackendOutputEvent::Disabled { backend_instance_id, event_sequence, .. }
+        | BackendOutputEvent::Disconnected { backend_instance_id, event_sequence, .. }
+        | BackendOutputEvent::BackendReset { backend_instance_id, event_sequence } => {
+            (*backend_instance_id, *event_sequence)
+        }
+    };
+    if let Some(previous) = state.backend_sequences.get(&backend_instance_id) {
+        if sequence == *previous {
+            return Ok(());
+        }
+        if sequence < *previous {
+            bail!("backend output event sequence moved backwards");
+        }
+    }
+    match event {
+        BackendOutputEvent::Connected { backend_output_id, geometry, cadence, .. }
+        | BackendOutputEvent::Reconfigured { backend_output_id, geometry, cadence, .. } => {
+            cadence.validate().map_err(|reason| anyhow::anyhow!(reason))?;
+            let mapped_id = backend_output_id.clone();
+            if geometry.output_id != mapped_id {
+                bail!("backend output identity does not match geometry output_id");
+            }
+            let next_state =
+                OutputState::validate(&geometry).map_err(|reason| anyhow::anyhow!(reason))?;
+            if let Some(previous) = state.outputs.get(&mapped_id) {
+                if previous.backend_instance_id != 0
+                    && previous.backend_instance_id != backend_instance_id
+                {
+                    bail!("backend output identity collision");
+                }
+                if next_state.generation <= previous.state.generation {
+                    bail!("backend output generation is stale");
+                }
+                if let Some(outstanding) = &previous.outstanding {
+                    display_backend.retire_submission(&outstanding.token);
+                }
+                display_backend.reconfigure_output(&mapped_id, next_state.generation)?;
+            }
+            let mut runtime = OutputRuntime::new(next_state);
+            runtime.backend_instance_id = backend_instance_id;
+            runtime.backend_output_id = backend_output_id;
+            runtime.scheduler.cadence = cadence;
+            runtime.pending_damage = vec![runtime.state.bounds()];
+            runtime.pending_scene_generation = state.last_scene_generation;
+            state.outputs.insert(mapped_id, runtime);
+        }
+        BackendOutputEvent::Disabled { backend_output_id, output_generation, .. } => {
+            let runtime = state
+                .outputs
+                .get_mut(&backend_output_id)
+                .ok_or_else(|| anyhow::anyhow!("backend disabled unknown output"))?;
+            if runtime.backend_instance_id != backend_instance_id
+                || runtime.state.generation != output_generation
+            {
+                bail!("backend disabled event generation or identity mismatch");
+            }
+            if let Some(outstanding) = runtime.outstanding.take() {
+                display_backend.retire_submission(&outstanding.token);
+            }
+            display_backend.remove_output(&backend_output_id);
+            runtime.pending_damage.clear();
+            runtime.retry = None;
+            runtime.disabled = true;
+        }
+        BackendOutputEvent::Disconnected { backend_output_id, output_generation, .. } => {
+            let runtime = state
+                .outputs
+                .get(&backend_output_id)
+                .ok_or_else(|| anyhow::anyhow!("backend disconnected unknown output"))?;
+            if runtime.backend_instance_id != backend_instance_id
+                || runtime.state.generation != output_generation
+            {
+                bail!("backend disconnect event generation or identity mismatch");
+            }
+            display_backend.remove_output(&backend_output_id);
+            state.outputs.remove(&backend_output_id);
+        }
+        BackendOutputEvent::BackendReset { backend_instance_id, .. } => {
+            let outputs: Vec<String> = state
+                .outputs
+                .iter()
+                .filter(|(_, runtime)| runtime.backend_instance_id == backend_instance_id)
+                .map(|(output_id, _)| output_id.clone())
+                .collect();
+            for output_id in outputs {
+                display_backend.remove_output(&output_id);
+                state.outputs.remove(&output_id);
+            }
+        }
+    }
+    state.backend_sequences.insert(backend_instance_id, sequence);
     Ok(())
 }
 
@@ -423,21 +553,20 @@ async fn handle_display_command(
             Ok(DisplayEvent::OutputInventory { outputs })
         }
         DisplayCommand::ConfigureOutput { geometry } => {
-            let next = OutputState::validate(&geometry).map_err(|reason| anyhow::anyhow!(reason));
-            let next = match next {
-                Ok(value) => value,
-                Err(error) => return Ok(DisplayEvent::Rejected { reason: error.to_string() }),
-            };
-            if state
-                .outputs
-                .get(&geometry.output_id)
-                .map(|runtime| next.generation <= runtime.state.generation)
-                .unwrap_or(false)
-            {
-                return Ok(DisplayEvent::Rejected { reason: "stale output generation".into() });
+            let sequence = state.backend_sequences.get(&0).copied().unwrap_or(0).saturating_add(1);
+            if let Err(error) = apply_backend_output_event(
+                state,
+                display_backend,
+                BackendOutputEvent::Reconfigured {
+                    backend_instance_id: 0,
+                    backend_output_id: geometry.output_id.clone(),
+                    event_sequence: sequence,
+                    geometry: geometry.clone(),
+                    cadence: PresentationCadence { period_ns: 16_666_667 },
+                },
+            ) {
+                return Ok(DisplayEvent::Rejected { reason: error.to_string() });
             }
-            display_backend.reconfigure_output(&geometry.output_id, geometry.output_generation)?;
-            state.outputs.insert(geometry.output_id.clone(), OutputRuntime::new(next));
             Ok(DisplayEvent::ModeApplied {
                 output: geometry.output_id.clone(),
                 mode: OutputMode {
@@ -449,14 +578,19 @@ async fn handle_display_command(
             })
         }
         DisplayCommand::RemoveOutput { output_id, output_generation } => {
-            let Some(runtime) = state.outputs.get(&output_id) else {
-                return Ok(DisplayEvent::Rejected { reason: "unknown output".into() });
-            };
-            if runtime.state.generation != output_generation {
-                return Ok(DisplayEvent::Rejected { reason: "stale output generation".into() });
+            let sequence = state.backend_sequences.get(&0).copied().unwrap_or(0).saturating_add(1);
+            if let Err(error) = apply_backend_output_event(
+                state,
+                display_backend,
+                BackendOutputEvent::Disconnected {
+                    backend_instance_id: 0,
+                    backend_output_id: output_id.clone(),
+                    event_sequence: sequence,
+                    output_generation,
+                },
+            ) {
+                return Ok(DisplayEvent::Rejected { reason: error.to_string() });
             }
-            display_backend.remove_output(&output_id);
-            state.outputs.remove(&output_id);
             Ok(DisplayEvent::BlankApplied { output: Some(output_id) })
         }
         DisplayCommand::SetMode { output, mode } => {
@@ -1003,6 +1137,9 @@ async fn handle_multi_output_commit(
             }
         }
         let runtime = state.outputs.get_mut(&output_id).expect("output id collected from registry");
+        if runtime.disabled {
+            continue;
+        }
         if runtime.published_frame_id != 0
             && runtime.last_published_scene_generation == scene_generation
             && runtime.pending_damage.is_empty()
@@ -1225,11 +1362,15 @@ struct DisplayState {
     composition_frame_count: u64,
     outputs: BTreeMap<String, OutputRuntime>,
     pixel_transport: PixelTransportStore,
+    backend_sequences: BTreeMap<u64, u64>,
 }
 
 #[derive(Debug, Clone)]
 struct OutputRuntime {
     state: OutputState,
+    backend_instance_id: u64,
+    backend_output_id: String,
+    disabled: bool,
     framebuffer: Vec<u32>,
     next_frame_id: u64,
     published_frame_id: u64,
@@ -1272,6 +1413,9 @@ impl OutputRuntime {
         let generation = state.generation;
         Self {
             state,
+            backend_instance_id: 0,
+            backend_output_id: String::new(),
+            disabled: false,
             framebuffer: Vec::new(),
             next_frame_id: 1,
             published_frame_id: 0,
@@ -1368,6 +1512,9 @@ trait RecordBackend {
 }
 
 trait DisplayBackend {
+    fn poll_output_events(&mut self) -> Result<Vec<BackendOutputEvent>> {
+        Ok(Vec::new())
+    }
     fn enumerate_outputs(&self) -> Result<Vec<OutputMode>>;
     fn set_mode(&mut self, output: &str, mode: &OutputMode) -> Result<()>;
     fn set_gamma(&mut self, output: &str, red: &[u16], green: &[u16], blue: &[u16]) -> Result<()>;
@@ -1420,6 +1567,7 @@ struct MockDisplayBackend {
     auto_complete: bool,
     next_token_sequence: u64,
     pending_submissions: BTreeMap<PresentationToken, FramePublication>,
+    output_events: VecDeque<BackendOutputEvent>,
 }
 
 impl Default for MockDisplayBackend {
@@ -1431,11 +1579,16 @@ impl Default for MockDisplayBackend {
             auto_complete: false,
             next_token_sequence: 1,
             pending_submissions: BTreeMap::new(),
+            output_events: VecDeque::new(),
         }
     }
 }
 
 impl MockDisplayBackend {
+    #[cfg(test)]
+    fn queue_output_event(&mut self, event: BackendOutputEvent) {
+        self.output_events.push_back(event);
+    }
     #[cfg(test)]
     fn set_fail_on_frame(&mut self, frame_id: u64) {
         self.fail_on_frame = Some(frame_id);
@@ -1490,6 +1643,9 @@ impl DisplayBackend for FakeDisplayBackend {
 }
 
 impl DisplayBackend for MockDisplayBackend {
+    fn poll_output_events(&mut self) -> Result<Vec<BackendOutputEvent>> {
+        Ok(self.output_events.drain(..).collect())
+    }
     fn enumerate_outputs(&self) -> Result<Vec<OutputMode>> {
         Ok(vec![stub_output_mode()])
     }
@@ -1600,6 +1756,8 @@ struct HeadlessShmDisplayBackend {
     next_sequence: u64,
     #[cfg(test)]
     failure: Option<HeadlessShmFailure>,
+    output_events: VecDeque<BackendOutputEvent>,
+    next_event_sequence: u64,
 }
 
 #[cfg(test)]
@@ -1613,6 +1771,24 @@ enum HeadlessShmFailure {
 }
 
 impl HeadlessShmDisplayBackend {
+    fn queue_connected_output(&mut self, geometry: OutputGeometry) {
+        if self.next_event_sequence == 0 {
+            self.next_event_sequence = 1;
+        }
+        self.output_events.push_back(BackendOutputEvent::Connected {
+            backend_instance_id: HEADLESS_SHM_BACKEND_INSTANCE_ID,
+            backend_output_id: geometry.output_id.clone(),
+            event_sequence: self.next_event_sequence,
+            geometry,
+            cadence: PresentationCadence { period_ns: 16_666_667 },
+        });
+        self.next_event_sequence = self.next_event_sequence.saturating_add(1);
+    }
+
+    #[cfg(test)]
+    fn queue_output_event(&mut self, event: BackendOutputEvent) {
+        self.output_events.push_back(event);
+    }
     #[cfg(test)]
     fn inject_failure(&mut self, failure: HeadlessShmFailure) {
         self.failure = Some(failure);
@@ -1795,6 +1971,9 @@ impl HeadlessShmDisplayBackend {
 }
 
 impl DisplayBackend for HeadlessShmDisplayBackend {
+    fn poll_output_events(&mut self) -> Result<Vec<BackendOutputEvent>> {
+        Ok(self.output_events.drain(..).collect())
+    }
     fn enumerate_outputs(&self) -> Result<Vec<OutputMode>> {
         Ok(self
             .outputs
@@ -2561,6 +2740,7 @@ impl DisplayState {
             composition_frame_count: 0,
             outputs: default_output_registry(),
             pixel_transport: PixelTransportStore::default(),
+            backend_sequences: BTreeMap::new(),
         })
     }
 
@@ -2606,6 +2786,7 @@ impl DisplayState {
             composition_frame_count: 0,
             outputs: default_output_registry(),
             pixel_transport: PixelTransportStore::default(),
+            backend_sequences: BTreeMap::new(),
         }
     }
 }
@@ -2630,7 +2811,9 @@ fn readiness_from_state(state: &DisplayState, renderer_available: bool) -> Servi
         .iter()
         .map(|(output_id, runtime)| {
             let retry_pending = runtime.retry.is_some();
-            let output_state = if retry_pending {
+            let output_state = if runtime.disabled {
+                OutputReadinessState::Disabled
+            } else if retry_pending {
                 OutputReadinessState::RetryPending
             } else if runtime.outstanding.is_some() {
                 OutputReadinessState::SubmittedAwaitingPresentation
@@ -2771,6 +2954,11 @@ fn advance_presentation(
         || runtime.scheduler.output_generation != output_generation
     {
         bail!("stale output generation for {output_id}");
+    }
+    if runtime.disabled {
+        runtime.scheduler.last_tick_ns = now_ns;
+        runtime.scheduler.last_tick_sequence = tick_sequence;
+        return Ok(false);
     }
     if now_ns < runtime.scheduler.last_tick_ns {
         bail!("presentation clock moved backwards for {output_id}");
@@ -3638,6 +3826,126 @@ mod tests {
             DisplayBackendType::Unavailable
         );
         assert!(display_backend_from_env(Some("physical")).is_err());
+    }
+
+    #[test]
+    fn backend_output_events_drive_headless_registry_transactionally() {
+        let geometry = OutputGeometry {
+            output_id: "headless-0".into(),
+            width: 16,
+            height: 16,
+            stride: 64,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 1,
+        };
+        let mut state = DisplayState::new_test();
+        state.outputs.clear();
+        let mut backend = HeadlessShmDisplayBackend::default();
+        backend.queue_output_event(BackendOutputEvent::Connected {
+            backend_instance_id: HEADLESS_SHM_BACKEND_INSTANCE_ID,
+            backend_output_id: "headless-0".into(),
+            event_sequence: 1,
+            geometry: geometry.clone(),
+            cadence: PresentationCadence { period_ns: 1_000 },
+        });
+        apply_backend_output_events(&mut state, &mut backend).unwrap();
+        assert_eq!(state.outputs["headless-0"].pending_damage.len(), 1);
+        assert_eq!(state.outputs["headless-0"].scheduler.cadence.period_ns, 1_000);
+
+        backend.queue_output_event(BackendOutputEvent::Disabled {
+            backend_instance_id: HEADLESS_SHM_BACKEND_INSTANCE_ID,
+            backend_output_id: "headless-0".into(),
+            event_sequence: 2,
+            output_generation: 1,
+        });
+        apply_backend_output_events(&mut state, &mut backend).unwrap();
+        assert!(state.outputs["headless-0"].disabled);
+        assert_eq!(
+            readiness_from_state(&state, true).outputs[0].state,
+            OutputReadinessState::Disabled
+        );
+    }
+
+    #[test]
+    fn mock_backend_lifecycle_event_queue_is_typed_and_ordered() {
+        let mut backend = MockDisplayBackend::default();
+        backend.queue_output_event(BackendOutputEvent::BackendReset {
+            backend_instance_id: MOCK_BACKEND_INSTANCE_ID,
+            event_sequence: 1,
+        });
+        backend.queue_output_event(BackendOutputEvent::BackendReset {
+            backend_instance_id: MOCK_BACKEND_INSTANCE_ID,
+            event_sequence: 2,
+        });
+        let events = backend.poll_output_events().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(backend.poll_output_events().unwrap().is_empty());
+    }
+
+    #[test]
+    fn backend_reconfigure_disable_disconnect_and_reset_are_generation_safe() {
+        let make_geometry = |generation| OutputGeometry {
+            output_id: "headless-0".into(),
+            width: 16 + generation as u32,
+            height: 16,
+            stride: (16 + generation as u32) * 4,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: generation,
+        };
+        let mut state = DisplayState::new_test();
+        state.outputs.clear();
+        let mut backend = HeadlessShmDisplayBackend::default();
+        apply_backend_output_event(
+            &mut state,
+            &mut backend,
+            BackendOutputEvent::Connected {
+                backend_instance_id: 2,
+                backend_output_id: "headless-0".into(),
+                event_sequence: 1,
+                geometry: make_geometry(1),
+                cadence: PresentationCadence { period_ns: 1_000 },
+            },
+        )
+        .unwrap();
+        apply_backend_output_event(
+            &mut state,
+            &mut backend,
+            BackendOutputEvent::Reconfigured {
+                backend_instance_id: 2,
+                backend_output_id: "headless-0".into(),
+                event_sequence: 3,
+                geometry: make_geometry(2),
+                cadence: PresentationCadence { period_ns: 2_000 },
+            },
+        )
+        .unwrap();
+        assert_eq!(state.outputs["headless-0"].state.generation, 2);
+        assert!(state.outputs["headless-0"].pending_damage.len() == 1);
+        assert!(
+            apply_backend_output_event(
+                &mut state,
+                &mut backend,
+                BackendOutputEvent::Disabled {
+                    backend_instance_id: 2,
+                    backend_output_id: "headless-0".into(),
+                    event_sequence: 4,
+                    output_generation: 2,
+                },
+            )
+            .is_ok()
+        );
+        assert!(state.outputs["headless-0"].disabled);
+        apply_backend_output_event(
+            &mut state,
+            &mut backend,
+            BackendOutputEvent::BackendReset { backend_instance_id: 2, event_sequence: 5 },
+        )
+        .unwrap();
+        assert!(!state.outputs.contains_key("headless-0"));
     }
 
     #[test]
