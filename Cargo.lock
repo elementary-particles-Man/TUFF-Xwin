@@ -389,6 +389,7 @@ dependencies = [
  "anyhow",
  "ashpd",
  "async-trait",
+ "libc",
  "pipewire",
  "serde_json",
  "tempfile",

@@ -139,6 +139,13 @@
     * policy は first valid Presented completion from any intersecting output。後続 output completion は at-most-once registry removal により重複送信しない。non-intersecting output、newer-generation 未到達 completion、surface cleanup は release しない。
     * output viewport は deterministic な configured output order で計算し、surface geometry と checked intersection を用いる。real portal capture は引き続き未実行、production display への接続も行っていない。
 
+17. **Headless shared-memory display backend**
+    * `TUFF_XWIN_DISPLAY_BACKEND=headless-shm` の明示選択でのみ process-owned memfd shared-memory backend を起動し、未設定時は既存 mock、`unavailable` は fail-closed とする。DISPLAY／WAYLAND_DISPLAY／device presence からは推測しない。
+    * output ごとに versioned frame header、double slot、output／scene／frame generation、stride、format、payload length、completion sequence を保持し、inactive slot への checked copy 完了後に active identity を更新する。
+    * submit は `SubmittedAwaitingPresentation` のまま capture 対象にせず、valid `Presented` completion でだけ headless frame を presented として公開し、readiness／feedback／Wayland callback の既存境界を維持する。
+    * headless capture は presented frame のみを noninteractive に artifact 化する。allocation、mapping、copy、atomic publish、completion の test-only failure injection と、multi-output／generation／output removal isolation を追加した。
+    * DRM、KMS、Wayland host compositor、X11、Vulkan presentation、portal capture、physical display は未実装または未実行。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 

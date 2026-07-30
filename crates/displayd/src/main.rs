@@ -6,6 +6,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(unix)]
+use std::os::fd::RawFd;
+
 use anyhow::{Context, Result, bail};
 use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
@@ -24,6 +27,9 @@ use waybroker_common::{
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
 const BACKGROUND_PIXEL: u32 = 0xFF00_0000;
 const MOCK_BACKEND_INSTANCE_ID: u64 = 1;
+const HEADLESS_SHM_BACKEND_INSTANCE_ID: u64 = 2;
+const HEADLESS_SHM_MAGIC: u32 = 0x5455_4646;
+const HEADLESS_SHM_VERSION: u16 = 1;
 #[cfg(test)]
 const FRAMEBUFFER_WIDTH: u32 = 1920;
 #[cfg(test)]
@@ -68,7 +74,11 @@ async fn main() -> Result<()> {
     };
 
     let mut record_backend = FakeRecordBackend;
-    let mut display_backend = MockDisplayBackend::default();
+    let mut display_backend: Box<dyn DisplayBackend> = match config.display_backend {
+        DisplayBackendType::Mock => Box::new(MockDisplayBackend::default()),
+        DisplayBackendType::HeadlessShm => Box::new(HeadlessShmDisplayBackend::default()),
+        DisplayBackendType::Unavailable => bail!("production display backend is unavailable"),
+    };
 
     let listener = if let Some(socket_path) = &config.socket_path {
         waybroker_common::bind_explicit_unix_socket(socket_path.clone())?
@@ -89,7 +99,7 @@ async fn main() -> Result<()> {
             &mut clock,
             capture_backend.as_ref(),
             &mut record_backend,
-            &mut display_backend,
+            display_backend.as_mut(),
         )
         .await?;
         served += 1;
@@ -108,6 +118,14 @@ enum CaptureBackendType {
     #[default]
     Fake,
     Real,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DisplayBackendType {
+    #[default]
+    Mock,
+    HeadlessShm,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -131,6 +149,7 @@ struct Config {
     x11_display: Option<String>,
     allow_portal_capture: bool,
     allow_portal_dialog: bool,
+    display_backend: DisplayBackendType,
 }
 
 impl Config {
@@ -140,6 +159,8 @@ impl Config {
         // Prefer GPU acceleration; Vulkan initialization remains fail-soft.
         config.use_vulkan = true;
         config.session_instance_id = DEFAULT_SESSION_INSTANCE_ID.to_string();
+        config.display_backend =
+            display_backend_from_env(env::var("TUFF_XWIN_DISPLAY_BACKEND").ok().as_deref())?;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -249,6 +270,15 @@ impl Config {
         }
 
         Ok(config)
+    }
+}
+
+fn display_backend_from_env(value: Option<&str>) -> Result<DisplayBackendType> {
+    match value.unwrap_or("") {
+        "headless-shm" => Ok(DisplayBackendType::HeadlessShm),
+        "mock" | "" => Ok(DisplayBackendType::Mock),
+        "unavailable" => Ok(DisplayBackendType::Unavailable),
+        other => bail!("unknown TUFF_XWIN_DISPLAY_BACKEND: {other}"),
     }
 }
 
@@ -380,6 +410,9 @@ async fn handle_display_command(
             Ok(DisplayEvent::PresentationAdvanced { output_id, tick_sequence, eligible })
         }
         DisplayCommand::CompletePresentation { token, outcome } => {
+            if matches!(outcome, PresentationCompletion::Presented) {
+                display_backend.complete_submission(&token)?;
+            }
             display_backend.retire_submission(&token);
             let result = complete_presentation(state, token.clone(), outcome.clone());
             Ok(DisplayEvent::PresentationCompleted { token, outcome: result })
@@ -403,6 +436,7 @@ async fn handle_display_command(
             {
                 return Ok(DisplayEvent::Rejected { reason: "stale output generation".into() });
             }
+            display_backend.reconfigure_output(&geometry.output_id, geometry.output_generation)?;
             state.outputs.insert(geometry.output_id.clone(), OutputRuntime::new(next));
             Ok(DisplayEvent::ModeApplied {
                 output: geometry.output_id.clone(),
@@ -421,6 +455,7 @@ async fn handle_display_command(
             if runtime.state.generation != output_generation {
                 return Ok(DisplayEvent::Rejected { reason: "stale output generation".into() });
             }
+            display_backend.remove_output(&output_id);
             state.outputs.remove(&output_id);
             Ok(DisplayEvent::BlankApplied { output: Some(output_id) })
         }
@@ -760,7 +795,11 @@ async fn handle_display_command(
             Ok(handle_scene_snapshot_request(output, state))
         }
         DisplayCommand::CaptureOutput { output } => {
-            handle_capture_output(&output, config, state, vulkan, capture_backend).await
+            if config.display_backend == DisplayBackendType::HeadlessShm {
+                handle_headless_capture_output(&output, config, display_backend)
+            } else {
+                handle_capture_output(&output, config, state, vulkan, capture_backend).await
+            }
         }
         DisplayCommand::StartRecord { output, fps } => {
             handle_start_record(&output, fps, config, state, record_backend).await
@@ -1094,6 +1133,7 @@ async fn handle_multi_output_commit(
         let _ = runtime;
         if auto_complete {
             if let Some(token) = completion_token {
+                let _ = display_backend.complete_submission(&token);
                 let _ = complete_presentation(state, token, PresentationCompletion::Presented);
             }
         }
@@ -1336,6 +1376,16 @@ trait DisplayBackend {
         false
     }
     fn retire_submission(&mut self, _token: &PresentationToken) {}
+    fn complete_submission(&mut self, _token: &PresentationToken) -> Result<()> {
+        Ok(())
+    }
+    fn capture_published(&self, _output: &str) -> Result<Option<FramePublication>> {
+        Ok(None)
+    }
+    fn reconfigure_output(&mut self, _output_id: &str, _output_generation: u64) -> Result<()> {
+        Ok(())
+    }
+    fn remove_output(&mut self, _output_id: &str) {}
     fn submit_frame(&mut self, request: FramePublication) -> Result<PresentationToken> {
         let token = PresentationToken {
             backend_instance_id: 1,
@@ -1487,6 +1537,347 @@ impl DisplayBackend for MockDisplayBackend {
     }
     fn retire_submission(&mut self, token: &PresentationToken) {
         self.pending_submissions.remove(token);
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct HeadlessShmFrameHeader {
+    magic: u32,
+    version: u16,
+    header_len: u16,
+    output_generation: u64,
+    scene_generation: u64,
+    frame_id: u64,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+    payload_len: u64,
+    completion_sequence: u64,
+}
+
+const HEADLESS_SHM_HEADER_LEN: usize = std::mem::size_of::<HeadlessShmFrameHeader>();
+
+#[cfg(unix)]
+struct HeadlessShmRegion {
+    fd: RawFd,
+    ptr: *mut libc::c_void,
+    len: usize,
+}
+
+#[cfg(unix)]
+unsafe impl Send for HeadlessShmRegion {}
+
+#[cfg(unix)]
+unsafe impl Sync for HeadlessShmRegion {}
+
+#[cfg(unix)]
+impl Drop for HeadlessShmRegion {
+    fn drop(&mut self) {
+        // SAFETY: ptr/len are the exact successful mmap result retained by this owner.
+        unsafe {
+            libc::munmap(self.ptr, self.len);
+            libc::close(self.fd);
+        }
+    }
+}
+
+struct HeadlessShmOutput {
+    #[cfg(unix)]
+    region: HeadlessShmRegion,
+    slot_len: usize,
+    active_slot: usize,
+    generation: u64,
+    latest: Option<FramePublication>,
+    presented: Option<FramePublication>,
+}
+
+#[derive(Default)]
+struct HeadlessShmDisplayBackend {
+    outputs: BTreeMap<String, HeadlessShmOutput>,
+    pending: BTreeMap<PresentationToken, FramePublication>,
+    next_sequence: u64,
+    #[cfg(test)]
+    failure: Option<HeadlessShmFailure>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadlessShmFailure {
+    Allocation,
+    Mapping,
+    Copy,
+    AtomicPublish,
+    Completion,
+}
+
+impl HeadlessShmDisplayBackend {
+    #[cfg(test)]
+    fn inject_failure(&mut self, failure: HeadlessShmFailure) {
+        self.failure = Some(failure);
+    }
+
+    #[cfg(test)]
+    fn fail_if_injected(&mut self, failure: HeadlessShmFailure) -> Result<()> {
+        if self.failure == Some(failure) {
+            self.failure = None;
+            bail!("headless-shm injected {:?} failure", failure);
+        }
+        Ok(())
+    }
+
+    fn validate_frame(request: &FramePublication) -> Result<(usize, usize)> {
+        if request.geometry.width == 0 || request.geometry.height == 0 {
+            bail!("headless-shm rejects zero-sized output");
+        }
+        if request.format != WL_SHM_FORMAT_ARGB8888 && request.format != WL_SHM_FORMAT_XRGB8888 {
+            bail!("headless-shm rejects unsupported pixel format {}", request.format);
+        }
+        let row_bytes = request
+            .geometry
+            .width
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("headless-shm row size overflow"))?;
+        if request.stride < row_bytes {
+            bail!("headless-shm stride is smaller than the row payload");
+        }
+        let payload_len = usize::try_from(
+            u64::from(request.stride)
+                .checked_mul(u64::from(request.geometry.height))
+                .ok_or_else(|| anyhow::anyhow!("headless-shm payload size overflow"))?,
+        )
+        .map_err(|_| anyhow::anyhow!("headless-shm payload does not fit usize"))?;
+        let expected_pixels = usize::try_from(
+            u64::from(request.geometry.width)
+                .checked_mul(u64::from(request.geometry.height))
+                .ok_or_else(|| anyhow::anyhow!("headless-shm pixel count overflow"))?,
+        )
+        .map_err(|_| anyhow::anyhow!("headless-shm pixel count does not fit usize"))?;
+        if request.pixels.len() != expected_pixels {
+            bail!("headless-shm pixel payload length mismatch");
+        }
+        Ok((payload_len, usize::try_from(row_bytes).unwrap_or(usize::MAX)))
+    }
+
+    #[cfg(unix)]
+    fn allocate_region(len: usize) -> Result<HeadlessShmRegion> {
+        let name = std::ffi::CString::new("tuff-xwin-headless-frame")?;
+        // SAFETY: name is NUL-terminated and the flags are valid for memfd_create.
+        let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let length = i64::try_from(len).map_err(|_| anyhow::anyhow!("shared memory too large"))?;
+        // SAFETY: fd is owned here and length is checked before ftruncate.
+        if unsafe { libc::ftruncate(fd, length) } != 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(err.into());
+        }
+        // SAFETY: mmap receives the valid sized memfd and returns an owned mapping.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            let err = std::io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(err.into());
+        }
+        Ok(HeadlessShmRegion { fd, ptr, len })
+    }
+
+    fn publish_atomic(&mut self, request: FramePublication) -> Result<()> {
+        let (payload_len, row_bytes) = Self::validate_frame(&request)?;
+        let slot_len = HEADLESS_SHM_HEADER_LEN
+            .checked_add(payload_len)
+            .ok_or_else(|| anyhow::anyhow!("headless-shm slot size overflow"))?;
+        #[cfg(test)]
+        self.fail_if_injected(HeadlessShmFailure::Copy)?;
+        #[cfg(test)]
+        self.fail_if_injected(HeadlessShmFailure::AtomicPublish)?;
+        let output = self.outputs.get(&request.output_id);
+        let needs_new_region = output
+            .map(|output| {
+                output.generation != request.output_generation || output.slot_len != slot_len
+            })
+            .unwrap_or(true);
+        if needs_new_region {
+            #[cfg(test)]
+            self.fail_if_injected(HeadlessShmFailure::Allocation)?;
+            #[cfg(test)]
+            self.fail_if_injected(HeadlessShmFailure::Mapping)?;
+            #[cfg(unix)]
+            let region = Self::allocate_region(
+                slot_len
+                    .checked_mul(2)
+                    .ok_or_else(|| anyhow::anyhow!("headless-shm region size overflow"))?,
+            )?;
+            #[cfg(not(unix))]
+            bail!("headless-shm requires a Unix shared-memory implementation");
+            self.outputs.insert(
+                request.output_id.clone(),
+                HeadlessShmOutput {
+                    #[cfg(unix)]
+                    region,
+                    slot_len,
+                    active_slot: 0,
+                    generation: request.output_generation,
+                    latest: None,
+                    presented: None,
+                },
+            );
+        }
+        let completion_sequence = self.next_sequence;
+        let output = self.outputs.get_mut(&request.output_id).expect("headless output inserted");
+        let inactive = 1usize.saturating_sub(output.active_slot);
+        #[cfg(unix)]
+        {
+            // SAFETY: slot bounds were allocated from the checked slot_len and the mapping is owned.
+            let base = unsafe { (output.region.ptr as *mut u8).add(inactive * output.slot_len) };
+            let payload = unsafe { base.add(HEADLESS_SHM_HEADER_LEN) };
+            unsafe { std::ptr::write_bytes(payload, 0, payload_len) };
+            for (row, pixels) in request.pixels.chunks(request.geometry.width as usize).enumerate()
+            {
+                let dst = unsafe {
+                    payload.add(row * usize::try_from(request.stride).unwrap_or(usize::MAX))
+                };
+                for (column, pixel) in pixels.iter().enumerate() {
+                    let bytes = pixel.to_le_bytes();
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.add(column * 4), 4)
+                    };
+                }
+                let _ = row_bytes;
+            }
+            let header = HeadlessShmFrameHeader {
+                magic: HEADLESS_SHM_MAGIC,
+                version: HEADLESS_SHM_VERSION,
+                header_len: HEADLESS_SHM_HEADER_LEN as u16,
+                output_generation: request.output_generation,
+                scene_generation: request.scene_generation,
+                frame_id: request.frame_id,
+                width: request.geometry.width,
+                height: request.geometry.height,
+                stride: request.stride,
+                format: request.format,
+                payload_len: payload_len as u64,
+                completion_sequence,
+            };
+            // SAFETY: header is copied into the inactive slot after the complete payload.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    (&header as *const HeadlessShmFrameHeader).cast::<u8>(),
+                    base,
+                    HEADLESS_SHM_HEADER_LEN,
+                );
+            }
+        }
+        output.active_slot = inactive;
+        output.generation = request.output_generation;
+        output.latest = Some(request.clone());
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn latest(&self, output_id: &str) -> Option<&FramePublication> {
+        self.outputs.get(output_id)?.latest.as_ref()
+    }
+}
+
+impl DisplayBackend for HeadlessShmDisplayBackend {
+    fn enumerate_outputs(&self) -> Result<Vec<OutputMode>> {
+        Ok(self
+            .outputs
+            .iter()
+            .filter_map(|(name, output)| {
+                output.latest.as_ref().map(|frame| OutputMode {
+                    name: name.clone(),
+                    width: frame.geometry.width,
+                    height: frame.geometry.height,
+                    refresh_hz: 0,
+                })
+            })
+            .collect())
+    }
+
+    fn set_mode(&mut self, _output: &str, _mode: &OutputMode) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_gamma(&mut self, _output: &str, red: &[u16], green: &[u16], blue: &[u16]) -> Result<()> {
+        if red.len() != green.len() || green.len() != blue.len() {
+            bail!("gamma LUT size mismatch");
+        }
+        Ok(())
+    }
+
+    fn publish_frame(&mut self, request: FramePublication) -> Result<()> {
+        self.publish_atomic(request)
+    }
+
+    fn submit_frame(&mut self, request: FramePublication) -> Result<PresentationToken> {
+        self.publish_atomic(request.clone())?;
+        let token = PresentationToken {
+            backend_instance_id: HEADLESS_SHM_BACKEND_INSTANCE_ID,
+            sequence: self.next_sequence,
+            output_id: request.output_id.clone(),
+            output_generation: request.output_generation,
+            scene_generation: request.scene_generation,
+            frame_id: request.frame_id,
+        };
+        self.pending.insert(token.clone(), request);
+        Ok(token)
+    }
+
+    fn retire_submission(&mut self, token: &PresentationToken) {
+        self.pending.remove(token);
+    }
+
+    fn complete_submission(&mut self, token: &PresentationToken) -> Result<()> {
+        #[cfg(test)]
+        self.fail_if_injected(HeadlessShmFailure::Completion)?;
+        let Some(frame) = self.pending.remove(token) else {
+            bail!("headless-shm completion token is unknown");
+        };
+        self.outputs
+            .get_mut(&token.output_id)
+            .ok_or_else(|| anyhow::anyhow!("headless-shm output was removed"))?
+            .presented = Some(frame);
+        Ok(())
+    }
+
+    fn capture_published(&self, output: &str) -> Result<Option<FramePublication>> {
+        Ok(self.outputs.get(output).and_then(|state| state.presented.clone()))
+    }
+
+    fn reconfigure_output(&mut self, output_id: &str, output_generation: u64) -> Result<()> {
+        if self
+            .outputs
+            .get(output_id)
+            .map(|output| output.generation != output_generation)
+            .unwrap_or(false)
+        {
+            self.outputs.remove(output_id);
+        }
+        self.pending.retain(|token, _| {
+            token.output_id != output_id || token.output_generation == output_generation
+        });
+        Ok(())
+    }
+
+    fn remove_output(&mut self, output_id: &str) {
+        self.outputs.remove(output_id);
+        self.pending.retain(|token, _| token.output_id != output_id);
     }
 }
 
@@ -2300,7 +2691,9 @@ fn complete_presentation(
     if token.validate().is_err() {
         return PresentationCompletion::UnknownToken;
     }
-    if token.backend_instance_id != MOCK_BACKEND_INSTANCE_ID {
+    if token.backend_instance_id != MOCK_BACKEND_INSTANCE_ID
+        && token.backend_instance_id != HEADLESS_SHM_BACKEND_INSTANCE_ID
+    {
         return PresentationCompletion::UnknownToken;
     }
     let Some(runtime) = state.outputs.get_mut(&token.output_id) else {
@@ -3020,6 +3413,38 @@ async fn handle_stop_record(
     })
 }
 
+fn handle_headless_capture_output(
+    output: &str,
+    config: &Config,
+    display_backend: &dyn DisplayBackend,
+) -> Result<DisplayEvent> {
+    let frame = display_backend.capture_published(output)?.ok_or_else(|| {
+        anyhow::anyhow!("headless-shm has no Presented frame for output {output}")
+    })?;
+    let pixels = frame.pixels.as_ref();
+    let bytes =
+        encode_rgba8888_artifact_bytes(frame.geometry.width, frame.geometry.height, pixels)?;
+    let artifact_name = format!(
+        "headless-screenshot-{}-{}-{}.raw",
+        sanitize_artifact_filename(output),
+        frame.scene_generation,
+        frame.frame_id
+    );
+    let artifact_path = session_artifact_path(&config.session_instance_id, &artifact_name);
+    fs::write(&artifact_path, bytes)?;
+    Ok(DisplayEvent::OutputCaptured {
+        output: output.to_string(),
+        width: frame.geometry.width,
+        height: frame.geometry.height,
+        format: "RGBA8888".into(),
+        artifact_path: artifact_path
+            .file_name()
+            .expect("headless artifact path has filename")
+            .to_string_lossy()
+            .into_owned(),
+    })
+}
+
 fn validate_capture_pixel_count(width: u32, height: u32, pixel_len: usize) -> Result<()> {
     let expected_pixels =
         width.checked_mul(height).ok_or_else(|| anyhow::anyhow!("capture dimensions overflow"))?
@@ -3130,6 +3555,90 @@ impl Drop for SocketGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn headless_test_frame(output_id: &str, generation: u64, frame_id: u64) -> FramePublication {
+        FramePublication {
+            frame_id,
+            output_id: output_id.into(),
+            output_generation: generation,
+            scene_generation: 9,
+            geometry: OutputGeometry {
+                output_id: output_id.into(),
+                width: 2,
+                height: 2,
+                stride: 8,
+                format: WL_SHM_FORMAT_XRGB8888,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation: generation,
+            },
+            format: WL_SHM_FORMAT_XRGB8888,
+            stride: 8,
+            pixels: std::sync::Arc::from(vec![0xFF11_2233; 4]),
+            damage: vec![],
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn headless_shm_submission_is_not_presented_until_completion() {
+        let mut backend = HeadlessShmDisplayBackend::default();
+        let frame = headless_test_frame("eDP-1", 1, 4);
+        let token = backend.submit_frame(frame).unwrap();
+        assert!(backend.capture_published("eDP-1").unwrap().is_none());
+        assert_eq!(token.backend_instance_id, HEADLESS_SHM_BACKEND_INSTANCE_ID);
+        backend.complete_submission(&token).unwrap();
+        let presented = backend.capture_published("eDP-1").unwrap().unwrap();
+        assert_eq!(presented.frame_id, 4);
+        assert_eq!(presented.scene_generation, 9);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn headless_shm_keeps_outputs_and_generations_independent() {
+        let mut backend = HeadlessShmDisplayBackend::default();
+        let left = backend.submit_frame(headless_test_frame("left", 1, 1)).unwrap();
+        let right = backend.submit_frame(headless_test_frame("right", 7, 2)).unwrap();
+        backend.complete_submission(&left).unwrap();
+        assert!(backend.capture_published("right").unwrap().is_none());
+        backend.complete_submission(&right).unwrap();
+        assert_eq!(backend.capture_published("left").unwrap().unwrap().frame_id, 1);
+        assert_eq!(backend.capture_published("right").unwrap().unwrap().output_generation, 7);
+    }
+
+    #[test]
+    fn headless_shm_rejects_malformed_frame_before_allocation() {
+        let mut backend = HeadlessShmDisplayBackend::default();
+        let mut frame = headless_test_frame("eDP-1", 1, 1);
+        frame.stride = 4;
+        assert!(backend.submit_frame(frame).is_err());
+        assert!(backend.outputs.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn headless_shm_copy_failure_preserves_previous_presented_frame() {
+        let mut backend = HeadlessShmDisplayBackend::default();
+        let first = backend.submit_frame(headless_test_frame("eDP-1", 1, 1)).unwrap();
+        backend.complete_submission(&first).unwrap();
+        backend.inject_failure(HeadlessShmFailure::Copy);
+        assert!(backend.submit_frame(headless_test_frame("eDP-1", 1, 2)).is_err());
+        assert_eq!(backend.capture_published("eDP-1").unwrap().unwrap().frame_id, 1);
+    }
+
+    #[test]
+    fn display_backend_selection_is_explicit_and_fail_closed() {
+        assert_eq!(display_backend_from_env(None).unwrap(), DisplayBackendType::Mock);
+        assert_eq!(
+            display_backend_from_env(Some("headless-shm")).unwrap(),
+            DisplayBackendType::HeadlessShm
+        );
+        assert_eq!(
+            display_backend_from_env(Some("unavailable")).unwrap(),
+            DisplayBackendType::Unavailable
+        );
+        assert!(display_backend_from_env(Some("physical")).is_err());
+    }
 
     #[test]
     fn readiness_is_derived_from_registry_and_zero_outputs_are_not_ready() {
