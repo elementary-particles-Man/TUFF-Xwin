@@ -164,6 +164,12 @@
     * displayd 再接続後は `GetReconciliation` で fresh epoch を取得し、`BeginReconciliation` と最新 canonical scene の `ReconcileScene` を一度だけ送る。履歴 CommitScene の再送や client commit generation の再生成は行わない。
     * CompdScene は canonical scene_epoch／scene_generation を保持し、復旧時の転送は現在の scene と必要 payload だけに限定する。ReconcileScene は acceptance-only で、submission は従来どおり `AdvancePresentation`、Ready／capture／feedback／callback は fresh Presented completion 後のみ回復する。
     * 接続失敗時の retry は最大 3 回で、同時 reconnect は状態で抑止する。epoch／reconciliation 応答の不一致は fail-closed とし、canonical scene は破棄しない。
+
+21. **Wayland output topology projection**
+    * displayd の output registry を authority とする `GetOutputTopology` typed snapshot を追加し、epoch、sequence、geometry、generation、cadence、scale、transform、enabled、name、description を waylandd に渡す。
+    * production Wayland client の wl_output 初期 projection は output identity の deterministic order を使い、origin、pixel geometry、refresh、integer scale を `HeadlessWireCore` へ反映する。host display discovery は行わない。
+    * `wl_surface.commit` 後の surface geometry と projected output geometry の checked intersection を比較し、membership の差分だけ wl_surface.enter／leave を発行する。重複 enter／leave を保持集合で抑止する。
+    * 現行 server transport は client 接続後の displayd topology delta subscription／global removal API をまだ持たないため、live reconfiguration／disconnect の既存 client への global remove・再構築は次の server lifecycle 拡張で実装する。今回の snapshot projection はその IPC 境界を使用する。
     * waylandd の client・callback identity は displayd 障害で再生成せず、旧 presentation token／completion を復旧状態へ持ち込まない。production display backend、real portal capture、physical display 接続は実装・実行していない。
 
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。

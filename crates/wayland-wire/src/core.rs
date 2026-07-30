@@ -58,7 +58,9 @@ pub struct HeadlessWireCore {
     pub relative_pointer: RelativePointerState,
     pub pointer_constraints: PointerConstraintsState,
     globals: Vec<WireGlobal>,
-    real_outputs: Vec<(String, i32, i32, u32)>,
+    real_outputs: Vec<(String, i32, i32, i32, i32, u32, u32)>,
+    surface_output_membership:
+        std::collections::HashMap<WaylandObjectId, std::collections::BTreeSet<WaylandObjectId>>,
     events_out: Vec<WaylandMessage>,
     defer_frame_callbacks: bool,
 }
@@ -92,6 +94,7 @@ impl Default for HeadlessWireCore {
             pointer_constraints: PointerConstraintsState::new(),
             globals: Vec::new(),
             real_outputs: Vec::new(),
+            surface_output_membership: std::collections::HashMap::new(),
             events_out: Vec::new(),
             defer_frame_callbacks: false,
         };
@@ -193,8 +196,22 @@ impl HeadlessWireCore {
     }
 
     pub fn add_real_output(&mut self, name: &str, width: i32, height: i32) {
+        self.add_topology_output(name, 0, 0, width, height, 16_666_666, 1);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_topology_output(
+        &mut self,
+        name: &str,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        refresh_nsec: u32,
+        scale: u32,
+    ) {
         let global_name = (self.globals.len() as u32) + 1;
-        self.real_outputs.push((name.to_string(), width, height, 16_666_666));
+        self.real_outputs.push((name.to_string(), x, y, width, height, refresh_nsec, scale));
         self.globals.push(WireGlobal {
             name: global_name,
             interface: "wl_output".into(),
@@ -529,10 +546,15 @@ impl HeadlessWireCore {
                 })
                 .count()
                 .saturating_sub(1);
-            if let Some((output_name, width, height, refresh)) =
+            if let Some((output_name, x, y, width, height, refresh, scale)) =
                 self.real_outputs.get(output_index).cloned()
             {
                 self.output.create_output(new_id, &output_name);
+                if let Some(output) = self.output.outputs.get_mut(&new_id) {
+                    output.x = x;
+                    output.y = y;
+                    output.scale = scale as i32;
+                }
                 self.output.set_mode(new_id, width, height, refresh);
             }
         }
@@ -773,6 +795,7 @@ impl HeadlessWireCore {
         let id = message.header.object_id;
         self.surfaces.commit(id);
         self.viewport.commit(id);
+        self.update_surface_output_membership(id)?;
 
         // Handle frame callbacks
         if let Some(surface) = self.surfaces.surfaces.get_mut(&id) {
@@ -819,6 +842,47 @@ impl HeadlessWireCore {
             self.presentation.destroy(fid);
         }
 
+        Ok(())
+    }
+
+    fn update_surface_output_membership(&mut self, surface_id: WaylandObjectId) -> Result<()> {
+        let surface = self
+            .surfaces
+            .surfaces
+            .get(&surface_id)
+            .ok_or(WireError::InvalidObjectId(surface_id.0))?;
+        let width = surface.current.snapshot_width_hint().unwrap_or(1) as i32;
+        let height = surface.current.snapshot_height_hint().unwrap_or(1) as i32;
+        let x = surface.current.offset_x;
+        let y = surface.current.offset_y;
+        let previous = self.surface_output_membership.get(&surface_id).cloned().unwrap_or_default();
+        let mut current = std::collections::BTreeSet::new();
+        for (output_id, output) in &self.output.outputs {
+            let intersects = x < output.x + output.width
+                && x.saturating_add(width) > output.x
+                && y < output.y + output.height
+                && y.saturating_add(height) > output.y;
+            if intersects {
+                current.insert(*output_id);
+            }
+        }
+        for output_id in current.difference(&previous) {
+            self.events_out.push(crate::codec::encode_event(
+                surface_id,
+                WaylandOpcode(4),
+                &[crate::WireArg::Object(output_id.0)],
+                &self.registry,
+            )?);
+        }
+        for output_id in previous.difference(&current) {
+            self.events_out.push(crate::codec::encode_event(
+                surface_id,
+                WaylandOpcode(5),
+                &[crate::WireArg::Object(output_id.0)],
+                &self.registry,
+            )?);
+        }
+        self.surface_output_membership.insert(surface_id, current);
         Ok(())
     }
 

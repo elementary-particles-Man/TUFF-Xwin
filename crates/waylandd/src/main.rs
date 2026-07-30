@@ -28,12 +28,12 @@ use vulkan_backend::{
 };
 use waybroker_common::{
     CommitTarget, DisplayCommand, DisplayEvent, FocusTarget, ImeBridgeMode, ImeCommand, ImeEvent,
-    ImeStatus, IpcEnvelope, MessageKind, OutputMode, PixelTransportHandle, PixelTransportPayload,
-    PixelTransportStore, ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream,
-    SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
-    WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
-    accel::global_accel_policy, bind_service_socket, connect_service_socket, ensure_runtime_dir,
-    now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
+    ImeStatus, IpcEnvelope, MessageKind, OutputMode, OutputTopologyEntry, PixelTransportHandle,
+    PixelTransportPayload, PixelTransportStore, ServiceBanner, ServiceEndpoint, ServiceRole,
+    ServiceStream, SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand,
+    WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
+    WaylandSurfaceState, accel::global_accel_policy, bind_service_socket, connect_service_socket,
+    ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
 };
 
 fn run_wire_headless_test() -> Result<()> {
@@ -939,6 +939,28 @@ fn query_output_inventory() -> Result<Vec<OutputMode>> {
     }
 }
 
+fn query_output_topology() -> Result<Vec<OutputTopologyEntry>> {
+    let mut stream = connect_service_socket(ServiceRole::Displayd)?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Waylandd,
+        ServiceRole::Displayd,
+        MessageKind::DisplayCommand(DisplayCommand::GetOutputTopology),
+    );
+    send_json_line(&mut stream, &request)?;
+    let mut reader = BufReader::new(stream);
+    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    if response.source != ServiceRole::Displayd || response.destination != ServiceRole::Waylandd {
+        bail!("invalid displayd topology response envelope");
+    }
+    match response.kind {
+        MessageKind::DisplayEvent(DisplayEvent::OutputTopology { outputs, .. }) => Ok(outputs),
+        MessageKind::DisplayEvent(DisplayEvent::Rejected { reason }) => {
+            bail!("displayd rejected topology: {reason}")
+        }
+        other => bail!("unexpected displayd topology response: {other:?}"),
+    }
+}
+
 fn load_surface_registry(path: Option<&PathBuf>) -> Result<SurfaceRegistrySnapshot> {
     match path {
         Some(path) => {
@@ -1158,16 +1180,33 @@ fn handle_production_client(stream: UnixStream, scene_epoch: u64) -> Result<()> 
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let mut core = wayland_wire::core::HeadlessWireCore::default();
     core.set_defer_frame_callbacks(true);
-    let outputs = query_output_inventory()
-        .context("production Wayland requires displayd output inventory")?;
-    if outputs.is_empty() {
+    let topology =
+        query_output_topology().context("production Wayland requires displayd output inventory")?;
+    if topology.is_empty() {
         bail!("production Wayland requires at least one real displayd output");
     }
+    let outputs = topology
+        .iter()
+        .map(|entry| OutputMode {
+            name: entry.geometry.output_id.clone(),
+            width: entry.geometry.width,
+            height: entry.geometry.height,
+            refresh_hz: entry.refresh_hz,
+        })
+        .collect::<Vec<_>>();
     let mut registry_guard =
         ClientRegistryGuard { client_id, outputs: outputs.clone(), scene_epoch, finalized: false };
     {
-        for output in &outputs {
-            core.add_real_output(&output.name, output.width as i32, output.height as i32);
+        for output in &topology {
+            core.add_topology_output(
+                &output.name,
+                output.geometry.origin_x,
+                output.geometry.origin_y,
+                output.geometry.width as i32,
+                output.geometry.height as i32,
+                (1_000_000_000u64 / output.refresh_hz.max(1) as u64) as u32,
+                output.scale,
+            );
         }
     }
     let mut received_fds = Vec::new();

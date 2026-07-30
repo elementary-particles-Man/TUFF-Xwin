@@ -10,12 +10,12 @@ pub use ipc::{
     DisplayReconciliationState, FocusTarget, ForeignToplevelHandle, HealthState, ImeBridgeMode,
     ImeCommand, ImeEvent, ImeStatus, IpcEnvelope, LayerMetadata, LockCommand, LockState,
     MessageKind, OutputGeometry, OutputMode, OutputPublicationOutcome, OutputPublicationResult,
-    OutputReadiness, OutputReadinessState, PointerConstraints, PresentationCadence,
-    PresentationCompletion, PresentationSchedulerState, PresentationToken, PublicationFailure,
-    Rect, ResumeStage, ScenePublicationResult, ServiceReadiness, ServiceReadinessState,
-    SessionCommand, SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand,
-    WaylandCommand, WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState,
-    WaylandSurfaceRole, WaylandSurfaceState,
+    OutputReadiness, OutputReadinessState, OutputTopologyEntry, PointerConstraints,
+    PresentationCadence, PresentationCompletion, PresentationSchedulerState, PresentationToken,
+    PublicationFailure, Rect, ResumeStage, ScenePublicationResult, ServiceReadiness,
+    ServiceReadinessState, SessionCommand, SurfacePlacement, SurfaceRegistrySnapshot,
+    SurfaceSnapshot, WatchdogCommand, WaylandCommand, WaylandEvent, WaylandSelectionHandoff,
+    WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
 };
 pub use pixel_transport::{
     PixelTransportError, PixelTransportHandle, PixelTransportPayload, PixelTransportStore,

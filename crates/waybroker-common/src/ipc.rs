@@ -94,6 +94,7 @@ pub enum DisplayCommand {
     GetLiveness,
     GetReadiness,
     GetReconciliation,
+    GetOutputTopology,
     BeginReconciliation {
         epoch: u64,
     },
@@ -187,6 +188,17 @@ pub struct OutputGeometry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputTopologyEntry {
+    pub geometry: OutputGeometry,
+    pub refresh_hz: u32,
+    pub scale: u32,
+    pub transform: u32,
+    pub enabled: bool,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum PointerConstraints {
     None,
@@ -212,6 +224,11 @@ pub enum DisplayEvent {
     Reconciliation {
         epoch: u64,
         state: DisplayReconciliationState,
+    },
+    OutputTopology {
+        epoch: u64,
+        sequence: u64,
+        outputs: Vec<OutputTopologyEntry>,
     },
     Reconciled {
         epoch: u64,

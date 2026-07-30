@@ -19,9 +19,9 @@ use waybroker_common::{
     BackendOutputEvent, CommittedSceneState, DisplayCommand, DisplayEvent,
     DisplayReconciliationState, IpcEnvelope, MessageKind, OutputGeometry, OutputMode,
     OutputPublicationOutcome, OutputPublicationResult, OutputReadiness, OutputReadinessState,
-    PixelTransportError, PixelTransportPayload, PixelTransportStore, PresentationCadence,
-    PresentationCompletion, PresentationSchedulerState, PresentationToken, PublicationFailure,
-    ScenePublicationResult, ServiceBanner, ServiceEndpoint, ServiceReadiness,
+    OutputTopologyEntry, PixelTransportError, PixelTransportPayload, PixelTransportStore,
+    PresentationCadence, PresentationCompletion, PresentationSchedulerState, PresentationToken,
+    PublicationFailure, ScenePublicationResult, ServiceBanner, ServiceEndpoint, ServiceReadiness,
     ServiceReadinessState, ServiceRole, ServiceStream, accel::global_accel_policy,
     bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
     sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
@@ -549,6 +549,37 @@ async fn handle_display_command(
             epoch: state.display_epoch,
             state: state.reconciliation_state,
         }),
+        DisplayCommand::GetOutputTopology => {
+            let mut outputs = state
+                .outputs
+                .values()
+                .filter(|runtime| !runtime.disabled)
+                .map(|runtime| OutputTopologyEntry {
+                    geometry: OutputGeometry {
+                        output_id: runtime.state.output_id.clone(),
+                        width: runtime.state.width,
+                        height: runtime.state.height,
+                        stride: runtime.state.stride,
+                        format: runtime.state.format,
+                        origin_x: runtime.state.origin_x,
+                        origin_y: runtime.state.origin_y,
+                        output_generation: runtime.state.generation,
+                    },
+                    refresh_hz: (1_000_000_000u64 / runtime.scheduler.cadence.period_ns) as u32,
+                    scale: 1,
+                    transform: 0,
+                    enabled: true,
+                    name: runtime.state.output_id.clone(),
+                    description: format!("Headless output {}", runtime.state.output_id),
+                })
+                .collect::<Vec<_>>();
+            outputs.sort_by(|a, b| a.geometry.output_id.cmp(&b.geometry.output_id));
+            Ok(DisplayEvent::OutputTopology {
+                epoch: state.display_epoch,
+                sequence: state.display_epoch,
+                outputs,
+            })
+        }
         DisplayCommand::BeginReconciliation { epoch } => {
             state.begin_restart(epoch)?;
             Ok(DisplayEvent::Reconciliation {
