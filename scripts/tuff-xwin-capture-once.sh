@@ -27,6 +27,11 @@ if [[ "$REAL_PORTAL_CAPTURE" != "true" ]]; then
     exit 1
 fi
 
+if [[ "${TUFF_XWIN_RUN_REAL_CAPTURE_TESTS:-}" != "1" ]]; then
+    echo "Error: real portal capture is manual opt-in only; set TUFF_XWIN_RUN_REAL_CAPTURE_TESTS=1." >&2
+    exit 1
+fi
+
 # Find repo root
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

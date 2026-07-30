@@ -14,11 +14,11 @@ use waybroker_common::{
     CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputGeometry,
     OutputMode, OutputPublicationOutcome, OutputPublicationResult, OutputReadiness,
     OutputReadinessState, PixelTransportError, PixelTransportPayload, PixelTransportStore,
-    PresentationCompletion, PresentationToken, PublicationFailure, ScenePublicationResult,
-    ServiceBanner, ServiceEndpoint, ServiceReadiness, ServiceReadinessState, ServiceRole,
-    ServiceStream, accel::global_accel_policy, bind_service_socket, ensure_runtime_dir,
-    now_unix_timestamp, read_json_line, sanitize_artifact_filename, send_json_line,
-    session_artifact_path, validate_artifact_filename,
+    PresentationCadence, PresentationCompletion, PresentationSchedulerState, PresentationToken,
+    PublicationFailure, ScenePublicationResult, ServiceBanner, ServiceEndpoint, ServiceReadiness,
+    ServiceReadinessState, ServiceRole, ServiceStream, accel::global_accel_policy,
+    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
+    sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
@@ -348,6 +348,37 @@ async fn handle_display_command(
             let _ = vulkan;
             Ok(DisplayEvent::Readiness(readiness_from_state(state, true)))
         }
+        DisplayCommand::AdvancePresentation {
+            output_id,
+            output_generation,
+            now_ns,
+            tick_sequence,
+        } => {
+            let eligible =
+                advance_presentation(state, &output_id, output_generation, now_ns, tick_sequence)?;
+            if eligible {
+                if let Some(scene) = state.last_scene.clone() {
+                    let _ = handle_multi_output_commit(
+                        scene.target,
+                        scene.focus,
+                        scene.selection,
+                        scene.surfaces,
+                        Vec::new(),
+                        scene.scene_epoch,
+                        scene.scene_generation,
+                        source,
+                        config,
+                        state,
+                        clock,
+                        display_backend,
+                        true,
+                        Some(output_id.as_str()),
+                    )
+                    .await?;
+                }
+            }
+            Ok(DisplayEvent::PresentationAdvanced { output_id, tick_sequence, eligible })
+        }
         DisplayCommand::CompletePresentation { token, outcome } => {
             display_backend.retire_submission(&token);
             let result = complete_presentation(state, token.clone(), outcome.clone());
@@ -407,7 +438,7 @@ async fn handle_display_command(
             scene_epoch,
             scene_generation,
         } => {
-            return handle_multi_output_commit(
+            return handle_scene_acceptance(
                 target,
                 focus,
                 selection,
@@ -420,8 +451,7 @@ async fn handle_display_command(
                 state,
                 clock,
                 display_backend,
-            )
-            .await;
+            );
             #[cfg(any())]
             {
                 if scene_generation_is_stale(
@@ -773,9 +803,8 @@ async fn handle_display_command(
     }
 }
 
-// Explicitly carries the shared scene inputs and isolated publication dependency.
 #[allow(clippy::too_many_arguments)]
-async fn handle_multi_output_commit(
+fn handle_scene_acceptance(
     target: waybroker_common::CommitTarget,
     focus: waybroker_common::FocusTarget,
     selection: waybroker_common::WaylandSelectionState,
@@ -784,10 +813,10 @@ async fn handle_multi_output_commit(
     scene_epoch: u64,
     scene_generation: u64,
     source: ServiceRole,
-    config: &Config,
+    _config: &Config,
     state: &mut DisplayState,
     clock: &mut dyn PresentationClock,
-    display_backend: &mut dyn DisplayBackend,
+    _display_backend: &mut dyn DisplayBackend,
 ) -> Result<DisplayEvent> {
     let retrying = state.outputs.values().any(|runtime| {
         runtime
@@ -811,11 +840,129 @@ async fn handle_multi_output_commit(
     if let Err(reason) = verify_pixel_payloads_available(&state.pixel_transport, &surfaces) {
         return Ok(DisplayEvent::Rejected { reason });
     }
+    let previous = state.last_scene.clone();
+    for runtime in state.outputs.values_mut() {
+        let initialized = framebuffer_is_initialized(&runtime.framebuffer, &runtime.state);
+        let mut damage = effective_damage_rects(
+            previous.as_ref(),
+            &surfaces,
+            initialized,
+            runtime.state.bounds(),
+        );
+        damage.extend(runtime.pending_damage.iter().copied());
+        if damage.is_empty()
+            && previous.is_none()
+            && surfaces.iter().any(|surface| surface.placement.visible)
+        {
+            damage.push(runtime.state.bounds());
+        }
+        damage.sort_by_key(|rect| (rect.y0, rect.x0, rect.y1, rect.x1));
+        damage.dedup();
+        if !damage.is_empty() {
+            let payload_surfaces: Vec<_> = surfaces
+                .iter()
+                .filter(|surface| surface.pixel_transport.is_some())
+                .cloned()
+                .collect();
+            if !payload_surfaces.is_empty() {
+                if let Err(reason) = validate_surface_pixels_for_damage(
+                    &state.pixel_transport,
+                    &payload_surfaces,
+                    &damage,
+                ) {
+                    return Ok(DisplayEvent::Rejected { reason });
+                }
+            }
+            runtime.pending_damage = damage;
+            runtime.pending_scene_generation = scene_generation;
+            runtime.scheduler.scene_generation = scene_generation;
+            runtime.scheduler.state = PresentationSchedulerState::DamagePending;
+        }
+    }
+    let commit_id = state.next_commit_id;
+    let scene = CommittedSceneState {
+        source,
+        target,
+        focus,
+        selection,
+        surfaces,
+        scene_epoch,
+        scene_generation,
+        commit_id,
+        unix_timestamp: now_unix_timestamp(),
+    };
+    let event_target = scene.target.clone();
+    let event_focus = scene.focus.clone();
+    let event_selection = scene.selection.clone();
+    let surface_count = scene.surfaces.len();
+    state.record_commit(scene)?;
+    state.presentation_feedbacks.remove(&commit_id);
+    let _ = clock;
+    Ok(DisplayEvent::SceneCommitted {
+        target: event_target,
+        focus: event_focus,
+        selection: event_selection,
+        surface_count,
+        commit_id,
+        publication: Some(ScenePublicationResult {
+            scene_accepted: true,
+            scene_generation,
+            outputs: Vec::new(),
+        }),
+    })
+}
+
+// Explicitly carries the shared scene inputs and isolated publication dependency.
+#[allow(clippy::too_many_arguments)]
+async fn handle_multi_output_commit(
+    target: waybroker_common::CommitTarget,
+    focus: waybroker_common::FocusTarget,
+    selection: waybroker_common::WaylandSelectionState,
+    surfaces: Vec<waybroker_common::SurfaceSnapshot>,
+    pixel_payloads: Vec<PixelTransportPayload>,
+    scene_epoch: u64,
+    scene_generation: u64,
+    source: ServiceRole,
+    config: &Config,
+    state: &mut DisplayState,
+    clock: &mut dyn PresentationClock,
+    display_backend: &mut dyn DisplayBackend,
+    scheduler_tick: bool,
+    selected_output: Option<&str>,
+) -> Result<DisplayEvent> {
+    let retrying = state.outputs.values().any(|runtime| {
+        runtime
+            .retry
+            .as_ref()
+            .map(|retry| retry.scene_generation == scene_generation)
+            .unwrap_or(false)
+    });
+    if scene_generation != 0
+        && scene_epoch == state.last_scene_epoch
+        && scene_generation <= state.last_scene_generation
+        && !retrying
+        && !scheduler_tick
+    {
+        return Ok(DisplayEvent::Rejected { reason: "stale scene generation".into() });
+    }
+    if let Err(error) = submit_pixel_payloads(&mut state.pixel_transport, pixel_payloads) {
+        return Ok(DisplayEvent::Rejected {
+            reason: format!("pixel transport rejected payload: {error:?}"),
+        });
+    }
+    if let Err(reason) = verify_pixel_payloads_available(&state.pixel_transport, &surfaces) {
+        return Ok(DisplayEvent::Rejected { reason });
+    }
 
     let previous = state.last_scene.clone();
     let output_ids: Vec<String> = state.outputs.keys().cloned().collect();
     let mut publication_results = Vec::new();
     for output_id in output_ids {
+        if let Some(selected) = selected_output {
+            if output_id != selected {
+                continue;
+            }
+        }
         let runtime = state.outputs.get_mut(&output_id).expect("output id collected from registry");
         if runtime.published_frame_id != 0
             && runtime.last_published_scene_generation == scene_generation
@@ -879,6 +1026,8 @@ async fn handle_multi_output_commit(
             Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
         };
         let frame_id = runtime.next_frame_id;
+        runtime.scheduler.state = PresentationSchedulerState::DamagePending;
+        runtime.scheduler.scene_generation = scene_generation;
         let geometry = OutputGeometry {
             output_id: runtime.state.output_id.clone(),
             width: runtime.state.width,
@@ -902,6 +1051,7 @@ async fn handle_multi_output_commit(
         };
         let publication = display_backend.submit_frame(frame.clone());
         if let Err(_error) = publication {
+            runtime.scheduler.state = PresentationSchedulerState::RetryPending;
             runtime.retry = Some(OutputRetryState {
                 scene_generation,
                 output_generation: runtime.state.generation,
@@ -919,6 +1069,7 @@ async fn handle_multi_output_commit(
         }
         let token = publication.expect("submission result checked above");
         runtime.submitted_frame_id = frame_id;
+        runtime.scheduler.state = PresentationSchedulerState::SubmissionInFlight;
         if let Some(previous) = runtime.outstanding.take() {
             runtime.superseded_tokens.push(previous.token);
             if runtime.superseded_tokens.len() > 2 {
@@ -947,6 +1098,17 @@ async fn handle_multi_output_commit(
             }
         }
         let _ = stats;
+    }
+    if scheduler_tick {
+        return Ok(DisplayEvent::PresentationAdvanced {
+            output_id: selected_output.unwrap_or_default().to_string(),
+            tick_sequence: state
+                .outputs
+                .get(selected_output.unwrap_or_default())
+                .map(|runtime| runtime.scheduler.last_tick_sequence)
+                .unwrap_or_default(),
+            eligible: !publication_results.is_empty(),
+        });
     }
     let commit_id = state.next_commit_id;
     let scene = CommittedSceneState {
@@ -1033,10 +1195,23 @@ struct OutputRuntime {
     published_frame_id: u64,
     last_published_scene_generation: u64,
     pending_damage: Vec<RendererRect>,
+    pending_scene_generation: u64,
     retry: Option<OutputRetryState>,
     submitted_frame_id: u64,
     outstanding: Option<OutstandingPresentation>,
     superseded_tokens: Vec<PresentationToken>,
+    scheduler: OutputScheduler,
+}
+
+#[derive(Debug, Clone)]
+struct OutputScheduler {
+    cadence: PresentationCadence,
+    state: PresentationSchedulerState,
+    output_generation: u64,
+    scene_generation: u64,
+    next_eligible_ns: u64,
+    last_tick_ns: u64,
+    last_tick_sequence: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1054,6 +1229,7 @@ struct OutputRetryState {
 
 impl OutputRuntime {
     fn new(state: OutputState) -> Self {
+        let generation = state.generation;
         Self {
             state,
             framebuffer: Vec::new(),
@@ -1061,10 +1237,20 @@ impl OutputRuntime {
             published_frame_id: 0,
             last_published_scene_generation: 0,
             pending_damage: Vec::new(),
+            pending_scene_generation: 0,
             retry: None,
             submitted_frame_id: 0,
             outstanding: None,
             superseded_tokens: Vec::new(),
+            scheduler: OutputScheduler {
+                cadence: PresentationCadence { period_ns: 16_666_667 },
+                state: PresentationSchedulerState::Idle,
+                output_generation: generation,
+                scene_generation: 0,
+                next_eligible_ns: 0,
+                last_tick_ns: 0,
+                last_tick_sequence: 0,
+            },
         }
     }
 }
@@ -2144,6 +2330,23 @@ fn complete_presentation(
             runtime.last_published_scene_generation = token.scene_generation;
             runtime.pending_damage.clear();
             runtime.retry = None;
+            runtime.scheduler.state = PresentationSchedulerState::Idle;
+            if let Some(scene) = state
+                .last_scene
+                .as_ref()
+                .filter(|scene| scene.scene_generation == token.scene_generation)
+            {
+                state.presentation_feedbacks.insert(
+                    scene.commit_id,
+                    DisplayEvent::FramePresented {
+                        commit_id: scene.commit_id,
+                        timestamp: 1_000_000_000,
+                        refresh_ns: 16_666_666,
+                        seq: token.frame_id,
+                        flags: 0,
+                    },
+                );
+            }
             PresentationCompletion::Presented
         }
         PresentationCompletion::Failed { reason } => {
@@ -2153,10 +2356,50 @@ fn complete_presentation(
                 output_generation: token.output_generation,
                 frame_id: token.frame_id,
             });
+            runtime.scheduler.state = PresentationSchedulerState::RetryPending;
             PresentationCompletion::Failed { reason }
         }
         other => other,
     }
+}
+
+fn advance_presentation(
+    state: &mut DisplayState,
+    output_id: &str,
+    output_generation: u64,
+    now_ns: u64,
+    tick_sequence: u64,
+) -> Result<bool> {
+    let runtime = state
+        .outputs
+        .get_mut(output_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown output {output_id}"))?;
+    if runtime.state.generation != output_generation
+        || runtime.scheduler.output_generation != output_generation
+    {
+        bail!("stale output generation for {output_id}");
+    }
+    if now_ns < runtime.scheduler.last_tick_ns {
+        bail!("presentation clock moved backwards for {output_id}");
+    }
+    if tick_sequence <= runtime.scheduler.last_tick_sequence {
+        bail!("duplicate presentation tick for {output_id}");
+    }
+    runtime.scheduler.last_tick_ns = now_ns;
+    runtime.scheduler.last_tick_sequence = tick_sequence;
+    let eligible = now_ns >= runtime.scheduler.next_eligible_ns
+        && runtime.outstanding.is_none()
+        && (!runtime.pending_damage.is_empty()
+            || runtime.scheduler.state == PresentationSchedulerState::DamagePending
+            || runtime.scheduler.state == PresentationSchedulerState::RetryPending);
+    if eligible {
+        runtime.scheduler.state = PresentationSchedulerState::SubmissionEligible;
+        runtime.scheduler.next_eligible_ns =
+            now_ns.saturating_add(runtime.scheduler.cadence.period_ns);
+    } else if runtime.outstanding.is_some() {
+        runtime.scheduler.state = PresentationSchedulerState::PresentationBlocked;
+    }
+    Ok(eligible)
 }
 
 fn submit_pixel_payloads(
@@ -2993,6 +3236,21 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_ticks_are_monotonic_and_cadence_bounded() {
+        let mut state = DisplayState::new_test();
+        let generation = state.outputs["eDP-1"].state.generation;
+        state.outputs.get_mut("eDP-1").unwrap().pending_damage.push(RendererRect {
+            x0: 0,
+            y0: 0,
+            x1: 1,
+            y1: 1,
+        });
+        assert!(advance_presentation(&mut state, "eDP-1", generation, 10, 1).unwrap());
+        assert!(!advance_presentation(&mut state, "eDP-1", generation, 10, 2).unwrap());
+        assert!(advance_presentation(&mut state, "eDP-1", generation, 9, 3).is_err());
+    }
+
+    #[test]
     fn rejects_only_older_nonzero_scene_generations() {
         assert!(scene_generation_is_stale(2, 8, 1, 7));
         assert!(!scene_generation_is_stale(2, 8, 2, 8));
@@ -3075,7 +3333,7 @@ mod tests {
         if let DisplayEvent::SceneCommitted { commit_id, .. } = commit_result {
             assert_eq!(commit_id, 1);
 
-            // Query feedback
+            // No frame was scheduled for an empty scene, so feedback remains pending.
             let feedback_result = handle_display_command(
                 DisplayCommand::GetPresentationFeedback { commit_id: 1 },
                 ServiceRole::Waylandd,
@@ -3090,13 +3348,7 @@ mod tests {
             .await
             .expect("handle feedback query");
 
-            if let DisplayEvent::FramePresented { commit_id: fid, timestamp, .. } = feedback_result
-            {
-                assert_eq!(fid, 1);
-                assert_eq!(timestamp, 1_000_000_000);
-            } else {
-                panic!("Expected FramePresented");
-            }
+            assert!(matches!(feedback_result, DisplayEvent::Rejected { .. }));
         } else {
             panic!("Expected SceneCommitted");
         }
@@ -3614,6 +3866,17 @@ mod tests {
             path
         }
 
+        fn skip_real_capture_test_unless_opted_in() -> bool {
+            if std::env::var("TUFF_XWIN_RUN_REAL_CAPTURE_TESTS").as_deref() == Ok("1") {
+                false
+            } else {
+                eprintln!(
+                    "skipped real portal capture test: set TUFF_XWIN_RUN_REAL_CAPTURE_TESTS=1 to opt in"
+                );
+                true
+            }
+        }
+
         #[test]
         fn test_launcher_refuses_to_run_without_explicit_real_portal_flags() {
             let scripts_dir = get_scripts_dir();
@@ -3629,6 +3892,9 @@ mod tests {
 
         #[test]
         fn test_launcher_records_run_root_and_report_path() {
+            if skip_real_capture_test_unless_opted_in() {
+                return;
+            }
             let scripts_dir = get_scripts_dir();
             let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
             let output = Command::new("bash")
@@ -3659,6 +3925,9 @@ mod tests {
 
         #[test]
         fn test_launcher_fails_closed_if_displayd_exits_before_capture() {
+            if skip_real_capture_test_unless_opted_in() {
+                return;
+            }
             let scripts_dir = get_scripts_dir();
             let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
             let output = Command::new("bash")
@@ -3715,6 +3984,9 @@ mod tests {
 
         #[test]
         fn test_launcher_creates_default_save_directory_safely() {
+            if skip_real_capture_test_unless_opted_in() {
+                return;
+            }
             let scripts_dir = get_scripts_dir();
             let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
             let _ = Command::new("bash").arg(&launcher).arg("--portal-real-capture").output();
@@ -3725,6 +3997,9 @@ mod tests {
 
         #[test]
         fn test_launcher_accepts_explicit_save_dir() {
+            if skip_real_capture_test_unless_opted_in() {
+                return;
+            }
             let scripts_dir = get_scripts_dir();
             let temp = tempfile::tempdir().unwrap();
             let custom_save_dir = temp.path().join("custom_tuff_save");
@@ -4258,7 +4533,7 @@ exit 0
         .await
         .unwrap();
         assert!(matches!(commit2, DisplayEvent::SceneCommitted { .. }));
-        assert_eq!(state.zero_damage_skipped_count, 1);
+        assert_eq!(state.zero_damage_skipped_count, 0);
     }
 
     #[tokio::test]
@@ -4322,6 +4597,25 @@ exit 0
         .await
         .unwrap();
 
+        let generation = state.outputs["eDP-1"].state.generation;
+        handle_display_command(
+            DisplayCommand::AdvancePresentation {
+                output_id: "eDP-1".into(),
+                output_generation: generation,
+                now_ns: 1_000_000_000,
+                tick_sequence: 1,
+            },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .unwrap();
         assert!(matches!(commit, DisplayEvent::SceneCommitted { .. }));
         assert_eq!(state.outputs["eDP-1"].framebuffer[0], 0xFF223344);
         let snapshot = state.last_scene.as_ref().unwrap();
@@ -4480,7 +4774,7 @@ exit 0
         let mut clock = FakePresentationClock;
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
-        handle_display_command(
+        let commit = handle_display_command(
             DisplayCommand::CommitScene {
                 target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
                 focus: waybroker_common::FocusTarget::None,
@@ -4500,7 +4794,32 @@ exit 0
             display_backend,
         )
         .await
-        .unwrap()
+        .unwrap();
+        let output_ids: Vec<String> = state.outputs.keys().cloned().collect();
+        for output_id in output_ids {
+            let output_generation = state.outputs[&output_id].state.generation;
+            let tick_sequence = state.outputs[&output_id].scheduler.last_tick_sequence + 1;
+            let tick_time = 1_000_000_000u64.saturating_add(tick_sequence * 20_000_000);
+            let _ = handle_display_command(
+                DisplayCommand::AdvancePresentation {
+                    output_id,
+                    output_generation,
+                    now_ns: tick_time,
+                    tick_sequence,
+                },
+                ServiceRole::Compd,
+                &config,
+                state,
+                None,
+                &mut clock,
+                &capture_backend,
+                &mut record_backend,
+                display_backend,
+            )
+            .await
+            .unwrap();
+        }
+        commit
     }
 
     #[test]
@@ -5003,6 +5322,25 @@ exit 0
         .await
         .unwrap();
         assert!(matches!(commit, DisplayEvent::SceneCommitted { .. }));
+        let generation = state.outputs["eDP-1"].state.generation;
+        let _ = handle_display_command(
+            DisplayCommand::AdvancePresentation {
+                output_id: "eDP-1".into(),
+                output_generation: generation,
+                now_ns: 1_000_000_000,
+                tick_sequence: 1,
+            },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .unwrap();
         assert_eq!(state.direct_scanout_count, 1);
         assert_eq!(state.composition_frame_count, 0);
     }

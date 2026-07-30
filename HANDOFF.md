@@ -115,6 +115,24 @@
     * duplicate、unknown、cross-output、stale generation completion は fail-closed。superseded token は newer frame を後退させない。
     * MockDisplayBackend は deterministic pending submission と bounded token retention を持つ。production display backend は追加・接続していない。
 
+13. **Deterministic presentation scheduler boundary**
+    * output registry 内に cadence、scheduler state、generation、monotonic tick、eligible time を保持する `OutputScheduler` を追加。
+    * `AdvancePresentation` IPC は output generation、timestamp、tick sequence を検証し、backward clock と duplicate tick を拒否する。
+    * scheduler は submission-in-flight を output 単位で blocked として扱い、cadence と pending damage を bounded に管理する。physical refresh/VSync を表さない。
+    * Wayland frame callback は既存の presentation completion 経路を通るまで成功扱いにせず、production display backend は接続していない。
+
+14. **Scheduler runtime migration**
+    * `CommitScene` は canonical scene、PixelTransport、output ごとの pending damage を受け付けるだけで、通常の backend submission は行わない。
+    * `AdvancePresentation` が cadence、generation、in-flight 状態を検証し、最新 canonical scene から eligible output を compose/submission する唯一の通常経路になった。
+    * immediate-submission 前提の displayd tests を tick-driven lifecycle に移行し、direct-scanout、zero-damage、PixelTransport、multi-output retry、malformed payload、capture の境界を更新した。
+    * presentation feedback は acceptance では確定せず、valid Presented completion 後にのみ確定する。Wayland frame callback の commit/output association と first-valid-intersecting-output delivery は次の follow-up とする。
+
+15. **Real portal capture isolation**
+    * `tuff-xwin-capture-once.sh --portal-real-capture` は `TUFF_XWIN_RUN_REAL_CAPTURE_TESTS=1` の明示 opt-in がない限り fail-closed し、通常の Cargo test / dev-check から portal dialog に到達しない。
+    * interactive な launcher tests は opt-in 未設定時に実行前に skip し、fake/stub capture tests と capture protocol coverage は通常検証に残す。
+    * `scripts/dev-check.sh` は real-capture opt-in が設定された場合も fail-closed する。手動実行例は `TUFF_XWIN_RUN_REAL_CAPTURE_TESTS=1 bash scripts/tuff-xwin-capture-once.sh --portal-real-capture` であり、portal dialog が表示され得るため通常検証や CI では実行しない。
+    * scheduler runtime migration の CommitScene acceptance-only、AdvancePresentation submission、Presented completion 境界は維持。Wayland frame callback completion delivery は未実装の follow-up とする。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 

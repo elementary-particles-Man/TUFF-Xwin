@@ -92,6 +92,12 @@ pub enum ImeEvent {
 pub enum DisplayCommand {
     GetLiveness,
     GetReadiness,
+    AdvancePresentation {
+        output_id: String,
+        output_generation: u64,
+        now_ns: u64,
+        tick_sequence: u64,
+    },
     CompletePresentation {
         token: PresentationToken,
         outcome: PresentationCompletion,
@@ -192,6 +198,11 @@ pub enum DisplayEvent {
         token: PresentationToken,
         outcome: PresentationCompletion,
     },
+    PresentationAdvanced {
+        output_id: String,
+        tick_sequence: u64,
+        eligible: bool,
+    },
     OutputInventory {
         outputs: Vec<OutputMode>,
     },
@@ -255,6 +266,31 @@ pub enum DisplayEvent {
         reason: String,
     },
     ResumeStarted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PresentationSchedulerState {
+    Idle,
+    DamagePending,
+    SubmissionEligible,
+    SubmissionInFlight,
+    RetryPending,
+    PresentationBlocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresentationCadence {
+    pub period_ns: u64,
+}
+
+impl PresentationCadence {
+    pub fn validate(self) -> Result<(), String> {
+        if self.period_ns == 0 {
+            return Err("presentation cadence must be non-zero".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -506,6 +542,14 @@ mod readiness_tests {
         let decoded: (PresentationToken, PresentationCompletion) =
             serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, (token, completion));
+    }
+
+    #[test]
+    fn cadence_rejects_zero_and_scheduler_state_round_trips() {
+        assert!(PresentationCadence { period_ns: 0 }.validate().is_err());
+        let state = PresentationSchedulerState::SubmissionInFlight;
+        let encoded = serde_json::to_string(&state).unwrap();
+        assert_eq!(serde_json::from_str::<PresentationSchedulerState>(&encoded).unwrap(), state);
     }
 }
 
