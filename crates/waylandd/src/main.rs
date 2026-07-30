@@ -14,6 +14,7 @@ use std::os::unix::{
 
 use anyhow::{Context, Result, bail};
 use byteorder::ByteOrder;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 static GLOBAL_REGISTRY: Mutex<Option<SurfaceRegistrySnapshot>> = Mutex::new(None);
@@ -1170,6 +1171,7 @@ fn handle_production_client(stream: UnixStream, scene_epoch: u64) -> Result<()> 
         }
     }
     let mut received_fds = Vec::new();
+    let mut pending_callbacks = PendingFrameCallbacks::default();
     let mut buffer = Vec::with_capacity(4096);
     let mut read_buf = [0u8; 4096];
 
@@ -1213,19 +1215,52 @@ fn handle_production_client(stream: UnixStream, scene_epoch: u64) -> Result<()> 
                     }
                     if is_commit {
                         upsert_client_scene(client_id, &core);
+                        let scene_generation = current_canonical_scene_generation();
+                        let surface = production_scene_surfaces(client_id, &core)
+                            .0
+                            .into_iter()
+                            .find(|surface| {
+                                surface.id
+                                    == format!("client-{client_id}-surface-{}", committed_surface.0)
+                            });
+                        let output_viewports = output_viewports(&outputs);
+                        for callback_id in core.take_frame_callbacks(committed_surface) {
+                            let intersecting_outputs = surface
+                                .as_ref()
+                                .map(|surface| {
+                                    intersecting_output_ids(&surface.placement, &output_viewports)
+                                })
+                                .unwrap_or_default();
+                            pending_callbacks.register(
+                                client_id,
+                                callback_id,
+                                committed_surface.0,
+                                scene_generation,
+                                intersecting_outputs,
+                            )?;
+                        }
+
                         let _presented = commit_canonical_scene(&outputs, scene_epoch)?;
-                        let callbacks = core.take_frame_callbacks(committed_surface);
-                        for callback_id in callbacks {
+                        let presented_output =
+                            outputs.first().map(|output| output.name.as_str()).unwrap_or_default();
+                        for callback_id in pending_callbacks.release_for_presented(
+                            client_id,
+                            scene_generation,
+                            presented_output,
+                        ) {
                             let mut payload = vec![0u8; 4];
                             byteorder::LittleEndian::write_u32(&mut payload, 0);
                             let event = wayland_wire::WaylandMessage::new(
-                                callback_id,
+                                wayland_wire::WaylandObjectId(callback_id),
                                 wayland_wire::WaylandOpcode(0),
                                 payload,
                             );
                             let mut s = &stream;
                             s.write_all(&wayland_wire::codec::encode_message(&event)?)?;
                         }
+                    }
+                    if !core.surfaces.surfaces.contains_key(&committed_surface) {
+                        pending_callbacks.remove_surface(client_id, committed_surface.0);
                     }
                 }
                 Err(wayland_wire::WireError::Incomplete) => break,
@@ -1240,6 +1275,126 @@ fn handle_production_client(stream: UnixStream, scene_epoch: u64) -> Result<()> 
     }
     registry_guard.finalize()?;
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingFrameCallback {
+    callback_id: u32,
+    client_id: u64,
+    surface_id: u32,
+    scene_generation: u64,
+    intersecting_outputs: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct PendingFrameCallbacks {
+    callbacks: BTreeMap<(u64, u32), PendingFrameCallback>,
+}
+
+impl PendingFrameCallbacks {
+    fn register(
+        &mut self,
+        client_id: u64,
+        callback_id: wayland_wire::WaylandObjectId,
+        surface_id: u32,
+        scene_generation: u64,
+        mut intersecting_outputs: Vec<String>,
+    ) -> Result<()> {
+        intersecting_outputs.sort();
+        intersecting_outputs.dedup();
+        let key = (client_id, callback_id.0);
+        if self.callbacks.contains_key(&key) {
+            bail!(
+                "duplicate frame callback identity client={client_id} callback={}",
+                callback_id.0
+            );
+        }
+        self.callbacks.insert(
+            key,
+            PendingFrameCallback {
+                callback_id: callback_id.0,
+                client_id,
+                surface_id,
+                scene_generation,
+                intersecting_outputs,
+            },
+        );
+        Ok(())
+    }
+
+    fn release_for_presented(
+        &mut self,
+        client_id: u64,
+        presented_scene_generation: u64,
+        output_id: &str,
+    ) -> Vec<u32> {
+        let keys: Vec<_> = self
+            .callbacks
+            .iter()
+            .filter(|(_, callback)| {
+                callback.client_id == client_id
+                    && callback.scene_generation <= presented_scene_generation
+                    && callback.intersecting_outputs.iter().any(|output| output == output_id)
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| self.callbacks.remove(&key).map(|callback| callback.callback_id))
+            .collect()
+    }
+
+    fn remove_surface(&mut self, client_id: u64, surface_id: u32) {
+        self.callbacks.retain(|_, callback| {
+            !(callback.client_id == client_id && callback.surface_id == surface_id)
+        });
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.callbacks.len()
+    }
+}
+
+fn current_canonical_scene_generation() -> u64 {
+    CANONICAL_SCENE.lock().unwrap().generation
+}
+
+fn output_viewports(outputs: &[OutputMode]) -> Vec<(String, waybroker_common::Rect)> {
+    let mut origin_x = 0i32;
+    outputs
+        .iter()
+        .map(|output| {
+            let viewport = waybroker_common::Rect {
+                x: origin_x,
+                y: 0,
+                width: output.width,
+                height: output.height,
+            };
+            origin_x = origin_x.saturating_add(output.width.min(i32::MAX as u32) as i32);
+            (output.name.clone(), viewport)
+        })
+        .collect()
+}
+
+fn intersecting_output_ids(
+    placement: &SurfacePlacement,
+    output_viewports: &[(String, waybroker_common::Rect)],
+) -> Vec<String> {
+    output_viewports
+        .iter()
+        .filter_map(|(output_id, viewport)| {
+            let right = i64::from(placement.x) + i64::from(placement.width);
+            let bottom = i64::from(placement.y) + i64::from(placement.height);
+            let viewport_right = i64::from(viewport.x) + i64::from(viewport.width);
+            let viewport_bottom = i64::from(viewport.y) + i64::from(viewport.height);
+            (placement.visible
+                && i64::from(placement.x) < viewport_right
+                && right > i64::from(viewport.x)
+                && i64::from(placement.y) < viewport_bottom
+                && bottom > i64::from(viewport.y))
+            .then(|| output_id.clone())
+        })
+        .collect()
 }
 
 struct ClientRegistryGuard {
@@ -2077,14 +2232,83 @@ impl Drop for WaylandDisplaySocket {
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_wayland_command, mock_surface_registry, should_clear_pending_commit,
+        PendingFrameCallbacks, handle_wayland_command, intersecting_output_ids,
+        mock_surface_registry, output_viewports, should_clear_pending_commit,
         should_store_pending_commit, socket_lock_is_stale,
     };
     use std::fs;
     use waybroker_common::{
-        FocusTarget, SurfacePlacement, SurfaceSnapshot, WaylandCommand, WaylandEvent,
+        FocusTarget, OutputMode, SurfacePlacement, SurfaceSnapshot, WaylandCommand, WaylandEvent,
         WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
     };
+
+    #[test]
+    fn frame_callback_waits_for_presented_and_delivers_once() {
+        let mut callbacks = PendingFrameCallbacks::default();
+        callbacks
+            .register(
+                7,
+                wayland_wire::WaylandObjectId(42),
+                3,
+                11,
+                vec!["HDMI-A-1".into(), "eDP-1".into()],
+            )
+            .unwrap();
+
+        assert_eq!(callbacks.len(), 1);
+        assert!(callbacks.release_for_presented(7, 10, "eDP-1").is_empty());
+        assert_eq!(callbacks.len(), 1);
+        assert_eq!(callbacks.release_for_presented(7, 11, "eDP-1"), vec![42]);
+        assert!(callbacks.release_for_presented(7, 11, "HDMI-A-1").is_empty());
+        assert_eq!(callbacks.len(), 0);
+    }
+
+    #[test]
+    fn frame_callback_ignores_non_intersecting_output_and_newer_generation() {
+        let mut callbacks = PendingFrameCallbacks::default();
+        callbacks
+            .register(7, wayland_wire::WaylandObjectId(42), 3, 11, vec!["eDP-1".into()])
+            .unwrap();
+
+        assert!(callbacks.release_for_presented(7, 11, "DP-1").is_empty());
+        assert!(callbacks.release_for_presented(7, 10, "eDP-1").is_empty());
+        assert_eq!(callbacks.len(), 1);
+    }
+
+    #[test]
+    fn frame_callback_cleanup_is_scoped_to_surface_and_client() {
+        let mut callbacks = PendingFrameCallbacks::default();
+        callbacks
+            .register(1, wayland_wire::WaylandObjectId(2), 3, 1, vec!["eDP-1".into()])
+            .unwrap();
+        callbacks
+            .register(2, wayland_wire::WaylandObjectId(2), 3, 1, vec!["eDP-1".into()])
+            .unwrap();
+        callbacks
+            .register(1, wayland_wire::WaylandObjectId(4), 4, 1, vec!["eDP-1".into()])
+            .unwrap();
+
+        callbacks.remove_surface(1, 3);
+        assert_eq!(callbacks.len(), 2);
+        assert_eq!(callbacks.release_for_presented(2, 1, "eDP-1"), vec![2]);
+        assert_eq!(callbacks.release_for_presented(1, 1, "eDP-1"), vec![4]);
+    }
+
+    #[test]
+    fn output_intersection_is_deterministic_and_excludes_empty_viewports() {
+        let outputs = vec![
+            OutputMode { name: "eDP-1".into(), width: 100, height: 100, refresh_hz: 60 },
+            OutputMode { name: "HDMI-A-1".into(), width: 100, height: 100, refresh_hz: 60 },
+        ];
+        let viewports = output_viewports(&outputs);
+        let placement =
+            SurfacePlacement { x: 90, y: 10, width: 30, height: 20, z: 0, visible: true };
+        assert_eq!(intersecting_output_ids(&placement, &viewports), vec!["eDP-1", "HDMI-A-1"]);
+        assert!(
+            intersecting_output_ids(&SurfacePlacement { visible: false, ..placement }, &viewports)
+                .is_empty()
+        );
+    }
 
     #[test]
     fn mock_registry_contains_mapped_focusable_surface() {

@@ -133,6 +133,12 @@
     * `scripts/dev-check.sh` は real-capture opt-in が設定された場合も fail-closed する。手動実行例は `TUFF_XWIN_RUN_REAL_CAPTURE_TESTS=1 bash scripts/tuff-xwin-capture-once.sh --portal-real-capture` であり、portal dialog が表示され得るため通常検証や CI では実行しない。
     * scheduler runtime migration の CommitScene acceptance-only、AdvancePresentation submission、Presented completion 境界は維持。Wayland frame callback completion delivery は未実装の follow-up とする。
 
+16. **Wayland frame callback completion boundary**
+    * production Wayland 接続では `wl_surface.frame` callback を generation-bound pending registry に登録し、client、surface、callback identity、accepted scene generation、intersecting output IDs のみを保持する。
+    * callback は CommitScene acceptance、damage accumulation、scheduler tick、composition、submission では送信せず、`commit_production_scene` が valid `FramePresented` を返した後にだけ release する。
+    * policy は first valid Presented completion from any intersecting output。後続 output completion は at-most-once registry removal により重複送信しない。non-intersecting output、newer-generation 未到達 completion、surface cleanup は release しない。
+    * output viewport は deterministic な configured output order で計算し、surface geometry と checked intersection を用いる。real portal capture は引き続き未実行、production display への接続も行っていない。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 
