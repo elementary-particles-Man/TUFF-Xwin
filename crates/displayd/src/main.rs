@@ -3,8 +3,10 @@ use std::{
     env, fs,
     io::BufReader,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
 use std::os::fd::RawFd;
@@ -14,21 +16,22 @@ use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
 };
 use waybroker_common::{
-    BackendOutputEvent, CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope,
-    MessageKind, OutputGeometry, OutputMode, OutputPublicationOutcome, OutputPublicationResult,
-    OutputReadiness, OutputReadinessState, PixelTransportError, PixelTransportPayload,
-    PixelTransportStore, PresentationCadence, PresentationCompletion, PresentationSchedulerState,
-    PresentationToken, PublicationFailure, ScenePublicationResult, ServiceBanner, ServiceEndpoint,
-    ServiceReadiness, ServiceReadinessState, ServiceRole, ServiceStream,
-    accel::global_accel_policy, bind_service_socket, ensure_runtime_dir, now_unix_timestamp,
-    read_json_line, sanitize_artifact_filename, send_json_line, session_artifact_path,
-    validate_artifact_filename,
+    BackendOutputEvent, CommittedSceneState, DisplayCommand, DisplayEvent,
+    DisplayReconciliationState, IpcEnvelope, MessageKind, OutputGeometry, OutputMode,
+    OutputPublicationOutcome, OutputPublicationResult, OutputReadiness, OutputReadinessState,
+    PixelTransportError, PixelTransportPayload, PixelTransportStore, PresentationCadence,
+    PresentationCompletion, PresentationSchedulerState, PresentationToken, PublicationFailure,
+    ScenePublicationResult, ServiceBanner, ServiceEndpoint, ServiceReadiness,
+    ServiceReadinessState, ServiceRole, ServiceStream, accel::global_accel_policy,
+    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
+    sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
 const BACKGROUND_PIXEL: u32 = 0xFF00_0000;
 const MOCK_BACKEND_INSTANCE_ID: u64 = 1;
 const HEADLESS_SHM_BACKEND_INSTANCE_ID: u64 = 2;
+static NEXT_DISPLAY_EPOCH: AtomicU64 = AtomicU64::new(1);
 const HEADLESS_SHM_MAGIC: u32 = 0x5455_4646;
 const HEADLESS_SHM_VERSION: u16 = 1;
 #[cfg(test)]
@@ -37,6 +40,12 @@ const FRAMEBUFFER_WIDTH: u32 = 1920;
 const FRAMEBUFFER_HEIGHT: u32 = 1080;
 const WL_SHM_FORMAT_ARGB8888: u32 = 0;
 const WL_SHM_FORMAT_XRGB8888: u32 = 1;
+
+fn generate_display_epoch() -> u64 {
+    let timestamp =
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
+    timestamp.max(NEXT_DISPLAY_EPOCH.fetch_add(1, Ordering::Relaxed))
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -81,7 +90,7 @@ async fn main() -> Result<()> {
     let mut display_backend: Box<dyn DisplayBackend> = match config.display_backend {
         DisplayBackendType::Mock => Box::new(MockDisplayBackend::default()),
         DisplayBackendType::HeadlessShm => {
-            let mut backend = HeadlessShmDisplayBackend::default();
+            let mut backend = HeadlessShmDisplayBackend::new_with_instance_id(state.display_epoch);
             backend.queue_connected_output(OutputGeometry {
                 output_id: "headless-0".into(),
                 width: 1920,
@@ -339,6 +348,9 @@ fn apply_backend_output_events(
     for event in display_backend.poll_output_events()? {
         apply_backend_output_event(state, display_backend, event)?;
     }
+    if state.reconciliation_state == DisplayReconciliationState::Recovering {
+        state.reconciliation_state = DisplayReconciliationState::ReconciledAwaitingPresentation;
+    }
     Ok(())
 }
 
@@ -356,6 +368,16 @@ fn apply_backend_output_event(
             (*backend_instance_id, *event_sequence)
         }
     };
+    if backend_instance_id != 0 && backend_instance_id != state.display_epoch {
+        if state.outputs.is_empty()
+            && state.backend_sequences.is_empty()
+            && state.reconciliation_state != DisplayReconciliationState::Recovering
+        {
+            state.display_epoch = backend_instance_id;
+        } else {
+            bail!("backend event belongs to a stale display epoch");
+        }
+    }
     if let Some(previous) = state.backend_sequences.get(&backend_instance_id) {
         if sequence == *previous {
             return Ok(());
@@ -368,6 +390,11 @@ fn apply_backend_output_event(
         BackendOutputEvent::Connected { backend_output_id, geometry, cadence, .. }
         | BackendOutputEvent::Reconfigured { backend_output_id, geometry, cadence, .. } => {
             cadence.validate().map_err(|reason| anyhow::anyhow!(reason))?;
+            let mut geometry = geometry;
+            if backend_instance_id != 0 {
+                geometry.output_generation =
+                    geometry.output_generation.saturating_add(state.display_epoch);
+            }
             let mapped_id = backend_output_id.clone();
             if geometry.output_id != mapped_id {
                 bail!("backend output identity does not match geometry output_id");
@@ -397,12 +424,17 @@ fn apply_backend_output_event(
             state.outputs.insert(mapped_id, runtime);
         }
         BackendOutputEvent::Disabled { backend_output_id, output_generation, .. } => {
+            let effective_generation = if backend_instance_id == 0 {
+                output_generation
+            } else {
+                output_generation.saturating_add(state.display_epoch)
+            };
             let runtime = state
                 .outputs
                 .get_mut(&backend_output_id)
                 .ok_or_else(|| anyhow::anyhow!("backend disabled unknown output"))?;
             if runtime.backend_instance_id != backend_instance_id
-                || runtime.state.generation != output_generation
+                || runtime.state.generation != effective_generation
             {
                 bail!("backend disabled event generation or identity mismatch");
             }
@@ -415,12 +447,17 @@ fn apply_backend_output_event(
             runtime.disabled = true;
         }
         BackendOutputEvent::Disconnected { backend_output_id, output_generation, .. } => {
+            let effective_generation = if backend_instance_id == 0 {
+                output_generation
+            } else {
+                output_generation.saturating_add(state.display_epoch)
+            };
             let runtime = state
                 .outputs
                 .get(&backend_output_id)
                 .ok_or_else(|| anyhow::anyhow!("backend disconnected unknown output"))?;
             if runtime.backend_instance_id != backend_instance_id
-                || runtime.state.generation != output_generation
+                || runtime.state.generation != effective_generation
             {
                 bail!("backend disconnect event generation or identity mismatch");
             }
@@ -507,6 +544,17 @@ async fn handle_display_command(
             // The deterministic CPU renderer is always available; Vulkan is only acceleration.
             let _ = vulkan;
             Ok(DisplayEvent::Readiness(readiness_from_state(state, true)))
+        }
+        DisplayCommand::GetReconciliation => Ok(DisplayEvent::Reconciliation {
+            epoch: state.display_epoch,
+            state: state.reconciliation_state,
+        }),
+        DisplayCommand::BeginReconciliation { epoch } => {
+            state.begin_restart(epoch)?;
+            Ok(DisplayEvent::Reconciliation {
+                epoch,
+                state: DisplayReconciliationState::Recovering,
+            })
         }
         DisplayCommand::AdvancePresentation {
             output_id,
@@ -1349,6 +1397,8 @@ fn scene_generation_is_stale(
 
 #[derive(Debug)]
 struct DisplayState {
+    display_epoch: u64,
+    reconciliation_state: DisplayReconciliationState,
     last_scene: Option<CommittedSceneState>,
     last_scene_epoch: u64,
     last_scene_generation: u64,
@@ -1751,6 +1801,7 @@ struct HeadlessShmOutput {
 
 #[derive(Default)]
 struct HeadlessShmDisplayBackend {
+    backend_instance_id: u64,
     outputs: BTreeMap<String, HeadlessShmOutput>,
     pending: BTreeMap<PresentationToken, FramePublication>,
     next_sequence: u64,
@@ -1771,12 +1822,20 @@ enum HeadlessShmFailure {
 }
 
 impl HeadlessShmDisplayBackend {
+    fn new_with_instance_id(backend_instance_id: u64) -> Self {
+        Self { backend_instance_id, ..Self::default() }
+    }
+
+    fn instance_id(&self) -> u64 {
+        self.backend_instance_id.max(HEADLESS_SHM_BACKEND_INSTANCE_ID)
+    }
+
     fn queue_connected_output(&mut self, geometry: OutputGeometry) {
         if self.next_event_sequence == 0 {
             self.next_event_sequence = 1;
         }
         self.output_events.push_back(BackendOutputEvent::Connected {
-            backend_instance_id: HEADLESS_SHM_BACKEND_INSTANCE_ID,
+            backend_instance_id: self.instance_id(),
             backend_output_id: geometry.output_id.clone(),
             event_sequence: self.next_event_sequence,
             geometry,
@@ -2007,7 +2066,7 @@ impl DisplayBackend for HeadlessShmDisplayBackend {
     fn submit_frame(&mut self, request: FramePublication) -> Result<PresentationToken> {
         self.publish_atomic(request.clone())?;
         let token = PresentationToken {
-            backend_instance_id: HEADLESS_SHM_BACKEND_INSTANCE_ID,
+            backend_instance_id: self.instance_id(),
             sequence: self.next_sequence,
             output_id: request.output_id.clone(),
             output_generation: request.output_generation,
@@ -2695,6 +2754,18 @@ impl PresentationClock for FakePresentationClock {
 }
 
 impl DisplayState {
+    fn begin_restart(&mut self, new_epoch: u64) -> Result<()> {
+        if new_epoch <= self.display_epoch {
+            bail!("display epoch must advance monotonically");
+        }
+        self.display_epoch = new_epoch;
+        self.reconciliation_state = DisplayReconciliationState::Recovering;
+        self.outputs.clear();
+        self.backend_sequences.clear();
+        self.presentation_feedbacks.clear();
+        Ok(())
+    }
+
     fn load(session_instance_id: &str) -> Result<Self> {
         let _ = ensure_runtime_dir()?;
         let snapshot_path = session_artifact_path(session_instance_id, "scene-snapshot");
@@ -2727,6 +2798,8 @@ impl DisplayState {
         }
 
         Ok(Self {
+            display_epoch: generate_display_epoch(),
+            reconciliation_state: DisplayReconciliationState::ReconciledAwaitingPresentation,
             last_scene,
             last_scene_epoch,
             last_scene_generation,
@@ -2773,6 +2846,8 @@ impl DisplayState {
     #[cfg(test)]
     fn new_test() -> Self {
         Self {
+            display_epoch: 1,
+            reconciliation_state: DisplayReconciliationState::ReconciledAwaitingPresentation,
             last_scene: None,
             last_scene_epoch: 0,
             last_scene_generation: 0,
@@ -2882,6 +2957,10 @@ fn complete_presentation(
     let Some(runtime) = state.outputs.get_mut(&token.output_id) else {
         return PresentationCompletion::UnknownToken;
     };
+    if runtime.backend_instance_id != 0 && runtime.backend_instance_id != token.backend_instance_id
+    {
+        return PresentationCompletion::UnknownToken;
+    }
     if let Some(index) = runtime.superseded_tokens.iter().position(|old| old == &token) {
         runtime.superseded_tokens.remove(index);
         return PresentationCompletion::Superseded;
@@ -2899,7 +2978,7 @@ fn complete_presentation(
         return PresentationCompletion::UnknownToken;
     }
     runtime.outstanding = None;
-    match outcome {
+    let result = match outcome {
         PresentationCompletion::Presented => {
             runtime.framebuffer = outstanding.frame.pixels.to_vec();
             runtime.published_frame_id = token.frame_id;
@@ -2936,7 +3015,16 @@ fn complete_presentation(
             PresentationCompletion::Failed { reason }
         }
         other => other,
+    };
+    if result == PresentationCompletion::Presented
+        && state.reconciliation_state == DisplayReconciliationState::ReconciledAwaitingPresentation
+        && state.outputs.values().all(|output| {
+            !output.disabled && output.published_frame_id != 0 && output.pending_damage.is_empty()
+        })
+    {
+        state.reconciliation_state = DisplayReconciliationState::Ready;
     }
+    result
 }
 
 fn advance_presentation(
@@ -3923,7 +4011,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(state.outputs["headless-0"].state.generation, 2);
+        assert_eq!(state.outputs["headless-0"].state.generation, 4);
         assert!(state.outputs["headless-0"].pending_damage.len() == 1);
         assert!(
             apply_backend_output_event(
@@ -3946,6 +4034,47 @@ mod tests {
         )
         .unwrap();
         assert!(!state.outputs.contains_key("headless-0"));
+    }
+
+    #[test]
+    fn restart_epoch_discards_runtime_state_and_reconciles_fresh_output() {
+        let mut state = DisplayState::new_test();
+        state.display_epoch = 10;
+        state.outputs.get_mut("eDP-1").unwrap().published_frame_id = 8;
+        let mut backend = HeadlessShmDisplayBackend::new_with_instance_id(11);
+        state.begin_restart(11).unwrap();
+        assert!(state.outputs.is_empty());
+        assert_eq!(state.reconciliation_state, DisplayReconciliationState::Recovering);
+
+        backend.queue_connected_output(OutputGeometry {
+            output_id: "eDP-1".into(),
+            width: 32,
+            height: 16,
+            stride: 128,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 1,
+        });
+        apply_backend_output_events(&mut state, &mut backend).unwrap();
+        assert_eq!(
+            state.reconciliation_state,
+            DisplayReconciliationState::ReconciledAwaitingPresentation
+        );
+        assert_eq!(state.outputs["eDP-1"].published_frame_id, 0);
+        assert_eq!(state.outputs["eDP-1"].pending_damage.len(), 1);
+
+        let stale = BackendOutputEvent::BackendReset { backend_instance_id: 10, event_sequence: 1 };
+        assert!(apply_backend_output_event(&mut state, &mut backend, stale).is_err());
+        assert!(state.outputs.contains_key("eDP-1"));
+    }
+
+    #[test]
+    fn restart_rejects_duplicate_and_backward_epochs() {
+        let mut state = DisplayState::new_test();
+        assert!(state.begin_restart(1).is_err());
+        state.begin_restart(2).unwrap();
+        assert!(state.begin_restart(2).is_err());
     }
 
     #[test]

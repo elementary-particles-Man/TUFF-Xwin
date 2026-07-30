@@ -93,6 +93,10 @@ pub enum ImeEvent {
 pub enum DisplayCommand {
     GetLiveness,
     GetReadiness,
+    GetReconciliation,
+    BeginReconciliation {
+        epoch: u64,
+    },
     AdvancePresentation {
         output_id: String,
         output_generation: u64,
@@ -195,6 +199,10 @@ pub enum DisplayEvent {
         responsive: bool,
     },
     Readiness(ServiceReadiness),
+    Reconciliation {
+        epoch: u64,
+        state: DisplayReconciliationState,
+    },
     PresentationCompleted {
         token: PresentationToken,
         outcome: PresentationCompletion,
@@ -815,6 +823,15 @@ pub enum ResumeStage {
     OutputsRecovered,
     LockReady,
     Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DisplayReconciliationState {
+    Recovering,
+    ReconciledAwaitingPresentation,
+    Ready,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -153,6 +153,12 @@
     * reconfigure は full damage と新 generation、disable は Disabled readiness と submission 停止、disconnect/reset は backend-owned runtime／shared-memory／token state を除去する。canonical scene と PixelTransportStore は保持する。
     * physical output discovery、DRM、KMS、host Wayland、X11、Vulkan presentation、real portal capture は実装・実行していない。
 
+19. **Displayd restart reconciliation**
+    * `DisplayState` に typed display epoch と `Recovering`／`ReconciledAwaitingPresentation`／`Ready`／`Failed` handshake state を追加し、`BeginReconciliation`／`GetReconciliation` IPC で supervisor が状態を取得できる。
+    * restart 時は canonical scene、scene generation、PixelTransport の authoritative input を保持し、OutputRuntime、framebuffer、outstanding token、retry、feedback、backend sequence／mapping を破棄する。restart 自体は submission を行わない。
+    * 新 backend instance と epoch-bound output identity を再接続し、output generation を epoch namespace に変換して full-output damage を積む。最初の eligible AdvancePresentation と fresh Presented completion の後だけ readiness／capture／feedback を回復する。
+    * 旧 backend instance、旧 output generation、旧 completion、backward／duplicate epoch は fail-closed。production display backend、physical output discovery、real portal capture は実装・実行していない。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 
