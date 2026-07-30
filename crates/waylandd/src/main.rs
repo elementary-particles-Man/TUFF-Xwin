@@ -16,12 +16,17 @@ use anyhow::{Context, Result, bail};
 use byteorder::ByteOrder;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{
+    LazyLock, Mutex,
+    mpsc::{Receiver, SyncSender, sync_channel},
+};
 static GLOBAL_REGISTRY: Mutex<Option<SurfaceRegistrySnapshot>> = Mutex::new(None);
 static CANONICAL_SCENE: LazyLock<Mutex<CanonicalSceneState>> =
     LazyLock::new(|| Mutex::new(CanonicalSceneState::default()));
 static PIXEL_TRANSPORT: LazyLock<Mutex<PixelTransportStore>> =
     LazyLock::new(|| Mutex::new(PixelTransportStore::default()));
+static TOPOLOGY_RECEIVER: LazyLock<Mutex<Option<Receiver<DisplayEvent>>>> =
+    LazyLock::new(|| Mutex::new(None));
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
@@ -408,6 +413,9 @@ async fn serve_ipc(
     data_payloads: &mut DataPayloadRegistry,
     vulkan: Option<&VulkanBackend>,
 ) -> Result<()> {
+    if config.production {
+        start_topology_subscription().context("failed to start displayd topology subscription")?;
+    }
     let _wayland_display = if let Some(name) = config.bind_wayland_display.as_deref() {
         Some(bind_wayland_display_socket_ext(name, config.production, config.scene_epoch)?)
     } else if let Some(path) = config.headless_socket.as_ref() {
@@ -959,6 +967,51 @@ fn query_output_topology() -> Result<Vec<OutputTopologyEntry>> {
         }
         other => bail!("unexpected displayd topology response: {other:?}"),
     }
+}
+
+fn start_topology_subscription() -> Result<()> {
+    let mut stream = connect_service_socket(ServiceRole::Displayd)?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Waylandd,
+        ServiceRole::Displayd,
+        MessageKind::DisplayCommand(DisplayCommand::GetReconciliation),
+    );
+    send_json_line(&mut stream, &request)?;
+    let mut reader = BufReader::new(stream);
+    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    let epoch = match response.kind {
+        MessageKind::DisplayEvent(DisplayEvent::Reconciliation { epoch, .. }) => epoch,
+        other => bail!("unexpected displayd reconciliation response: {other:?}"),
+    };
+    drop(reader);
+    let mut stream = connect_service_socket(ServiceRole::Displayd)?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Waylandd,
+        ServiceRole::Displayd,
+        MessageKind::DisplayCommand(DisplayCommand::SubscribeOutputTopology { epoch, sequence: 0 }),
+    );
+    send_json_line(&mut stream, &request)?;
+    let mut reader = BufReader::new(stream);
+    let (sender, receiver): (SyncSender<DisplayEvent>, Receiver<DisplayEvent>) = sync_channel(64);
+    let initial: IpcEnvelope = read_json_line(&mut reader)?;
+    if let MessageKind::DisplayEvent(event) = initial.kind {
+        sender.try_send(event).map_err(|_| anyhow::anyhow!("topology receiver overflow"))?;
+    } else {
+        bail!("invalid topology subscription response");
+    }
+    std::thread::spawn(move || {
+        while let Ok(message) = read_json_line::<IpcEnvelope>(&mut reader) {
+            let event = match message.kind {
+                MessageKind::DisplayEvent(event) => event,
+                _ => break,
+            };
+            if sender.try_send(event).is_err() {
+                break;
+            }
+        }
+    });
+    *TOPOLOGY_RECEIVER.lock().unwrap() = Some(receiver);
+    Ok(())
 }
 
 fn load_surface_registry(path: Option<&PathBuf>) -> Result<SurfaceRegistrySnapshot> {

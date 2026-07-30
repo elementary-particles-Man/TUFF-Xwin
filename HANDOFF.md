@@ -175,6 +175,12 @@
     * `SubscribeOutputTopology { epoch, sequence }` と `OutputTopologyDelta`／`OutputTopologyTransition` を typed IPC に追加し、epoch mismatch と ahead-of-sequence を fail-closed にする。
     * subscription の初回応答は既存 `GetOutputTopology` の atomic snapshot を再利用し、snapshot と delta の authority を分離しない。
     * 接続ごとの Wayland core／stream を横断して displayd delta を broadcast し、既存 client の registry.global／global_remove と bound wl_output resource を live 更新する server supervisor は、現行 transport の接続所有モデル上、次の拡張として残っている。今回の commit は typed subscription boundary と validation を提供する。
+
+23. **Long-lived topology transport foundation**
+    * displayd の実 listener は `SubscribeOutputTopology` を受けた接続を bounded `sync_channel` subscriber として登録し、initial atomic snapshot を一度送った後、成功した backend lifecycle transaction の後に typed delta を送る。通常の短命 request／response は維持する。
+    * subscriber write は displayd の lifecycle mutation lock と分離し、queue overflow／write failure は対象 subscriber だけを除去する。epoch／sequence mismatch は接続を fail-closed する。
+    * production waylandd は起動時に displayd の reconciliation epoch を取得して subscription を一つだけ張り、snapshot と delta を bounded receiver に受け取る。subscription 自体は topology authority や `registry.global` 配信を実装せず、次の shared client supervisor へ渡す。
+    * connected-client topology broadcast、per-client command endpoint、registry.global／global_remove は未完了であり、次の task の対象とする。real portal capture と production display contact は行っていない。
     * waylandd の client・callback identity は displayd 障害で再生成せず、旧 presentation token／completion を復旧状態へ持ち込まない。production display backend、real portal capture、physical display 接続は実装・実行していない。
 
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。

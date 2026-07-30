@@ -7,6 +7,10 @@ use std::{
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    LazyLock, Mutex,
+    mpsc::{SyncSender, sync_channel},
+};
 
 #[cfg(unix)]
 use std::os::fd::RawFd;
@@ -19,15 +23,19 @@ use waybroker_common::{
     BackendOutputEvent, CommittedSceneState, DisplayCommand, DisplayEvent,
     DisplayReconciliationState, IpcEnvelope, MessageKind, OutputGeometry, OutputMode,
     OutputPublicationOutcome, OutputPublicationResult, OutputReadiness, OutputReadinessState,
-    OutputTopologyEntry, PixelTransportError, PixelTransportPayload, PixelTransportStore,
-    PresentationCadence, PresentationCompletion, PresentationSchedulerState, PresentationToken,
-    PublicationFailure, ScenePublicationResult, ServiceBanner, ServiceEndpoint, ServiceReadiness,
-    ServiceReadinessState, ServiceRole, ServiceStream, accel::global_accel_policy,
-    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
-    sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
+    OutputTopologyDelta, OutputTopologyEntry, OutputTopologyTransition, PixelTransportError,
+    PixelTransportPayload, PixelTransportStore, PresentationCadence, PresentationCompletion,
+    PresentationSchedulerState, PresentationToken, PublicationFailure, ScenePublicationResult,
+    ServiceBanner, ServiceEndpoint, ServiceReadiness, ServiceReadinessState, ServiceRole,
+    ServiceStream, accel::global_accel_policy, bind_service_socket, ensure_runtime_dir,
+    now_unix_timestamp, read_json_line, sanitize_artifact_filename, send_json_line,
+    session_artifact_path, validate_artifact_filename,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
+static TOPOLOGY_SUBSCRIBERS: LazyLock<Mutex<Vec<SyncSender<IpcEnvelope>>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+static TOPOLOGY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const BACKGROUND_PIXEL: u32 = 0xFF00_0000;
 const MOCK_BACKEND_INSTANCE_ID: u64 = 1;
 const HEADLESS_SHM_BACKEND_INSTANCE_ID: u64 = 2;
@@ -326,6 +334,44 @@ async fn handle_client(
         read_json_line(&mut reader)?
     };
 
+    if let MessageKind::DisplayCommand(DisplayCommand::SubscribeOutputTopology {
+        epoch,
+        sequence,
+    }) = request.kind.clone()
+    {
+        if epoch != state.display_epoch || sequence > TOPOLOGY_SEQUENCE.load(Ordering::Acquire) {
+            let response = IpcEnvelope::new(
+                ServiceRole::Displayd,
+                request.source,
+                MessageKind::DisplayEvent(DisplayEvent::Rejected {
+                    reason: "topology subscription epoch or sequence mismatch".into(),
+                }),
+            );
+            send_json_line(&mut stream, &response)?;
+            return Ok(());
+        }
+        let (sender, receiver) = sync_channel(64);
+        let initial = topology_snapshot_event(state);
+        {
+            let mut subscribers = TOPOLOGY_SUBSCRIBERS.lock().unwrap();
+            subscribers.push(sender);
+        }
+        let response = IpcEnvelope::new(
+            ServiceRole::Displayd,
+            request.source,
+            MessageKind::DisplayEvent(initial),
+        );
+        send_json_line(&mut stream, &response)?;
+        std::thread::spawn(move || {
+            for message in receiver {
+                if send_json_line(&mut stream, &message).is_err() {
+                    break;
+                }
+            }
+        });
+        return Ok(());
+    }
+
     let response = build_response(
         request,
         config,
@@ -341,12 +387,105 @@ async fn handle_client(
     Ok(())
 }
 
+fn topology_snapshot_event(state: &DisplayState) -> DisplayEvent {
+    let mut outputs = state
+        .outputs
+        .values()
+        .filter(|runtime| !runtime.disabled)
+        .map(|runtime| OutputTopologyEntry {
+            geometry: OutputGeometry {
+                output_id: runtime.state.output_id.clone(),
+                width: runtime.state.width,
+                height: runtime.state.height,
+                stride: runtime.state.stride,
+                format: runtime.state.format,
+                origin_x: runtime.state.origin_x,
+                origin_y: runtime.state.origin_y,
+                output_generation: runtime.state.generation,
+            },
+            refresh_hz: (1_000_000_000u64 / runtime.scheduler.cadence.period_ns) as u32,
+            scale: 1,
+            transform: 0,
+            enabled: true,
+            name: runtime.state.output_id.clone(),
+            description: format!("Headless output {}", runtime.state.output_id),
+        })
+        .collect::<Vec<_>>();
+    outputs.sort_by(|a, b| a.geometry.output_id.cmp(&b.geometry.output_id));
+    DisplayEvent::OutputTopology {
+        epoch: state.display_epoch,
+        sequence: TOPOLOGY_SEQUENCE.load(Ordering::Acquire),
+        outputs,
+    }
+}
+
+fn publish_topology_delta(state: &DisplayState, event: &BackendOutputEvent) {
+    let sequence = TOPOLOGY_SEQUENCE.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+    let (transition, output_id, generation, output) = match event {
+        BackendOutputEvent::Connected { backend_output_id, geometry, cadence, .. }
+        | BackendOutputEvent::Reconfigured { backend_output_id, geometry, cadence, .. } => {
+            let transition = if matches!(event, BackendOutputEvent::Connected { .. }) {
+                OutputTopologyTransition::Added
+            } else {
+                OutputTopologyTransition::Reconfigured
+            };
+            (
+                transition,
+                Some(backend_output_id.clone()),
+                Some(geometry.output_generation),
+                Some(OutputTopologyEntry {
+                    geometry: geometry.clone(),
+                    refresh_hz: (1_000_000_000u64 / cadence.period_ns) as u32,
+                    scale: 1,
+                    transform: 0,
+                    enabled: true,
+                    name: backend_output_id.clone(),
+                    description: format!("Headless output {backend_output_id}"),
+                }),
+            )
+        }
+        BackendOutputEvent::Disabled { backend_output_id, output_generation, .. } => (
+            OutputTopologyTransition::Disabled,
+            Some(backend_output_id.clone()),
+            Some(*output_generation),
+            None,
+        ),
+        BackendOutputEvent::Disconnected { backend_output_id, output_generation, .. } => (
+            OutputTopologyTransition::Removed,
+            Some(backend_output_id.clone()),
+            Some(*output_generation),
+            None,
+        ),
+        BackendOutputEvent::BackendReset { .. } => {
+            (OutputTopologyTransition::Reset, None, None, None)
+        }
+    };
+    let delta = DisplayEvent::OutputTopologyDelta(OutputTopologyDelta {
+        epoch: state.display_epoch,
+        topology_sequence: sequence,
+        output_id,
+        output_generation: generation,
+        lifecycle_sequence: sequence,
+        transition,
+        output,
+    });
+    let message = IpcEnvelope::new(
+        ServiceRole::Displayd,
+        ServiceRole::Waylandd,
+        MessageKind::DisplayEvent(delta),
+    );
+    let mut subscribers = TOPOLOGY_SUBSCRIBERS.lock().unwrap();
+    subscribers.retain(|subscriber| subscriber.try_send(message.clone()).is_ok());
+}
+
 fn apply_backend_output_events(
     state: &mut DisplayState,
     display_backend: &mut dyn DisplayBackend,
 ) -> Result<()> {
     for event in display_backend.poll_output_events()? {
+        let published_event = event.clone();
         apply_backend_output_event(state, display_backend, event)?;
+        publish_topology_delta(state, &published_event);
     }
     if state.reconciliation_state == DisplayReconciliationState::Recovering {
         state.reconciliation_state = DisplayReconciliationState::ReconciledAwaitingPresentation;
