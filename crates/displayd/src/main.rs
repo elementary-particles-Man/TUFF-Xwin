@@ -556,6 +556,42 @@ async fn handle_display_command(
                 state: DisplayReconciliationState::Recovering,
             })
         }
+        DisplayCommand::ReconcileScene {
+            epoch,
+            scene_epoch,
+            scene_generation,
+            target,
+            focus,
+            selection,
+            surfaces,
+            pixel_payloads,
+        } => {
+            if epoch != state.display_epoch {
+                return Ok(DisplayEvent::Rejected {
+                    reason: "reconciliation epoch mismatch".into(),
+                });
+            }
+            let payload_count = pixel_payloads.len();
+            let result = handle_scene_acceptance(
+                target,
+                focus,
+                selection,
+                surfaces,
+                pixel_payloads,
+                scene_epoch,
+                scene_generation,
+                ServiceRole::Waylandd,
+                config,
+                state,
+                clock,
+                display_backend,
+            )?;
+            if matches!(result, DisplayEvent::SceneCommitted { .. }) {
+                Ok(DisplayEvent::Reconciled { epoch, scene_generation, payload_count })
+            } else {
+                Ok(result)
+            }
+        }
         DisplayCommand::AdvancePresentation {
             output_id,
             output_generation,
@@ -2755,8 +2791,14 @@ impl PresentationClock for FakePresentationClock {
 
 impl DisplayState {
     fn begin_restart(&mut self, new_epoch: u64) -> Result<()> {
-        if new_epoch <= self.display_epoch {
+        if new_epoch < self.display_epoch {
             bail!("display epoch must advance monotonically");
+        }
+        if new_epoch == self.display_epoch {
+            if self.reconciliation_state == DisplayReconciliationState::Recovering {
+                return Ok(());
+            }
+            bail!("display epoch is already active");
         }
         self.display_epoch = new_epoch;
         self.reconciliation_state = DisplayReconciliationState::Recovering;
@@ -4074,7 +4116,7 @@ mod tests {
         let mut state = DisplayState::new_test();
         assert!(state.begin_restart(1).is_err());
         state.begin_restart(2).unwrap();
-        assert!(state.begin_restart(2).is_err());
+        assert!(state.begin_restart(2).is_ok());
     }
 
     #[test]

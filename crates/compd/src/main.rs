@@ -1,4 +1,11 @@
-use std::{collections::BTreeMap, env, fs, io::BufReader, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    io::BufReader,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use vulkan_backend::{
@@ -484,6 +491,26 @@ struct CompdScene {
     #[serde(default)]
     selection: WaylandSelectionState,
     surfaces: Vec<SurfaceSnapshot>,
+    #[serde(default)]
+    scene_epoch: u64,
+    #[serde(default)]
+    scene_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisplayLinkState {
+    Connected { epoch: u64 },
+    Disconnected,
+    Reconnecting { attempt: u8 },
+    Reconciling { epoch: u64 },
+    AwaitingFreshPresentation { epoch: u64 },
+    Failed,
+}
+
+static DISPLAY_LINK: OnceLock<Mutex<DisplayLinkState>> = OnceLock::new();
+
+fn display_link() -> &'static Mutex<DisplayLinkState> {
+    DISPLAY_LINK.get_or_init(|| Mutex::new(DisplayLinkState::Disconnected))
 }
 
 fn load_scene(path: Option<&PathBuf>) -> Result<CompdScene> {
@@ -531,6 +558,8 @@ fn mock_demo_scene() -> CompdScene {
                 ..Default::default()
             },
         ],
+        scene_epoch: 1,
+        scene_generation: 1,
     }
 }
 
@@ -556,11 +585,27 @@ fn commit_scene_to_displayd(scene: &CompdScene) -> Result<SceneCommitReceipt> {
             scene_generation: 0,
         }),
     );
-    send_json_line(&mut stream, &request).context("failed to send commit-scene to displayd")?;
+    if let Err(err) = send_json_line(&mut stream, &request) {
+        mark_display_disconnected();
+        return reconcile_scene_to_displayd(scene).map_err(|reconcile_err| {
+            anyhow::anyhow!(
+                "displayd transport lost ({err}); reconciliation failed: {reconcile_err}"
+            )
+        });
+    }
 
     let mut reader = BufReader::new(stream);
-    let response: IpcEnvelope =
-        read_json_line(&mut reader).context("failed to read response from displayd")?;
+    let response: IpcEnvelope = match read_json_line(&mut reader) {
+        Ok(response) => response,
+        Err(err) => {
+            mark_display_disconnected();
+            return reconcile_scene_to_displayd(scene).map_err(|reconcile_err| {
+                anyhow::anyhow!(
+                    "displayd transport lost ({err}); reconciliation failed: {reconcile_err}"
+                )
+            });
+        }
+    };
 
     if response.source != ServiceRole::Displayd {
         bail!("unexpected response source: {}", response.source.as_str());
@@ -575,11 +620,94 @@ fn commit_scene_to_displayd(scene: &CompdScene) -> Result<SceneCommitReceipt> {
             surface_count,
             commit_id,
             ..
-        }) => Ok(SceneCommitReceipt { surface_count, commit_id }),
+        }) => {
+            update_display_link_from_commit(&response);
+            Ok(SceneCommitReceipt { surface_count, commit_id })
+        }
         MessageKind::DisplayEvent(DisplayEvent::Rejected { reason }) => {
             bail!("displayd rejected scene: {reason}")
         }
         other => bail!("unexpected displayd response: {other:?}"),
+    }
+}
+
+fn mark_display_disconnected() {
+    if let Ok(mut state) = display_link().lock() {
+        *state = DisplayLinkState::Disconnected;
+    }
+}
+
+fn reconcile_scene_to_displayd(scene: &CompdScene) -> Result<SceneCommitReceipt> {
+    let mut state =
+        display_link().lock().map_err(|_| anyhow::anyhow!("display link lock poisoned"))?;
+    let attempt = match *state {
+        DisplayLinkState::Reconnecting { attempt } => attempt,
+        _ => 0,
+    };
+    if attempt >= 3 {
+        *state = DisplayLinkState::Failed;
+        bail!("displayd reconnect retry budget exhausted")
+    }
+    *state = DisplayLinkState::Reconnecting { attempt: attempt + 1 };
+    drop(state);
+
+    let reconciliation = forward_display_command(DisplayCommand::GetReconciliation)?;
+    let epoch = match reconciliation {
+        DisplayEvent::Reconciliation { epoch, .. } => epoch,
+        DisplayEvent::Rejected { reason } => {
+            bail!("displayd rejected reconciliation query: {reason}")
+        }
+        other => bail!("unexpected reconciliation response: {other:?}"),
+    };
+    {
+        let mut link =
+            display_link().lock().map_err(|_| anyhow::anyhow!("display link lock poisoned"))?;
+        *link = DisplayLinkState::Reconciling { epoch };
+    }
+    match forward_display_command(DisplayCommand::BeginReconciliation { epoch })? {
+        DisplayEvent::Reconciliation { epoch: accepted, .. } if accepted == epoch => {}
+        DisplayEvent::Rejected { reason } => {
+            bail!("displayd rejected reconciliation begin: {reason}")
+        }
+        other => bail!("unexpected reconciliation begin response: {other:?}"),
+    }
+    let event = forward_display_command(DisplayCommand::ReconcileScene {
+        epoch,
+        scene_epoch: scene.scene_epoch,
+        scene_generation: scene.scene_generation,
+        target: CommitTarget::Output { name: scene.target_output.clone() },
+        focus: scene.focus.clone(),
+        selection: scene.selection.clone(),
+        surfaces: scene.surfaces.clone(),
+        pixel_payloads: vec![],
+    })?;
+    match event {
+        DisplayEvent::Reconciled { epoch: accepted, scene_generation, payload_count: _ }
+            if accepted == epoch =>
+        {
+            let mut link =
+                display_link().lock().map_err(|_| anyhow::anyhow!("display link lock poisoned"))?;
+            *link = DisplayLinkState::AwaitingFreshPresentation { epoch };
+            Ok(SceneCommitReceipt {
+                surface_count: scene.surfaces.len(),
+                commit_id: scene_generation,
+            })
+        }
+        DisplayEvent::Rejected { reason } => {
+            if let Ok(mut link) = display_link().lock() {
+                *link = DisplayLinkState::Failed;
+            }
+            bail!("displayd rejected scene reconciliation: {reason}")
+        }
+        other => bail!("unexpected scene reconciliation response: {other:?}"),
+    }
+}
+
+fn update_display_link_from_commit(response: &IpcEnvelope) {
+    if let MessageKind::DisplayEvent(DisplayEvent::SceneCommitted { .. }) = &response.kind {
+        if let Ok(mut state) = display_link().lock() {
+            *state = DisplayLinkState::Connected { epoch: 0 };
+        }
     }
 }
 
@@ -724,6 +852,8 @@ fn scene_from_snapshot(snapshot: &CommittedSceneState) -> CompdScene {
         focus: snapshot.focus.clone(),
         selection: snapshot.selection.clone(),
         surfaces: snapshot.surfaces.clone(),
+        scene_epoch: snapshot.scene_epoch,
+        scene_generation: snapshot.scene_generation,
     }
 }
 
@@ -784,6 +914,8 @@ fn reconcile_scene_with_registry(
             focus,
             selection,
             surfaces: kept_surfaces,
+            scene_epoch: scene.scene_epoch,
+            scene_generation: scene.scene_generation,
         },
         dropped_surface_ids,
         updated_app_ids,
@@ -1005,6 +1137,8 @@ mod tests {
             target_output: "eDP-1".into(),
             focus: FocusTarget::None,
             selection: WaylandSelectionState::default(),
+            scene_epoch: 1,
+            scene_generation: 1,
             surfaces: vec![],
         };
         assert_eq!(scene.focus, FocusTarget::None);
@@ -1017,6 +1151,8 @@ mod tests {
             target_output: "HDMI-1".into(),
             focus: FocusTarget::None,
             selection: WaylandSelectionState::default(),
+            scene_epoch: 1,
+            scene_generation: 1,
             surfaces: vec![
                 SurfaceSnapshot {
                     id: "s1".into(),
@@ -1102,6 +1238,8 @@ mod tests {
                     primary_selection_source_serial: Some(77),
                     primary_offer: None,
                 },
+                scene_epoch: 1,
+                scene_generation: 1,
                 surfaces: vec![
                     SurfaceSnapshot {
                         id: "terminal-1".into(),
@@ -1200,6 +1338,8 @@ mod tests {
                     primary_selection_source_serial: Some(77),
                     primary_offer: None,
                 },
+                scene_epoch: 1,
+                scene_generation: 1,
                 surfaces: vec![SurfaceSnapshot {
                     id: "background-1".into(),
                     app_id: "org.kde.wallpaper".into(),
@@ -1334,6 +1474,8 @@ mod tests {
             target_output: "eDP-1".into(),
             focus: FocusTarget::Surface { id: "win2".into() },
             selection: WaylandSelectionState::default(),
+            scene_epoch: 1,
+            scene_generation: 1,
             surfaces: vec![
                 SurfaceSnapshot {
                     id: "win1".into(),

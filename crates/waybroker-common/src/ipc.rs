@@ -97,6 +97,16 @@ pub enum DisplayCommand {
     BeginReconciliation {
         epoch: u64,
     },
+    ReconcileScene {
+        epoch: u64,
+        scene_epoch: u64,
+        scene_generation: u64,
+        target: CommitTarget,
+        focus: FocusTarget,
+        selection: WaylandSelectionState,
+        surfaces: Vec<SurfaceSnapshot>,
+        pixel_payloads: Vec<PixelTransportPayload>,
+    },
     AdvancePresentation {
         output_id: String,
         output_generation: u64,
@@ -202,6 +212,11 @@ pub enum DisplayEvent {
     Reconciliation {
         epoch: u64,
         state: DisplayReconciliationState,
+    },
+    Reconciled {
+        epoch: u64,
+        scene_generation: u64,
+        payload_count: usize,
     },
     PresentationCompleted {
         token: PresentationToken,

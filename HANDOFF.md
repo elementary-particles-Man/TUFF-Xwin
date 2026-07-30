@@ -159,6 +159,13 @@
     * 新 backend instance と epoch-bound output identity を再接続し、output generation を epoch namespace に変換して full-output damage を積む。最初の eligible AdvancePresentation と fresh Presented completion の後だけ readiness／capture／feedback を回復する。
     * 旧 backend instance、旧 output generation、旧 completion、backward／duplicate epoch は fail-closed。production display backend、physical output discovery、real portal capture は実装・実行していない。
 
+20. **Waylandd／compd live displayd reconnect orchestration**
+    * compd の display link は Connected／Disconnected／Reconnecting／Reconciling／AwaitingFreshPresentation／Failed を typed state として保持し、displayd の接続・送受信失敗を waylandd／client の状態とは分離して扱う。
+    * displayd 再接続後は `GetReconciliation` で fresh epoch を取得し、`BeginReconciliation` と最新 canonical scene の `ReconcileScene` を一度だけ送る。履歴 CommitScene の再送や client commit generation の再生成は行わない。
+    * CompdScene は canonical scene_epoch／scene_generation を保持し、復旧時の転送は現在の scene と必要 payload だけに限定する。ReconcileScene は acceptance-only で、submission は従来どおり `AdvancePresentation`、Ready／capture／feedback／callback は fresh Presented completion 後のみ回復する。
+    * 接続失敗時の retry は最大 3 回で、同時 reconnect は状態で抑止する。epoch／reconciliation 応答の不一致は fail-closed とし、canonical scene は破棄しない。
+    * waylandd の client・callback identity は displayd 障害で再生成せず、旧 presentation token／completion を復旧状態へ持ち込まない。production display backend、real portal capture、physical display 接続は実装・実行していない。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 
