@@ -580,6 +580,28 @@ async fn handle_display_command(
                 outputs,
             })
         }
+        DisplayCommand::SubscribeOutputTopology { epoch, sequence } => {
+            if epoch != state.display_epoch {
+                bail!("topology subscription epoch mismatch");
+            }
+            if sequence > state.display_epoch {
+                bail!("topology subscription sequence is ahead of displayd");
+            }
+            // The first subscription response is an atomic snapshot. Future
+            // lifecycle deltas are emitted by the same typed boundary.
+            Box::pin(handle_display_command(
+                DisplayCommand::GetOutputTopology,
+                source,
+                config,
+                state,
+                vulkan,
+                clock,
+                capture_backend,
+                record_backend,
+                display_backend,
+            ))
+            .await
+        }
         DisplayCommand::BeginReconciliation { epoch } => {
             state.begin_restart(epoch)?;
             Ok(DisplayEvent::Reconciliation {

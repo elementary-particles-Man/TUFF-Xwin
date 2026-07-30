@@ -95,6 +95,10 @@ pub enum DisplayCommand {
     GetReadiness,
     GetReconciliation,
     GetOutputTopology,
+    SubscribeOutputTopology {
+        epoch: u64,
+        sequence: u64,
+    },
     BeginReconciliation {
         epoch: u64,
     },
@@ -199,6 +203,29 @@ pub struct OutputTopologyEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputTopologyDelta {
+    pub epoch: u64,
+    pub topology_sequence: u64,
+    pub output_id: Option<String>,
+    pub output_generation: Option<u64>,
+    pub lifecycle_sequence: u64,
+    pub transition: OutputTopologyTransition,
+    pub output: Option<OutputTopologyEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutputTopologyTransition {
+    Added,
+    Reconfigured,
+    Disabled,
+    Enabled,
+    Removed,
+    Reset,
+    SnapshotRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum PointerConstraints {
     None,
@@ -230,6 +257,7 @@ pub enum DisplayEvent {
         sequence: u64,
         outputs: Vec<OutputTopologyEntry>,
     },
+    OutputTopologyDelta(OutputTopologyDelta),
     Reconciled {
         epoch: u64,
         scene_generation: u64,

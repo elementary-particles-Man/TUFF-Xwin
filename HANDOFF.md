@@ -170,6 +170,11 @@
     * production Wayland client の wl_output 初期 projection は output identity の deterministic order を使い、origin、pixel geometry、refresh、integer scale を `HeadlessWireCore` へ反映する。host display discovery は行わない。
     * `wl_surface.commit` 後の surface geometry と projected output geometry の checked intersection を比較し、membership の差分だけ wl_surface.enter／leave を発行する。重複 enter／leave を保持集合で抑止する。
     * 現行 server transport は client 接続後の displayd topology delta subscription／global removal API をまだ持たないため、live reconfiguration／disconnect の既存 client への global remove・再構築は次の server lifecycle 拡張で実装する。今回の snapshot projection はその IPC 境界を使用する。
+
+22. **Live topology delta boundary**
+    * `SubscribeOutputTopology { epoch, sequence }` と `OutputTopologyDelta`／`OutputTopologyTransition` を typed IPC に追加し、epoch mismatch と ahead-of-sequence を fail-closed にする。
+    * subscription の初回応答は既存 `GetOutputTopology` の atomic snapshot を再利用し、snapshot と delta の authority を分離しない。
+    * 接続ごとの Wayland core／stream を横断して displayd delta を broadcast し、既存 client の registry.global／global_remove と bound wl_output resource を live 更新する server supervisor は、現行 transport の接続所有モデル上、次の拡張として残っている。今回の commit は typed subscription boundary と validation を提供する。
     * waylandd の client・callback identity は displayd 障害で再生成せず、旧 presentation token／completion を復旧状態へ持ち込まない。production display backend、real portal capture、physical display 接続は実装・実行していない。
 
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
