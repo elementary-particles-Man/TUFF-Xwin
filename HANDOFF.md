@@ -181,6 +181,12 @@
     * subscriber write は displayd の lifecycle mutation lock と分離し、queue overflow／write failure は対象 subscriber だけを除去する。epoch／sequence mismatch は接続を fail-closed する。
     * production waylandd は起動時に displayd の reconciliation epoch を取得して subscription を一つだけ張り、snapshot と delta を bounded receiver に受け取る。subscription 自体は topology authority や `registry.global` 配信を実装せず、次の shared client supervisor へ渡す。
     * connected-client topology broadcast、per-client command endpoint、registry.global／global_remove は未完了であり、次の task の対象とする。real portal capture と production display contact は行っていない。
+
+24. **Per-client topology command endpoint foundation**
+    * production Wayland client accept path は client_id ごとに bounded command `sync_channel` と receiver を生成し、sender を waylandd-owned registry に登録する。disconnect／protocol failure 時は guard が sender を除去する。
+    * 初期 topology は通常の直接 mutation ではなく client command queue の `InitialTopology` として投入し、HeadlessWireCore の serial event loop で protocol request と順序付けて処理する。
+    * endpoint command model は InitialTopology、AddGlobal、RemoveGlobal、ReconfigureOutput、RecalculateMembership、TopologyReset、Disconnect を持ち、epoch／sequence の backward／cross-epoch を fail-closed にする。Core は output add／remove／reconfigure と membership recalculation を実行する。
+    * shared broadcast supervisor、connected-client registry.global／global_remove 配信、global lifecycle の producer はこの task では実装していない。次 task が登録 sender と single topology receiver を統合する。
     * waylandd の client・callback identity は displayd 障害で再生成せず、旧 presentation token／completion を復旧状態へ持ち込まない。production display backend、real portal capture、physical display 接続は実装・実行していない。
 
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。

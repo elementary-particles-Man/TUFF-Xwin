@@ -27,6 +27,20 @@ static PIXEL_TRANSPORT: LazyLock<Mutex<PixelTransportStore>> =
     LazyLock::new(|| Mutex::new(PixelTransportStore::default()));
 static TOPOLOGY_RECEIVER: LazyLock<Mutex<Option<Receiver<DisplayEvent>>>> =
     LazyLock::new(|| Mutex::new(None));
+static CLIENT_COMMANDS: LazyLock<Mutex<BTreeMap<u64, SyncSender<ClientCommand>>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum ClientCommand {
+    InitialTopology { epoch: u64, sequence: u64, outputs: Vec<OutputTopologyEntry> },
+    AddGlobal { epoch: u64, sequence: u64, output: OutputTopologyEntry },
+    RemoveGlobal { epoch: u64, sequence: u64, output_id: String, output_generation: u64 },
+    ReconfigureOutput { epoch: u64, sequence: u64, output: OutputTopologyEntry },
+    RecalculateMembership { epoch: u64, sequence: u64 },
+    TopologyReset { epoch: u64, sequence: u64 },
+    Disconnect { epoch: u64, sequence: u64 },
+}
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
@@ -1231,6 +1245,9 @@ fn bind_single_wayland_display_socket_ext(
 
 fn handle_production_client(stream: UnixStream, scene_epoch: u64) -> Result<()> {
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+    let (command_sender, command_receiver) = sync_channel(64);
+    CLIENT_COMMANDS.lock().unwrap().insert(client_id, command_sender.clone());
+    let _command_guard = ClientCommandGuard { client_id };
     let mut core = wayland_wire::core::HeadlessWireCore::default();
     core.set_defer_frame_callbacks(true);
     let topology =
@@ -1249,21 +1266,17 @@ fn handle_production_client(stream: UnixStream, scene_epoch: u64) -> Result<()> 
         .collect::<Vec<_>>();
     let mut registry_guard =
         ClientRegistryGuard { client_id, outputs: outputs.clone(), scene_epoch, finalized: false };
-    {
-        for output in &topology {
-            core.add_topology_output(
-                &output.name,
-                output.geometry.origin_x,
-                output.geometry.origin_y,
-                output.geometry.width as i32,
-                output.geometry.height as i32,
-                (1_000_000_000u64 / output.refresh_hz.max(1) as u64) as u32,
-                output.scale,
-            );
-        }
-    }
     let mut received_fds = Vec::new();
     let mut pending_callbacks = PendingFrameCallbacks::default();
+    let mut command_epoch = 0u64;
+    let mut command_sequence = 0u64;
+    command_sender
+        .try_send(ClientCommand::InitialTopology {
+            epoch: 0,
+            sequence: 0,
+            outputs: topology.clone(),
+        })
+        .map_err(|_| anyhow::anyhow!("client command endpoint initialization overflow"))?;
     let mut buffer = Vec::with_capacity(4096);
     let mut read_buf = [0u8; 4096];
 
@@ -1272,6 +1285,12 @@ fn handle_production_client(stream: UnixStream, scene_epoch: u64) -> Result<()> 
     stream.set_read_timeout(None)?;
 
     loop {
+        while let Ok(command) = command_receiver.try_recv() {
+            if apply_client_command(&mut core, command, &mut command_epoch, &mut command_sequence)?
+            {
+                return Ok(());
+            }
+        }
         let (n, fds) = wayland_wire::fd::recv_with_fds(&stream, &mut read_buf)?;
         if n == 0 && fds.is_empty() {
             break;
@@ -1367,6 +1386,85 @@ fn handle_production_client(stream: UnixStream, scene_epoch: u64) -> Result<()> 
     }
     registry_guard.finalize()?;
     Ok(())
+}
+
+struct ClientCommandGuard {
+    client_id: u64,
+}
+
+impl Drop for ClientCommandGuard {
+    fn drop(&mut self) {
+        CLIENT_COMMANDS.lock().unwrap().remove(&self.client_id);
+    }
+}
+
+fn apply_client_command(
+    core: &mut wayland_wire::core::HeadlessWireCore,
+    command: ClientCommand,
+    epoch: &mut u64,
+    sequence: &mut u64,
+) -> Result<bool> {
+    let (command_epoch, command_sequence) = match &command {
+        ClientCommand::InitialTopology { epoch, sequence, .. }
+        | ClientCommand::AddGlobal { epoch, sequence, .. }
+        | ClientCommand::RemoveGlobal { epoch, sequence, .. }
+        | ClientCommand::ReconfigureOutput { epoch, sequence, .. }
+        | ClientCommand::RecalculateMembership { epoch, sequence }
+        | ClientCommand::TopologyReset { epoch, sequence }
+        | ClientCommand::Disconnect { epoch, sequence } => (*epoch, *sequence),
+    };
+    if *epoch != 0 && command_epoch != *epoch {
+        bail!("client topology command epoch mismatch");
+    }
+    if command_sequence < *sequence {
+        bail!("client topology command sequence moved backwards");
+    }
+    if command_sequence == *sequence && command_epoch != 0 {
+        return Ok(false);
+    }
+    *epoch = command_epoch;
+    *sequence = command_sequence;
+    match command {
+        ClientCommand::InitialTopology { outputs, .. } => {
+            for output in outputs {
+                core.add_topology_output(
+                    &output.name,
+                    output.geometry.origin_x,
+                    output.geometry.origin_y,
+                    output.geometry.width as i32,
+                    output.geometry.height as i32,
+                    (1_000_000_000u64 / output.refresh_hz.max(1) as u64) as u32,
+                    output.scale,
+                );
+            }
+        }
+        ClientCommand::AddGlobal { output, .. } => core.add_topology_output(
+            &output.name,
+            output.geometry.origin_x,
+            output.geometry.origin_y,
+            output.geometry.width as i32,
+            output.geometry.height as i32,
+            (1_000_000_000u64 / output.refresh_hz.max(1) as u64) as u32,
+            output.scale,
+        ),
+        ClientCommand::RemoveGlobal { output_id, .. } => core.remove_topology_output(&output_id),
+        ClientCommand::ReconfigureOutput { output, .. } => core
+            .reconfigure_topology_output(
+                &output.name,
+                output.geometry.origin_x,
+                output.geometry.origin_y,
+                output.geometry.width as i32,
+                output.geometry.height as i32,
+                (1_000_000_000u64 / output.refresh_hz.max(1) as u64) as u32,
+                output.scale,
+            )
+            .map_err(|error| anyhow::anyhow!(error))?,
+        ClientCommand::RecalculateMembership { .. } | ClientCommand::TopologyReset { .. } => {
+            core.recalculate_surface_membership().map_err(|error| anyhow::anyhow!(error))?;
+        }
+        ClientCommand::Disconnect { .. } => return Ok(true),
+    }
+    Ok(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

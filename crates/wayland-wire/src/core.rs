@@ -219,6 +219,64 @@ impl HeadlessWireCore {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconfigure_topology_output(
+        &mut self,
+        name: &str,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        refresh_nsec: u32,
+        scale: u32,
+    ) -> Result<()> {
+        let entry = self
+            .real_outputs
+            .iter_mut()
+            .find(|entry| entry.0 == name)
+            .ok_or_else(|| WireError::ProtocolError(format!("unknown output {name}")))?;
+        *entry = (name.to_owned(), x, y, width, height, refresh_nsec, scale);
+        for output in self.output.outputs.values_mut().filter(|output| output.name == name) {
+            output.x = x;
+            output.y = y;
+            output.scale = scale as i32;
+            output.width = width;
+            output.height = height;
+            output.refresh_nsec = refresh_nsec;
+        }
+        let surface_ids: Vec<_> = self.surfaces.surfaces.keys().copied().collect();
+        for surface_id in surface_ids {
+            self.update_surface_output_membership(surface_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn remove_topology_output(&mut self, name: &str) {
+        self.real_outputs.retain(|entry| entry.0 != name);
+        let ids: Vec<_> = self
+            .output
+            .outputs
+            .iter()
+            .filter(|(_, output)| output.name == name)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            self.output.outputs.remove(&id);
+        }
+        let surface_ids: Vec<_> = self.surfaces.surfaces.keys().copied().collect();
+        for surface_id in surface_ids {
+            let _ = self.update_surface_output_membership(surface_id);
+        }
+    }
+
+    pub fn recalculate_surface_membership(&mut self) -> Result<()> {
+        let surface_ids: Vec<_> = self.surfaces.surfaces.keys().copied().collect();
+        for surface_id in surface_ids {
+            self.update_surface_output_membership(surface_id)?;
+        }
+        Ok(())
+    }
+
     pub fn dispatch(&mut self, message: WaylandMessage) -> Result<DispatchResult> {
         self.dispatch_with_fds(message, &mut Vec::new())
     }
