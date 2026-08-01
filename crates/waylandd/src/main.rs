@@ -44,6 +44,7 @@ enum ClientCommand {
 }
 
 const TOPOLOGY_DELTA_BUFFER_LIMIT: usize = 32;
+const TOPOLOGY_QUEUE_CAPACITY: usize = 64;
 const SNAPSHOT_RETRY_LIMIT: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1098,7 +1099,9 @@ fn start_topology_subscription() -> Result<()> {
     );
     send_json_line(&mut stream, &request)?;
     let mut reader = BufReader::new(stream);
-    let (sender, receiver): (SyncSender<TopologyInput>, Receiver<TopologyInput>) = sync_channel(64);
+    // Keep one bounded slot reserved for the terminal overflow marker.
+    let (sender, receiver): (SyncSender<TopologyInput>, Receiver<TopologyInput>) =
+        sync_channel(TOPOLOGY_QUEUE_CAPACITY + 1);
     let initial: IpcEnvelope = read_json_line(&mut reader)?;
     if let MessageKind::DisplayEvent(event) = initial.kind {
         sender
@@ -2770,8 +2773,8 @@ impl Drop for WaylandDisplaySocket {
 mod tests {
     use super::{
         ACTIVE_TOPOLOGY_CONSUMERS, PendingFrameCallbacks, ResyncState, SNAPSHOT_RETRY_LIMIT,
-        TOPOLOGY_DELTA_BUFFER_LIMIT, handle_wayland_command, intersecting_output_ids,
-        mock_surface_registry, output_viewports, projection_diff_commands,
+        TOPOLOGY_DELTA_BUFFER_LIMIT, TOPOLOGY_QUEUE_CAPACITY, handle_wayland_command,
+        intersecting_output_ids, mock_surface_registry, output_viewports, projection_diff_commands,
         should_clear_pending_commit, should_store_pending_commit, socket_lock_is_stale,
     };
     use std::collections::BTreeMap;
@@ -2814,6 +2817,7 @@ mod tests {
         assert_eq!(ResyncState::Streaming, ResyncState::Streaming);
         assert_ne!(ResyncState::SnapshotPending, ResyncState::Streaming);
         assert_eq!(TOPOLOGY_DELTA_BUFFER_LIMIT, 32);
+        assert_eq!(TOPOLOGY_QUEUE_CAPACITY, 64);
         assert_eq!(SNAPSHOT_RETRY_LIMIT, 3);
         assert_eq!(ACTIVE_TOPOLOGY_CONSUMERS.load(Ordering::SeqCst), 0);
     }

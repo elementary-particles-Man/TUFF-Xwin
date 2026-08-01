@@ -213,6 +213,7 @@
     * supervisor に `Streaming`、`SnapshotPending`、`SnapshotApplying`、`Failed` の typed state と、Reset／SnapshotRequired／sequence gap／stream overflow の reason を追加した。
     * topology receiver は bounded delta buffer（32件）を使用し、snapshot retrieval は最大3回までに制限した。失敗時は committed projection を変更せず `Failed` へ移行する。
     * active topology consumer の accounting と shutdown 時の decrement guard を追加し、同時 consumer 数を観測可能にした。
+    * bounded receiver の overflow marker 用に予約スロットを確保し、queue full 時も terminal overflow 通知が通常イベントに埋もれないよう修正した。
     * workspace validation は成功したが、実 IPC の Reset／SnapshotRequired／bind-race、buffered newer delta の再適用、client write failure isolation の専用回帰テストは引き続き未完了である。全 open item の closure とは扱わない。
 
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
