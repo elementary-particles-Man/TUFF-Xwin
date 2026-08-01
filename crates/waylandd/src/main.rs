@@ -14,7 +14,7 @@ use std::os::unix::{
 
 use anyhow::{Context, Result, bail};
 use byteorder::ByteOrder;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{
     LazyLock, Mutex,
@@ -25,10 +25,11 @@ static CANONICAL_SCENE: LazyLock<Mutex<CanonicalSceneState>> =
     LazyLock::new(|| Mutex::new(CanonicalSceneState::default()));
 static PIXEL_TRANSPORT: LazyLock<Mutex<PixelTransportStore>> =
     LazyLock::new(|| Mutex::new(PixelTransportStore::default()));
-static TOPOLOGY_RECEIVER: LazyLock<Mutex<Option<Receiver<DisplayEvent>>>> =
+static TOPOLOGY_RECEIVER: LazyLock<Mutex<Option<Receiver<TopologyInput>>>> =
     LazyLock::new(|| Mutex::new(None));
 static CLIENT_COMMANDS: LazyLock<Mutex<BTreeMap<u64, SyncSender<ClientCommand>>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
+static ACTIVE_TOPOLOGY_CONSUMERS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -40,6 +41,32 @@ enum ClientCommand {
     RecalculateMembership { epoch: u64, sequence: u64 },
     TopologyReset { epoch: u64, sequence: u64 },
     Disconnect { epoch: u64, sequence: u64 },
+}
+
+const TOPOLOGY_DELTA_BUFFER_LIMIT: usize = 32;
+const SNAPSHOT_RETRY_LIMIT: u8 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResyncState {
+    Streaming,
+    SnapshotPending,
+    SnapshotApplying,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResyncReason {
+    Reset,
+    SnapshotRequired,
+    SequenceGap,
+    StreamOverflow,
+}
+
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+enum TopologyInput {
+    Event(DisplayEvent),
+    Overflow,
 }
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 use vulkan_backend::{
@@ -1006,6 +1033,27 @@ fn query_output_snapshot() -> Result<(u64, u64, Vec<OutputTopologyEntry>)> {
     }
 }
 
+fn query_output_snapshot_with_retry(
+    current_epoch: u64,
+    current_sequence: u64,
+) -> Result<(u64, u64, Vec<OutputTopologyEntry>)> {
+    let mut last_error = None;
+    for _ in 0..SNAPSHOT_RETRY_LIMIT {
+        match query_output_snapshot() {
+            Ok((epoch, sequence, outputs)) => {
+                validate_output_snapshot(&outputs)?;
+                if epoch < current_epoch || (epoch == current_epoch && sequence < current_sequence)
+                {
+                    bail!("stale topology snapshot");
+                }
+                return Ok((epoch, sequence, outputs));
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("topology snapshot retry exhausted")))
+}
+
 fn validate_output_snapshot(outputs: &[OutputTopologyEntry]) -> Result<()> {
     let mut ids = std::collections::BTreeSet::new();
     let mut names = std::collections::BTreeSet::new();
@@ -1050,10 +1098,12 @@ fn start_topology_subscription() -> Result<()> {
     );
     send_json_line(&mut stream, &request)?;
     let mut reader = BufReader::new(stream);
-    let (sender, receiver): (SyncSender<DisplayEvent>, Receiver<DisplayEvent>) = sync_channel(64);
+    let (sender, receiver): (SyncSender<TopologyInput>, Receiver<TopologyInput>) = sync_channel(64);
     let initial: IpcEnvelope = read_json_line(&mut reader)?;
     if let MessageKind::DisplayEvent(event) = initial.kind {
-        sender.try_send(event).map_err(|_| anyhow::anyhow!("topology receiver overflow"))?;
+        sender
+            .try_send(TopologyInput::Event(event))
+            .map_err(|_| anyhow::anyhow!("topology receiver overflow"))?;
     } else {
         bail!("invalid topology subscription response");
     }
@@ -1063,7 +1113,8 @@ fn start_topology_subscription() -> Result<()> {
                 MessageKind::DisplayEvent(event) => event,
                 _ => break,
             };
-            if sender.try_send(event).is_err() {
+            if sender.try_send(TopologyInput::Event(event)).is_err() {
+                let _ = sender.try_send(TopologyInput::Overflow);
                 break;
             }
         }
@@ -1072,16 +1123,57 @@ fn start_topology_subscription() -> Result<()> {
     Ok(())
 }
 
+#[allow(unused_assignments)]
 fn start_topology_supervisor() {
     let receiver = TOPOLOGY_RECEIVER.lock().unwrap().take();
     let Some(receiver) = receiver else {
         return;
     };
+    ACTIVE_TOPOLOGY_CONSUMERS.fetch_add(1, Ordering::SeqCst);
     std::thread::spawn(move || {
+        struct ConsumerGuard;
+        impl Drop for ConsumerGuard {
+            fn drop(&mut self) {
+                ACTIVE_TOPOLOGY_CONSUMERS.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let _consumer_guard = ConsumerGuard;
         let mut projection = BTreeMap::<String, OutputTopologyEntry>::new();
         let mut epoch = 0u64;
         let mut sequence = 0u64;
-        while let Ok(event) = receiver.recv() {
+        let mut state = ResyncState::Streaming;
+        let mut pending_reason = None;
+        let mut buffered_deltas = VecDeque::with_capacity(TOPOLOGY_DELTA_BUFFER_LIMIT);
+        while let Ok(input) = receiver.recv() {
+            if state == ResyncState::Failed {
+                break;
+            }
+            if state != ResyncState::Streaming {
+                match input {
+                    TopologyInput::Event(DisplayEvent::OutputTopologyDelta(delta)) => {
+                        if buffered_deltas.len() == TOPOLOGY_DELTA_BUFFER_LIMIT {
+                            buffered_deltas.clear();
+                            state = ResyncState::SnapshotPending;
+                            pending_reason = Some(ResyncReason::StreamOverflow);
+                        } else {
+                            buffered_deltas.push_back(delta);
+                        }
+                    }
+                    TopologyInput::Event(_) => {}
+                    TopologyInput::Overflow => {
+                        state = ResyncState::Failed;
+                        break;
+                    }
+                }
+                continue;
+            }
+            let event = match input {
+                TopologyInput::Event(event) => event,
+                TopologyInput::Overflow => {
+                    state = ResyncState::Failed;
+                    break;
+                }
+            };
             match event {
                 DisplayEvent::OutputTopology {
                     epoch: next_epoch,
@@ -1117,15 +1209,12 @@ fn start_topology_supervisor() {
                 DisplayEvent::OutputTopologyDelta(delta) => {
                     if delta.epoch != epoch || delta.topology_sequence != sequence.saturating_add(1)
                     {
+                        state = ResyncState::SnapshotPending;
+                        pending_reason = Some(ResyncReason::SequenceGap);
                         if let Ok((fresh_epoch, fresh_sequence, fresh_outputs)) =
-                            query_output_snapshot()
+                            query_output_snapshot_with_retry(epoch, sequence)
                         {
-                            if validate_output_snapshot(&fresh_outputs).is_err() {
-                                continue;
-                            }
-                            if fresh_epoch < epoch || fresh_sequence < sequence {
-                                continue;
-                            }
+                            state = ResyncState::SnapshotApplying;
                             let fresh = fresh_outputs
                                 .into_iter()
                                 .map(|output| (output.geometry.output_id.clone(), output))
@@ -1134,6 +1223,10 @@ fn start_topology_supervisor() {
                             epoch = fresh_epoch;
                             sequence = fresh_sequence;
                             broadcast_projection_diff(&previous, &projection, epoch, sequence);
+                            state = ResyncState::Streaming;
+                            pending_reason = None;
+                        } else {
+                            state = ResyncState::Failed;
                         }
                         continue;
                     }
@@ -1174,15 +1267,18 @@ fn start_topology_supervisor() {
                         }
                         OutputTopologyTransition::Reset
                         | OutputTopologyTransition::SnapshotRequired => {
+                            if pending_reason.is_some() {
+                                continue;
+                            }
+                            state = ResyncState::SnapshotPending;
+                            pending_reason = Some(match delta.transition {
+                                OutputTopologyTransition::Reset => ResyncReason::Reset,
+                                _ => ResyncReason::SnapshotRequired,
+                            });
                             if let Ok((fresh_epoch, fresh_sequence, fresh_outputs)) =
-                                query_output_snapshot()
+                                query_output_snapshot_with_retry(epoch, sequence)
                             {
-                                if validate_output_snapshot(&fresh_outputs).is_err() {
-                                    continue;
-                                }
-                                if fresh_epoch < epoch || fresh_sequence < sequence {
-                                    continue;
-                                }
+                                state = ResyncState::SnapshotApplying;
                                 let fresh = fresh_outputs
                                     .into_iter()
                                     .map(|output| (output.geometry.output_id.clone(), output))
@@ -1191,6 +1287,10 @@ fn start_topology_supervisor() {
                                 epoch = fresh_epoch;
                                 sequence = fresh_sequence;
                                 broadcast_projection_diff(&previous, &projection, epoch, sequence);
+                                state = ResyncState::Streaming;
+                                pending_reason = None;
+                            } else {
+                                state = ResyncState::Failed;
                             }
                             continue;
                         }
@@ -2669,12 +2769,14 @@ impl Drop for WaylandDisplaySocket {
 #[cfg(test)]
 mod tests {
     use super::{
-        PendingFrameCallbacks, handle_wayland_command, intersecting_output_ids,
+        ACTIVE_TOPOLOGY_CONSUMERS, PendingFrameCallbacks, ResyncState, SNAPSHOT_RETRY_LIMIT,
+        TOPOLOGY_DELTA_BUFFER_LIMIT, handle_wayland_command, intersecting_output_ids,
         mock_surface_registry, output_viewports, projection_diff_commands,
         should_clear_pending_commit, should_store_pending_commit, socket_lock_is_stale,
     };
     use std::collections::BTreeMap;
     use std::fs;
+    use std::sync::atomic::Ordering;
     use waybroker_common::{
         FocusTarget, OutputGeometry, OutputMode, OutputTopologyEntry, SurfacePlacement,
         SurfaceSnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff,
@@ -2705,6 +2807,15 @@ mod tests {
         let mut invalid = entry;
         invalid.scale = 0;
         assert!(super::validate_output_snapshot(&[invalid]).is_err());
+    }
+
+    #[test]
+    fn resynchronization_policy_is_explicit_and_bounded() {
+        assert_eq!(ResyncState::Streaming, ResyncState::Streaming);
+        assert_ne!(ResyncState::SnapshotPending, ResyncState::Streaming);
+        assert_eq!(TOPOLOGY_DELTA_BUFFER_LIMIT, 32);
+        assert_eq!(SNAPSHOT_RETRY_LIMIT, 3);
+        assert_eq!(ACTIVE_TOPOLOGY_CONSUMERS.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -209,6 +209,12 @@
     * HeadlessWireCore の runtime global／global_remove と retired global bind rejection を実際の registry event queue で検証した。
     * 新しい subscription や test-only supervisor は追加していない。real portal capture、production display contact は行っていない。先行する supervisor／resync の runtime 実装は維持している。
 
+28. **Explicit resynchronization state foundation**
+    * supervisor に `Streaming`、`SnapshotPending`、`SnapshotApplying`、`Failed` の typed state と、Reset／SnapshotRequired／sequence gap／stream overflow の reason を追加した。
+    * topology receiver は bounded delta buffer（32件）を使用し、snapshot retrieval は最大3回までに制限した。失敗時は committed projection を変更せず `Failed` へ移行する。
+    * active topology consumer の accounting と shutdown 時の decrement guard を追加し、同時 consumer 数を観測可能にした。
+    * workspace validation は成功したが、実 IPC の Reset／SnapshotRequired／bind-race、buffered newer delta の再適用、client write failure isolation の専用回帰テストは引き続き未完了である。全 open item の closure とは扱わない。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 
