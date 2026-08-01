@@ -47,12 +47,13 @@ use vulkan_backend::{
 };
 use waybroker_common::{
     CommitTarget, DisplayCommand, DisplayEvent, FocusTarget, ImeBridgeMode, ImeCommand, ImeEvent,
-    ImeStatus, IpcEnvelope, MessageKind, OutputMode, OutputTopologyEntry, PixelTransportHandle,
-    PixelTransportPayload, PixelTransportStore, ServiceBanner, ServiceEndpoint, ServiceRole,
-    ServiceStream, SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand,
-    WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
-    WaylandSurfaceState, accel::global_accel_policy, bind_service_socket, connect_service_socket,
-    ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
+    ImeStatus, IpcEnvelope, MessageKind, OutputMode, OutputTopologyEntry, OutputTopologyTransition,
+    PixelTransportHandle, PixelTransportPayload, PixelTransportStore, ServiceBanner,
+    ServiceEndpoint, ServiceRole, ServiceStream, SurfacePlacement, SurfaceRegistrySnapshot,
+    SurfaceSnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState,
+    WaylandSurfaceRole, WaylandSurfaceState, accel::global_accel_policy, bind_service_socket,
+    connect_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line,
+    session_artifact_path,
 };
 
 fn run_wire_headless_test() -> Result<()> {
@@ -429,6 +430,7 @@ async fn serve_ipc(
 ) -> Result<()> {
     if config.production {
         start_topology_subscription().context("failed to start displayd topology subscription")?;
+        start_topology_supervisor();
     }
     let _wayland_display = if let Some(name) = config.bind_wayland_display.as_deref() {
         Some(bind_wayland_display_socket_ext(name, config.production, config.scene_epoch)?)
@@ -1026,6 +1028,118 @@ fn start_topology_subscription() -> Result<()> {
     });
     *TOPOLOGY_RECEIVER.lock().unwrap() = Some(receiver);
     Ok(())
+}
+
+fn start_topology_supervisor() {
+    let receiver = TOPOLOGY_RECEIVER.lock().unwrap().take();
+    let Some(receiver) = receiver else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let mut projection = BTreeMap::<String, OutputTopologyEntry>::new();
+        let mut epoch = 0u64;
+        let mut sequence = 0u64;
+        while let Ok(event) = receiver.recv() {
+            match event {
+                DisplayEvent::OutputTopology {
+                    epoch: next_epoch,
+                    sequence: next_sequence,
+                    outputs,
+                } => {
+                    if epoch != 0 && next_epoch < epoch {
+                        continue;
+                    }
+                    if next_sequence < sequence {
+                        continue;
+                    }
+                    let next = outputs
+                        .into_iter()
+                        .map(|output| (output.geometry.output_id.clone(), output))
+                        .collect::<BTreeMap<_, _>>();
+                    projection = next;
+                    epoch = next_epoch;
+                    sequence = next_sequence;
+                    broadcast_client_command(ClientCommand::InitialTopology {
+                        epoch,
+                        sequence,
+                        outputs: projection.values().cloned().collect(),
+                    });
+                }
+                DisplayEvent::OutputTopologyDelta(delta) => {
+                    if delta.epoch != epoch || delta.topology_sequence <= sequence {
+                        continue;
+                    }
+                    let command = match delta.transition {
+                        OutputTopologyTransition::Added | OutputTopologyTransition::Enabled => {
+                            let Some(output) = delta.output else {
+                                continue;
+                            };
+                            projection.insert(output.geometry.output_id.clone(), output.clone());
+                            ClientCommand::AddGlobal {
+                                epoch: delta.epoch,
+                                sequence: delta.topology_sequence,
+                                output,
+                            }
+                        }
+                        OutputTopologyTransition::Reconfigured => {
+                            let Some(output) = delta.output else {
+                                continue;
+                            };
+                            projection.insert(output.geometry.output_id.clone(), output.clone());
+                            ClientCommand::ReconfigureOutput {
+                                epoch: delta.epoch,
+                                sequence: delta.topology_sequence,
+                                output,
+                            }
+                        }
+                        OutputTopologyTransition::Disabled | OutputTopologyTransition::Removed => {
+                            let Some(output_id) = delta.output_id else {
+                                continue;
+                            };
+                            projection.remove(&output_id);
+                            ClientCommand::RemoveGlobal {
+                                epoch: delta.epoch,
+                                sequence: delta.topology_sequence,
+                                output_id,
+                                output_generation: delta.output_generation.unwrap_or(0),
+                            }
+                        }
+                        OutputTopologyTransition::Reset
+                        | OutputTopologyTransition::SnapshotRequired => continue,
+                    };
+                    epoch = delta.epoch;
+                    sequence = delta.topology_sequence;
+                    broadcast_client_command(command);
+                    broadcast_client_command(ClientCommand::RecalculateMembership {
+                        epoch,
+                        sequence,
+                    });
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
+fn broadcast_client_command(command: ClientCommand) {
+    let clients = CLIENT_COMMANDS
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, sender)| (*id, sender.clone()))
+        .collect::<Vec<_>>();
+    let mut failed = Vec::new();
+    for (id, sender) in clients {
+        if sender.try_send(command.clone()).is_err() {
+            failed.push(id);
+        }
+    }
+    if !failed.is_empty() {
+        let mut registry = CLIENT_COMMANDS.lock().unwrap();
+        for id in failed {
+            registry.remove(&id);
+        }
+    }
 }
 
 fn load_surface_registry(path: Option<&PathBuf>) -> Result<SurfaceRegistrySnapshot> {

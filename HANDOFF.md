@@ -187,6 +187,13 @@
     * 初期 topology は通常の直接 mutation ではなく client command queue の `InitialTopology` として投入し、HeadlessWireCore の serial event loop で protocol request と順序付けて処理する。
     * endpoint command model は InitialTopology、AddGlobal、RemoveGlobal、ReconfigureOutput、RecalculateMembership、TopologyReset、Disconnect を持ち、epoch／sequence の backward／cross-epoch を fail-closed にする。Core は output add／remove／reconfigure と membership recalculation を実行する。
     * shared broadcast supervisor、connected-client registry.global／global_remove 配信、global lifecycle の producer はこの task では実装していない。次 task が登録 sender と single topology receiver を統合する。
+
+25. **Shared topology broadcast supervisor**
+    * waylandd production server は既存の single persistent topology receiver を一つの supervisor thread が消費し、epoch／topology sequence と stable output identity を検証して committed projection を更新する。
+    * snapshot は `InitialTopology`、Added／Enabled は `AddGlobal`、Removed／Disabled は `RemoveGlobal`、Reconfigured は `ReconfigureOutput`、各遷移後は `RecalculateMembership` として bounded per-client command endpoints へ送る。supervisor lock を保持したまま client queue／stream write は行わない。
+    * `HeadlessWireCore` は runtime output add／remove を実装し、registry object ごとに実際の wl_registry.global／global_remove event を生成する。removed output は local membership から外れ、既存 bound resource は registry object lifetime を壊さず退役する。
+    * client protocol request と topology command は同じ client loop 内で serial に処理され、client sender overflow／closed endpoint はその client のみ除去する。CommitScene、AdvancePresentation、Presented 境界は変更していない。
+    * production display backend、physical monitor discovery、real portal capture は実装・実行していない。
     * waylandd の client・callback identity は displayd 障害で再生成せず、旧 presentation token／completion を復旧状態へ持ち込まない。production display backend、real portal capture、physical display 接続は実装・実行していない。
 
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。

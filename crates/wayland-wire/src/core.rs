@@ -26,6 +26,7 @@ use crate::{
 };
 use byteorder::{ByteOrder, LittleEndian};
 
+#[derive(Clone)]
 pub struct WireGlobal {
     pub name: u32,
     pub interface: String,
@@ -61,6 +62,8 @@ pub struct HeadlessWireCore {
     real_outputs: Vec<(String, i32, i32, i32, i32, u32, u32)>,
     surface_output_membership:
         std::collections::HashMap<WaylandObjectId, std::collections::BTreeSet<WaylandObjectId>>,
+    registry_objects: std::collections::BTreeSet<WaylandObjectId>,
+    runtime_global_names: std::collections::BTreeMap<String, u32>,
     events_out: Vec<WaylandMessage>,
     defer_frame_callbacks: bool,
 }
@@ -95,6 +98,8 @@ impl Default for HeadlessWireCore {
             globals: Vec::new(),
             real_outputs: Vec::new(),
             surface_output_membership: std::collections::HashMap::new(),
+            registry_objects: std::collections::BTreeSet::new(),
+            runtime_global_names: std::collections::BTreeMap::new(),
             events_out: Vec::new(),
             defer_frame_callbacks: false,
         };
@@ -210,13 +215,22 @@ impl HeadlessWireCore {
         refresh_nsec: u32,
         scale: u32,
     ) {
-        let global_name = (self.globals.len() as u32) + 1;
+        if self.runtime_global_names.contains_key(name) {
+            return;
+        }
+        let global_name =
+            self.globals.iter().map(|global| global.name).max().unwrap_or(0).saturating_add(1);
         self.real_outputs.push((name.to_string(), x, y, width, height, refresh_nsec, scale));
+        self.runtime_global_names.insert(name.to_owned(), global_name);
         self.globals.push(WireGlobal {
             name: global_name,
             interface: "wl_output".into(),
             version: 4,
         });
+        let global = self.globals.last().expect("runtime global was inserted").clone();
+        for registry_id in self.registry_objects.iter().copied().collect::<Vec<_>>() {
+            self.events_out.push(self.create_global_event(registry_id, &global));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -253,6 +267,19 @@ impl HeadlessWireCore {
 
     pub fn remove_topology_output(&mut self, name: &str) {
         self.real_outputs.retain(|entry| entry.0 != name);
+        if let Some(global_name) = self.runtime_global_names.remove(name) {
+            self.globals.retain(|global| global.name != global_name);
+            for registry_id in self.registry_objects.iter().copied().collect::<Vec<_>>() {
+                if let Ok(event) = crate::codec::encode_event(
+                    registry_id,
+                    WaylandOpcode(1),
+                    &[crate::WireArg::Uint(global_name)],
+                    &self.registry,
+                ) {
+                    self.events_out.push(event);
+                }
+            }
+        }
         let ids: Vec<_> = self
             .output
             .outputs
@@ -546,6 +573,7 @@ impl HeadlessWireCore {
         }
         let new_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
         self.registry.register_client_object(new_id, "wl_registry", 1)?;
+        self.registry_objects.insert(new_id);
         for global in &self.globals {
             self.events_out.push(self.create_global_event(new_id, global));
         }
