@@ -203,6 +203,12 @@
     * 全 prior acceptance gap の専用 race／resync regression test 群はまだ追加途上であり、実装を完了扱いとはしない。production display backend と real portal capture は実装・実行していない。
     * waylandd の client・callback identity は displayd 障害で再生成せず、旧 presentation token／completion を復旧状態へ持ち込まない。production display backend、real portal capture、physical display 接続は実装・実行していない。
 
+27. **Resynchronization／bind-race regression closure**
+    * 既存の単一 topology supervisor 経路に対し、fresh snapshot の validation failure（重複 identity、空 name、zero scale、stride 不整合、算術 overflow）を回帰テストで固定した。
+    * snapshot diff の本番コマンド生成を共有 helper に集約し、stable identity の reconfigure、removed の remove、new の add、最後の membership recalculation を deterministic な最小順序で検証した。unchanged output は再広告しない。
+    * HeadlessWireCore の runtime global／global_remove と retired global bind rejection を実際の registry event queue で検証した。
+    * 新しい subscription や test-only supervisor は追加していない。real portal capture、production display contact は行っていない。先行する supervisor／resync の runtime 実装は維持している。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 

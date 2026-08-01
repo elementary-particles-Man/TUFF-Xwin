@@ -1008,13 +1008,18 @@ fn query_output_snapshot() -> Result<(u64, u64, Vec<OutputTopologyEntry>)> {
 
 fn validate_output_snapshot(outputs: &[OutputTopologyEntry]) -> Result<()> {
     let mut ids = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeSet::new();
     for output in outputs {
         if output.geometry.output_id.is_empty()
             || !ids.insert(output.geometry.output_id.clone())
+            || output.name.is_empty()
+            || !names.insert(output.name.clone())
             || output.geometry.width == 0
             || output.geometry.height == 0
+            || output.geometry.stride < output.geometry.width.saturating_mul(4)
             || output.scale == 0
             || output.refresh_hz == 0
+            || output.geometry.width.checked_mul(output.geometry.height).is_none()
         {
             bail!("malformed or duplicate topology snapshot output");
         }
@@ -1231,9 +1236,21 @@ fn broadcast_projection_diff(
     epoch: u64,
     sequence: u64,
 ) {
+    for command in projection_diff_commands(previous, next, epoch, sequence) {
+        broadcast_client_command(command);
+    }
+}
+
+fn projection_diff_commands(
+    previous: &BTreeMap<String, OutputTopologyEntry>,
+    next: &BTreeMap<String, OutputTopologyEntry>,
+    epoch: u64,
+    sequence: u64,
+) -> Vec<ClientCommand> {
+    let mut commands = Vec::new();
     for (output_id, old) in previous {
         if !next.contains_key(output_id) {
-            broadcast_client_command(ClientCommand::RemoveGlobal {
+            commands.push(ClientCommand::RemoveGlobal {
                 epoch,
                 sequence,
                 output_id: output_id.clone(),
@@ -1243,22 +1260,19 @@ fn broadcast_projection_diff(
     }
     for (output_id, output) in next {
         match previous.get(output_id) {
-            None => broadcast_client_command(ClientCommand::AddGlobal {
+            None => {
+                commands.push(ClientCommand::AddGlobal { epoch, sequence, output: output.clone() })
+            }
+            Some(old) if old != output => commands.push(ClientCommand::ReconfigureOutput {
                 epoch,
                 sequence,
                 output: output.clone(),
             }),
-            Some(old) if old != output => {
-                broadcast_client_command(ClientCommand::ReconfigureOutput {
-                    epoch,
-                    sequence,
-                    output: output.clone(),
-                })
-            }
             Some(_) => {}
         }
     }
-    broadcast_client_command(ClientCommand::RecalculateMembership { epoch, sequence });
+    commands.push(ClientCommand::RecalculateMembership { epoch, sequence });
+    commands
 }
 
 fn load_surface_registry(path: Option<&PathBuf>) -> Result<SurfaceRegistrySnapshot> {
@@ -2656,14 +2670,123 @@ impl Drop for WaylandDisplaySocket {
 mod tests {
     use super::{
         PendingFrameCallbacks, handle_wayland_command, intersecting_output_ids,
-        mock_surface_registry, output_viewports, should_clear_pending_commit,
-        should_store_pending_commit, socket_lock_is_stale,
+        mock_surface_registry, output_viewports, projection_diff_commands,
+        should_clear_pending_commit, should_store_pending_commit, socket_lock_is_stale,
     };
+    use std::collections::BTreeMap;
     use std::fs;
     use waybroker_common::{
-        FocusTarget, OutputMode, SurfacePlacement, SurfaceSnapshot, WaylandCommand, WaylandEvent,
-        WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
+        FocusTarget, OutputGeometry, OutputMode, OutputTopologyEntry, SurfacePlacement,
+        SurfaceSnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff,
+        WaylandSelectionState, WaylandSurfaceRole,
     };
+
+    #[test]
+    fn topology_snapshot_validation_rejects_duplicates_and_zero_scale() {
+        let entry = OutputTopologyEntry {
+            geometry: OutputGeometry {
+                output_id: "eDP-1".into(),
+                width: 1920,
+                height: 1080,
+                stride: 7680,
+                format: 1,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation: 1,
+            },
+            refresh_hz: 60,
+            scale: 1,
+            transform: 0,
+            enabled: true,
+            name: "eDP-1".into(),
+            description: "test".into(),
+        };
+        assert!(super::validate_output_snapshot(&[entry.clone(), entry.clone()]).is_err());
+        let mut invalid = entry;
+        invalid.scale = 0;
+        assert!(super::validate_output_snapshot(&[invalid]).is_err());
+    }
+
+    #[test]
+    fn topology_snapshot_validation_rejects_invalid_identity_stride_and_overflow() {
+        let mut entry = OutputTopologyEntry {
+            geometry: OutputGeometry {
+                output_id: "HDMI-A-1".into(),
+                width: 1920,
+                height: 1080,
+                stride: 7680,
+                format: 1,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation: 7,
+            },
+            refresh_hz: 60,
+            scale: 1,
+            transform: 0,
+            enabled: true,
+            name: "HDMI-A-1".into(),
+            description: "test".into(),
+        };
+        entry.name.clear();
+        assert!(super::validate_output_snapshot(&[entry.clone()]).is_err());
+        entry.name = "HDMI-A-1".into();
+        entry.geometry.stride = 1;
+        assert!(super::validate_output_snapshot(&[entry.clone()]).is_err());
+        entry.geometry.stride = u32::MAX;
+        entry.geometry.width = u32::MAX;
+        assert!(super::validate_output_snapshot(&[entry]).is_err());
+    }
+
+    #[test]
+    fn snapshot_diff_preserves_stable_outputs_and_has_deterministic_minimal_order() {
+        let output = |id: &str, generation: u64| OutputTopologyEntry {
+            geometry: OutputGeometry {
+                output_id: id.into(),
+                width: 1920,
+                height: 1080,
+                stride: 7680,
+                format: 1,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation: generation,
+            },
+            refresh_hz: 60,
+            scale: 1,
+            transform: 0,
+            enabled: true,
+            name: id.into(),
+            description: "test".into(),
+        };
+        let old_a = output("A", 1);
+        let old_b = output("B", 1);
+        let old_c = output("C", 1);
+        let mut previous = BTreeMap::new();
+        previous.insert("A".into(), old_a.clone());
+        previous.insert("B".into(), old_b);
+        previous.insert("C".into(), old_c);
+        let mut changed_a = old_a;
+        changed_a.geometry.output_generation = 2;
+        changed_a.scale = 2;
+        let mut next = BTreeMap::new();
+        next.insert("A".into(), changed_a);
+        next.insert("D".into(), output("D", 4));
+
+        let commands = projection_diff_commands(&previous, &next, 9, 12);
+        assert!(
+            matches!(&commands[0], super::ClientCommand::RemoveGlobal { output_id, .. } if output_id == "B")
+        );
+        assert!(
+            matches!(&commands[1], super::ClientCommand::RemoveGlobal { output_id, .. } if output_id == "C")
+        );
+        assert!(
+            matches!(&commands[2], super::ClientCommand::ReconfigureOutput { output, .. } if output.geometry.output_id == "A")
+        );
+        assert!(
+            matches!(&commands[3], super::ClientCommand::AddGlobal { output, .. } if output.geometry.output_id == "D")
+        );
+        assert!(matches!(&commands[4], super::ClientCommand::RecalculateMembership { .. }));
+        assert_eq!(commands.len(), 5);
+    }
 
     #[test]
     fn frame_callback_waits_for_presented_and_delivers_once() {

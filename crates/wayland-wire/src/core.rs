@@ -1092,6 +1092,28 @@ mod tests {
     }
 
     #[test]
+    fn runtime_global_add_remove_and_retired_bind_are_serialized() {
+        let mut core = HeadlessWireCore::default();
+        let mut registry_payload = vec![0u8; 4];
+        LittleEndian::write_u32(&mut registry_payload, 2);
+        core.dispatch(WaylandMessage::new(
+            WaylandObjectId::DISPLAY,
+            WaylandOpcode(1),
+            registry_payload,
+        ))
+        .unwrap();
+        while core.pop_event().is_some() {}
+        core.add_topology_output("eDP-1", 0, 0, 1920, 1080, 16_666_666, 1);
+        let added = core.pop_event().expect("global event");
+        assert_eq!(added.header.object_id, WaylandObjectId(2));
+        assert_eq!(added.header.opcode, WaylandOpcode(0));
+        core.remove_topology_output("eDP-1");
+        let removed = core.pop_event().expect("global-remove event");
+        assert_eq!(removed.header.object_id, WaylandObjectId(2));
+        assert_eq!(removed.header.opcode, WaylandOpcode(1));
+    }
+
+    #[test]
     fn test_xdg_configure_event_order() {
         let mut core = HeadlessWireCore::default();
         core.registry.register_client_object(WaylandObjectId(10), "wl_surface", 4).unwrap();
