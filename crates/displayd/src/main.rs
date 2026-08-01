@@ -715,7 +715,7 @@ async fn handle_display_command(
             outputs.sort_by(|a, b| a.geometry.output_id.cmp(&b.geometry.output_id));
             Ok(DisplayEvent::OutputTopology {
                 epoch: state.display_epoch,
-                sequence: state.display_epoch,
+                sequence: TOPOLOGY_SEQUENCE.load(Ordering::Acquire),
                 outputs,
             })
         }

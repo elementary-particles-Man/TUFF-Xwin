@@ -216,6 +216,10 @@
     * bounded receiver の overflow marker 用に予約スロットを確保し、queue full 時も terminal overflow 通知が通常イベントに埋もれないよう修正した。
     * workspace validation は成功したが、実 IPC の Reset／SnapshotRequired／bind-race、buffered newer delta の再適用、client write failure isolation の専用回帰テストは引き続き未完了である。全 open item の closure とは扱わない。
 
+29. **Real snapshot sequence correction**
+    * displayd の `GetOutputTopology` 応答が誤って `display_epoch` を topology sequence として返していたため、persistent stream の現在 sequence と fresh snapshot の比較が不正になる欠陥を修正した。応答は authoritative な `TOPOLOGY_SEQUENCE` を返す。
+    * 実 displayd listener／waylandd supervisor を跨ぐ Reset、SnapshotRequired、buffered replay、retry exhaustion、consumer lifecycle の専用 IPC 回帰テストはまだ追加されていない。今回の変更をもって resynchronization closure 完了とは扱わない。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 
