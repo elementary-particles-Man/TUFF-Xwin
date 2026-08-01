@@ -75,13 +75,13 @@ use vulkan_backend::{
 };
 use waybroker_common::{
     CommitTarget, DisplayCommand, DisplayEvent, FocusTarget, ImeBridgeMode, ImeCommand, ImeEvent,
-    ImeStatus, IpcEnvelope, MessageKind, OutputMode, OutputTopologyEntry, OutputTopologyTransition,
-    PixelTransportHandle, PixelTransportPayload, PixelTransportStore, ServiceBanner,
-    ServiceEndpoint, ServiceRole, ServiceStream, SurfacePlacement, SurfaceRegistrySnapshot,
-    SurfaceSnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState,
-    WaylandSurfaceRole, WaylandSurfaceState, accel::global_accel_policy, bind_service_socket,
-    connect_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line,
-    session_artifact_path,
+    ImeStatus, IpcEnvelope, MessageKind, OutputMode, OutputTopologyDelta, OutputTopologyEntry,
+    OutputTopologyTransition, PixelTransportHandle, PixelTransportPayload, PixelTransportStore,
+    ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, SurfacePlacement,
+    SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
+    WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
+    accel::global_accel_policy, bind_service_socket, connect_service_socket, ensure_runtime_dir,
+    now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
 };
 
 fn run_wire_headless_test() -> Result<()> {
@@ -1226,6 +1226,12 @@ fn start_topology_supervisor() {
                             epoch = fresh_epoch;
                             sequence = fresh_sequence;
                             broadcast_projection_diff(&previous, &projection, epoch, sequence);
+                            replay_buffered_deltas(
+                                &mut buffered_deltas,
+                                &mut projection,
+                                epoch,
+                                &mut sequence,
+                            );
                             state = ResyncState::Streaming;
                             pending_reason = None;
                         } else {
@@ -1234,39 +1240,16 @@ fn start_topology_supervisor() {
                         continue;
                     }
                     let command = match delta.transition {
-                        OutputTopologyTransition::Added | OutputTopologyTransition::Enabled => {
-                            let Some(output) = delta.output else {
+                        OutputTopologyTransition::Added
+                        | OutputTopologyTransition::Enabled
+                        | OutputTopologyTransition::Reconfigured
+                        | OutputTopologyTransition::Disabled
+                        | OutputTopologyTransition::Removed => {
+                            let Some(command) = apply_topology_delta(&mut projection, &delta)
+                            else {
                                 continue;
                             };
-                            projection.insert(output.geometry.output_id.clone(), output.clone());
-                            ClientCommand::AddGlobal {
-                                epoch: delta.epoch,
-                                sequence: delta.topology_sequence,
-                                output,
-                            }
-                        }
-                        OutputTopologyTransition::Reconfigured => {
-                            let Some(output) = delta.output else {
-                                continue;
-                            };
-                            projection.insert(output.geometry.output_id.clone(), output.clone());
-                            ClientCommand::ReconfigureOutput {
-                                epoch: delta.epoch,
-                                sequence: delta.topology_sequence,
-                                output,
-                            }
-                        }
-                        OutputTopologyTransition::Disabled | OutputTopologyTransition::Removed => {
-                            let Some(output_id) = delta.output_id else {
-                                continue;
-                            };
-                            projection.remove(&output_id);
-                            ClientCommand::RemoveGlobal {
-                                epoch: delta.epoch,
-                                sequence: delta.topology_sequence,
-                                output_id,
-                                output_generation: delta.output_generation.unwrap_or(0),
-                            }
+                            command
                         }
                         OutputTopologyTransition::Reset
                         | OutputTopologyTransition::SnapshotRequired => {
@@ -1290,6 +1273,12 @@ fn start_topology_supervisor() {
                                 epoch = fresh_epoch;
                                 sequence = fresh_sequence;
                                 broadcast_projection_diff(&previous, &projection, epoch, sequence);
+                                replay_buffered_deltas(
+                                    &mut buffered_deltas,
+                                    &mut projection,
+                                    epoch,
+                                    &mut sequence,
+                                );
                                 state = ResyncState::Streaming;
                                 pending_reason = None;
                             } else {
@@ -1310,6 +1299,74 @@ fn start_topology_supervisor() {
             }
         }
     });
+}
+
+fn apply_topology_delta(
+    projection: &mut BTreeMap<String, OutputTopologyEntry>,
+    delta: &OutputTopologyDelta,
+) -> Option<ClientCommand> {
+    match delta.transition {
+        OutputTopologyTransition::Added | OutputTopologyTransition::Enabled => {
+            let output = delta.output.clone()?;
+            projection.insert(output.geometry.output_id.clone(), output.clone());
+            Some(ClientCommand::AddGlobal {
+                epoch: delta.epoch,
+                sequence: delta.topology_sequence,
+                output,
+            })
+        }
+        OutputTopologyTransition::Reconfigured => {
+            let output = delta.output.clone()?;
+            projection.insert(output.geometry.output_id.clone(), output.clone());
+            Some(ClientCommand::ReconfigureOutput {
+                epoch: delta.epoch,
+                sequence: delta.topology_sequence,
+                output,
+            })
+        }
+        OutputTopologyTransition::Disabled | OutputTopologyTransition::Removed => {
+            let output_id = delta.output_id.clone()?;
+            projection.remove(&output_id);
+            Some(ClientCommand::RemoveGlobal {
+                epoch: delta.epoch,
+                sequence: delta.topology_sequence,
+                output_id,
+                output_generation: delta.output_generation.unwrap_or(0),
+            })
+        }
+        OutputTopologyTransition::Reset | OutputTopologyTransition::SnapshotRequired => None,
+    }
+}
+
+fn replay_buffered_deltas(
+    buffered: &mut VecDeque<OutputTopologyDelta>,
+    projection: &mut BTreeMap<String, OutputTopologyEntry>,
+    epoch: u64,
+    sequence: &mut u64,
+) {
+    let mut queued = buffered.drain(..).collect::<Vec<_>>();
+    queued.sort_by_key(|delta| delta.topology_sequence);
+    let mut last_sequence = None;
+    for delta in queued {
+        if delta.epoch != epoch || delta.topology_sequence <= *sequence {
+            continue;
+        }
+        if last_sequence == Some(delta.topology_sequence)
+            || delta.topology_sequence != (*sequence).saturating_add(1)
+        {
+            continue;
+        }
+        let Some(command) = apply_topology_delta(projection, &delta) else {
+            continue;
+        };
+        *sequence = delta.topology_sequence;
+        last_sequence = Some(*sequence);
+        broadcast_client_command(command);
+        broadcast_client_command(ClientCommand::RecalculateMembership {
+            epoch,
+            sequence: *sequence,
+        });
+    }
 }
 
 fn broadcast_client_command(command: ClientCommand) {

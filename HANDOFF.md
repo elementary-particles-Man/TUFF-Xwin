@@ -220,6 +220,10 @@
     * displayd の `GetOutputTopology` 応答が誤って `display_epoch` を topology sequence として返していたため、persistent stream の現在 sequence と fresh snapshot の比較が不正になる欠陥を修正した。応答は authoritative な `TOPOLOGY_SEQUENCE` を返す。
     * 実 displayd listener／waylandd supervisor を跨ぐ Reset、SnapshotRequired、buffered replay、retry exhaustion、consumer lifecycle の専用 IPC 回帰テストはまだ追加されていない。今回の変更をもって resynchronization closure 完了とは扱わない。
 
+30. **Production buffered-delta replay correction**
+    * snapshot replacement 後に bounded buffer を drain し、obsolete epoch／snapshot sequence 以下／duplicate／非連続 delta を抑止し、strictly newer contiguous delta だけを既存の `apply_topology_delta` 経路で projection と client command に反映するよう修正した。
+    * 現行 supervisor は fresh snapshot IPC を consumer thread 内で同期実行するため、IPC retrieval 中に persistent stream の delta を同じ real path で受信する fixture と、Reset／SnapshotRequired の重複 trigger coalescing は未完了である。
+
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。
 *   **Portal ブリッジの拡張**: 画面共有（screencast）等の高度な Portal 機能をブローカー経由で提供する実装の深化。
 
