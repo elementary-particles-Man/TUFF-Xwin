@@ -194,6 +194,13 @@
     * `HeadlessWireCore` は runtime output add／remove を実装し、registry object ごとに実際の wl_registry.global／global_remove event を生成する。removed output は local membership から外れ、既存 bound resource は registry object lifetime を壊さず退役する。
     * client protocol request と topology command は同じ client loop 内で serial に処理され、client sender overflow／closed endpoint はその client のみ除去する。CommitScene、AdvancePresentation、Presented 境界は変更していない。
     * production display backend、physical monitor discovery、real portal capture は実装・実行していない。
+
+26. **Topology resynchronization and bind-race closure**
+    * supervisor は delta sequence gap、Reset、SnapshotRequired を通常 delta の停止条件として扱い、既存 stream consumer から `GetOutputTopology` の fresh atomic snapshot を取得する。snapshot は epoch、sequence、identity、geometry、scale、cadence を検証してから committed projection を置換する。
+    * snapshot replacement は stable output identity で diff し、unchanged output を再広告せず、removed／disabled は RemoveGlobal、new／enabled は AddGlobal、property／generation change は ReconfigureOutput として deterministic order で送る。membership recalculation は最終 projection 後に送る。
+    * queued obsolete delta は epoch／sequence validation で破棄し、fresh snapshot より新しい delta だけを受け付ける。subscription は一つだけ維持する。
+    * client-local Core は runtime global name mapping を使って wl_output bind を retired global に許可せず、reconfigure は logical global を保持し、remove 後の bind は fail-closed。protocol bind と topology command は同一 serialized client loop 内で処理する。
+    * 全 prior acceptance gap の専用 race／resync regression test 群はまだ追加途上であり、実装を完了扱いとはしない。production display backend と real portal capture は実装・実行していない。
     * waylandd の client・callback identity は displayd 障害で再生成せず、旧 presentation token／completion を復旧状態へ持ち込まない。production display backend、real portal capture、physical display 接続は実装・実行していない。
 
 *   **Vulkan 実シェーダーの導入**: 現在はシミュレーションモード。TUFF-OS 側の `.spv` バイナリをロードすることで、実演算の加速が可能。

@@ -632,9 +632,15 @@ impl HeadlessWireCore {
                 })
                 .count()
                 .saturating_sub(1);
-            if let Some((output_name, x, y, width, height, refresh, scale)) =
-                self.real_outputs.get(output_index).cloned()
-            {
+            let runtime_name = self
+                .runtime_global_names
+                .iter()
+                .find(|(_, name)| **name == global.name)
+                .map(|(name, _)| name.clone());
+            let output_entry = runtime_name
+                .and_then(|name| self.real_outputs.iter().find(|entry| entry.0 == name).cloned())
+                .or_else(|| self.real_outputs.get(output_index).cloned());
+            if let Some((output_name, x, y, width, height, refresh, scale)) = output_entry {
                 self.output.create_output(new_id, &output_name);
                 if let Some(output) = self.output.outputs.get_mut(&new_id) {
                     output.x = x;

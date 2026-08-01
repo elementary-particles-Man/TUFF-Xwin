@@ -985,6 +985,43 @@ fn query_output_topology() -> Result<Vec<OutputTopologyEntry>> {
     }
 }
 
+fn query_output_snapshot() -> Result<(u64, u64, Vec<OutputTopologyEntry>)> {
+    let mut stream = connect_service_socket(ServiceRole::Displayd)?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Waylandd,
+        ServiceRole::Displayd,
+        MessageKind::DisplayCommand(DisplayCommand::GetOutputTopology),
+    );
+    send_json_line(&mut stream, &request)?;
+    let mut reader = BufReader::new(stream);
+    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    match response.kind {
+        MessageKind::DisplayEvent(DisplayEvent::OutputTopology { epoch, sequence, outputs }) => {
+            Ok((epoch, sequence, outputs))
+        }
+        MessageKind::DisplayEvent(DisplayEvent::Rejected { reason }) => {
+            bail!("displayd rejected topology snapshot: {reason}")
+        }
+        other => bail!("unexpected topology snapshot response: {other:?}"),
+    }
+}
+
+fn validate_output_snapshot(outputs: &[OutputTopologyEntry]) -> Result<()> {
+    let mut ids = std::collections::BTreeSet::new();
+    for output in outputs {
+        if output.geometry.output_id.is_empty()
+            || !ids.insert(output.geometry.output_id.clone())
+            || output.geometry.width == 0
+            || output.geometry.height == 0
+            || output.scale == 0
+            || output.refresh_hz == 0
+        {
+            bail!("malformed or duplicate topology snapshot output");
+        }
+    }
+    Ok(())
+}
+
 fn start_topology_subscription() -> Result<()> {
     let mut stream = connect_service_socket(ServiceRole::Displayd)?;
     let request = IpcEnvelope::new(
@@ -1046,6 +1083,9 @@ fn start_topology_supervisor() {
                     sequence: next_sequence,
                     outputs,
                 } => {
+                    if validate_output_snapshot(&outputs).is_err() {
+                        continue;
+                    }
                     if epoch != 0 && next_epoch < epoch {
                         continue;
                     }
@@ -1056,17 +1096,40 @@ fn start_topology_supervisor() {
                         .into_iter()
                         .map(|output| (output.geometry.output_id.clone(), output))
                         .collect::<BTreeMap<_, _>>();
-                    projection = next;
+                    let previous = std::mem::replace(&mut projection, next.clone());
                     epoch = next_epoch;
                     sequence = next_sequence;
-                    broadcast_client_command(ClientCommand::InitialTopology {
-                        epoch,
-                        sequence,
-                        outputs: projection.values().cloned().collect(),
-                    });
+                    if previous.is_empty() {
+                        broadcast_client_command(ClientCommand::InitialTopology {
+                            epoch,
+                            sequence,
+                            outputs: projection.values().cloned().collect(),
+                        });
+                    } else {
+                        broadcast_projection_diff(&previous, &projection, epoch, sequence);
+                    }
                 }
                 DisplayEvent::OutputTopologyDelta(delta) => {
-                    if delta.epoch != epoch || delta.topology_sequence <= sequence {
+                    if delta.epoch != epoch || delta.topology_sequence != sequence.saturating_add(1)
+                    {
+                        if let Ok((fresh_epoch, fresh_sequence, fresh_outputs)) =
+                            query_output_snapshot()
+                        {
+                            if validate_output_snapshot(&fresh_outputs).is_err() {
+                                continue;
+                            }
+                            if fresh_epoch < epoch || fresh_sequence < sequence {
+                                continue;
+                            }
+                            let fresh = fresh_outputs
+                                .into_iter()
+                                .map(|output| (output.geometry.output_id.clone(), output))
+                                .collect::<BTreeMap<_, _>>();
+                            let previous = std::mem::replace(&mut projection, fresh);
+                            epoch = fresh_epoch;
+                            sequence = fresh_sequence;
+                            broadcast_projection_diff(&previous, &projection, epoch, sequence);
+                        }
                         continue;
                     }
                     let command = match delta.transition {
@@ -1105,7 +1168,27 @@ fn start_topology_supervisor() {
                             }
                         }
                         OutputTopologyTransition::Reset
-                        | OutputTopologyTransition::SnapshotRequired => continue,
+                        | OutputTopologyTransition::SnapshotRequired => {
+                            if let Ok((fresh_epoch, fresh_sequence, fresh_outputs)) =
+                                query_output_snapshot()
+                            {
+                                if validate_output_snapshot(&fresh_outputs).is_err() {
+                                    continue;
+                                }
+                                if fresh_epoch < epoch || fresh_sequence < sequence {
+                                    continue;
+                                }
+                                let fresh = fresh_outputs
+                                    .into_iter()
+                                    .map(|output| (output.geometry.output_id.clone(), output))
+                                    .collect::<BTreeMap<_, _>>();
+                                let previous = std::mem::replace(&mut projection, fresh);
+                                epoch = fresh_epoch;
+                                sequence = fresh_sequence;
+                                broadcast_projection_diff(&previous, &projection, epoch, sequence);
+                            }
+                            continue;
+                        }
                     };
                     epoch = delta.epoch;
                     sequence = delta.topology_sequence;
@@ -1140,6 +1223,42 @@ fn broadcast_client_command(command: ClientCommand) {
             registry.remove(&id);
         }
     }
+}
+
+fn broadcast_projection_diff(
+    previous: &BTreeMap<String, OutputTopologyEntry>,
+    next: &BTreeMap<String, OutputTopologyEntry>,
+    epoch: u64,
+    sequence: u64,
+) {
+    for (output_id, old) in previous {
+        if !next.contains_key(output_id) {
+            broadcast_client_command(ClientCommand::RemoveGlobal {
+                epoch,
+                sequence,
+                output_id: output_id.clone(),
+                output_generation: old.geometry.output_generation,
+            });
+        }
+    }
+    for (output_id, output) in next {
+        match previous.get(output_id) {
+            None => broadcast_client_command(ClientCommand::AddGlobal {
+                epoch,
+                sequence,
+                output: output.clone(),
+            }),
+            Some(old) if old != output => {
+                broadcast_client_command(ClientCommand::ReconfigureOutput {
+                    epoch,
+                    sequence,
+                    output: output.clone(),
+                })
+            }
+            Some(_) => {}
+        }
+    }
+    broadcast_client_command(ClientCommand::RecalculateMembership { epoch, sequence });
 }
 
 fn load_surface_registry(path: Option<&PathBuf>) -> Result<SurfaceRegistrySnapshot> {
