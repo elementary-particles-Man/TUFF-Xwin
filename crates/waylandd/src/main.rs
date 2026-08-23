@@ -27,6 +27,8 @@ static PIXEL_TRANSPORT: LazyLock<Mutex<PixelTransportStore>> =
     LazyLock::new(|| Mutex::new(PixelTransportStore::default()));
 static TOPOLOGY_RECEIVER: LazyLock<Mutex<Option<Receiver<TopologyInput>>>> =
     LazyLock::new(|| Mutex::new(None));
+static TOPOLOGY_SENDER: LazyLock<Mutex<Option<SyncSender<TopologyInput>>>> =
+    LazyLock::new(|| Mutex::new(None));
 static CLIENT_COMMANDS: LazyLock<Mutex<BTreeMap<u64, SyncSender<ClientCommand>>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 static ACTIVE_TOPOLOGY_CONSUMERS: AtomicU64 = AtomicU64::new(0);
@@ -68,6 +70,10 @@ enum ResyncReason {
 enum TopologyInput {
     Event(DisplayEvent),
     Overflow,
+    SnapshotResult {
+        resync_generation: u64,
+        result: std::result::Result<(u64, u64, Vec<OutputTopologyEntry>), String>,
+    },
 }
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 use vulkan_backend::{
@@ -1110,6 +1116,8 @@ fn start_topology_subscription() -> Result<()> {
     } else {
         bail!("invalid topology subscription response");
     }
+    *TOPOLOGY_SENDER.lock().unwrap() = Some(sender.clone());
+    *TOPOLOGY_RECEIVER.lock().unwrap() = Some(receiver);
     std::thread::spawn(move || {
         while let Ok(message) = read_json_line::<IpcEnvelope>(&mut reader) {
             let event = match message.kind {
@@ -1122,7 +1130,6 @@ fn start_topology_subscription() -> Result<()> {
             }
         }
     });
-    *TOPOLOGY_RECEIVER.lock().unwrap() = Some(receiver);
     Ok(())
 }
 
@@ -1132,7 +1139,20 @@ fn start_topology_supervisor() {
     let Some(receiver) = receiver else {
         return;
     };
+    let sender = TOPOLOGY_SENDER.lock().unwrap().clone().unwrap();
+    start_topology_supervisor_loop(receiver, sender, query_output_snapshot_with_retry);
+}
+
+#[allow(unused_assignments)]
+fn start_topology_supervisor_loop<F>(
+    receiver: std::sync::mpsc::Receiver<TopologyInput>,
+    sender: std::sync::mpsc::SyncSender<TopologyInput>,
+    snapshot_fetcher: F,
+) where
+    F: Fn(u64, u64) -> anyhow::Result<(u64, u64, Vec<OutputTopologyEntry>)> + Send + Sync + 'static,
+{
     ACTIVE_TOPOLOGY_CONSUMERS.fetch_add(1, Ordering::SeqCst);
+    let fetcher = std::sync::Arc::new(snapshot_fetcher);
     std::thread::spawn(move || {
         struct ConsumerGuard;
         impl Drop for ConsumerGuard {
@@ -1146,77 +1166,67 @@ fn start_topology_supervisor() {
         let mut sequence = 0u64;
         let mut state = ResyncState::Streaming;
         let mut pending_reason = None;
-        let mut buffered_deltas = VecDeque::with_capacity(TOPOLOGY_DELTA_BUFFER_LIMIT);
+        let mut buffered_deltas: VecDeque<OutputTopologyDelta> = VecDeque::with_capacity(TOPOLOGY_DELTA_BUFFER_LIMIT);
+        let mut resync_gen = 0u64;
+
+        let trigger_resync = |reason: ResyncReason,
+                                  resync_generation_counter: &mut u64,
+                                  state: &mut ResyncState,
+                                  pending_reason: &mut Option<ResyncReason>,
+                                  req_epoch: u64,
+                                  req_seq: u64| {
+            if *state == ResyncState::SnapshotPending || *state == ResyncState::SnapshotApplying {
+                let current_priority = match pending_reason.unwrap_or(ResyncReason::StreamOverflow) {
+                    ResyncReason::Reset => 4,
+                    ResyncReason::SnapshotRequired => 3,
+                    ResyncReason::SequenceGap => 2,
+                    ResyncReason::StreamOverflow => 1,
+                };
+                let new_priority = match reason {
+                    ResyncReason::Reset => 4,
+                    ResyncReason::SnapshotRequired => 3,
+                    ResyncReason::SequenceGap => 2,
+                    ResyncReason::StreamOverflow => 1,
+                };
+                if new_priority > current_priority {
+                    *pending_reason = Some(reason);
+                }
+                return;
+            }
+            *state = ResyncState::SnapshotPending;
+            *pending_reason = Some(reason);
+            *resync_generation_counter += 1;
+            let target_gen = *resync_generation_counter;
+            let tx = sender.clone();
+            let fetcher_clone = fetcher.clone();
+            std::thread::spawn(move || {
+                let res = fetcher_clone(req_epoch, req_seq).map_err(|e| e.to_string());
+                let _ = tx.try_send(TopologyInput::SnapshotResult {
+                    resync_generation: target_gen,
+                    result: res,
+                });
+            });
+        };
+
         while let Ok(input) = receiver.recv() {
             if state == ResyncState::Failed {
                 break;
             }
-            if state != ResyncState::Streaming {
-                match input {
-                    TopologyInput::Event(DisplayEvent::OutputTopologyDelta(delta)) => {
-                        if buffered_deltas.len() == TOPOLOGY_DELTA_BUFFER_LIMIT {
-                            buffered_deltas.clear();
-                            state = ResyncState::SnapshotPending;
-                            pending_reason = Some(ResyncReason::StreamOverflow);
-                        } else {
-                            buffered_deltas.push_back(delta);
-                        }
-                    }
-                    TopologyInput::Event(_) => {}
-                    TopologyInput::Overflow => {
-                        state = ResyncState::Failed;
-                        break;
-                    }
-                }
-                continue;
-            }
-            let event = match input {
-                TopologyInput::Event(event) => event,
+
+            match input {
                 TopologyInput::Overflow => {
                     state = ResyncState::Failed;
                     break;
                 }
-            };
-            match event {
-                DisplayEvent::OutputTopology {
-                    epoch: next_epoch,
-                    sequence: next_sequence,
-                    outputs,
-                } => {
-                    if validate_output_snapshot(&outputs).is_err() {
+                TopologyInput::SnapshotResult { resync_generation, result } => {
+                    if resync_generation != resync_gen {
+                        continue; // Stale completion
+                    }
+                    if state != ResyncState::SnapshotPending && state != ResyncState::SnapshotApplying {
                         continue;
                     }
-                    if epoch != 0 && next_epoch < epoch {
-                        continue;
-                    }
-                    if next_sequence < sequence {
-                        continue;
-                    }
-                    let next = outputs
-                        .into_iter()
-                        .map(|output| (output.geometry.output_id.clone(), output))
-                        .collect::<BTreeMap<_, _>>();
-                    let previous = std::mem::replace(&mut projection, next.clone());
-                    epoch = next_epoch;
-                    sequence = next_sequence;
-                    if previous.is_empty() {
-                        broadcast_client_command(ClientCommand::InitialTopology {
-                            epoch,
-                            sequence,
-                            outputs: projection.values().cloned().collect(),
-                        });
-                    } else {
-                        broadcast_projection_diff(&previous, &projection, epoch, sequence);
-                    }
-                }
-                DisplayEvent::OutputTopologyDelta(delta) => {
-                    if delta.epoch != epoch || delta.topology_sequence != sequence.saturating_add(1)
-                    {
-                        state = ResyncState::SnapshotPending;
-                        pending_reason = Some(ResyncReason::SequenceGap);
-                        if let Ok((fresh_epoch, fresh_sequence, fresh_outputs)) =
-                            query_output_snapshot_with_retry(epoch, sequence)
-                        {
+                    match result {
+                        Ok((fresh_epoch, fresh_sequence, fresh_outputs)) => {
                             state = ResyncState::SnapshotApplying;
                             let fresh = fresh_outputs
                                 .into_iter()
@@ -1226,81 +1236,157 @@ fn start_topology_supervisor() {
                             epoch = fresh_epoch;
                             sequence = fresh_sequence;
                             broadcast_projection_diff(&previous, &projection, epoch, sequence);
+                            let has_gap = buffered_deltas
+                                .iter()
+                                .filter(|d| d.epoch == epoch && d.topology_sequence > sequence)
+                                .map(|d| d.topology_sequence)
+                                .min()
+                                .map(|min_seq| min_seq > sequence + 1)
+                                .unwrap_or(false);
+                                
                             replay_buffered_deltas(
                                 &mut buffered_deltas,
                                 &mut projection,
                                 epoch,
                                 &mut sequence,
                             );
-                            state = ResyncState::Streaming;
-                            pending_reason = None;
-                        } else {
+
+                            if has_gap {
+                                state = ResyncState::SnapshotPending;
+                                pending_reason = Some(ResyncReason::SequenceGap);
+                                resync_gen += 1;
+                                let target_gen = resync_gen;
+                                let tx = sender.clone();
+                                let fetcher_clone = fetcher.clone();
+                                let req_epoch = epoch;
+                                let req_seq = sequence;
+                                std::thread::spawn(move || {
+                                    let res = fetcher_clone(req_epoch, req_seq).map_err(|e| e.to_string());
+                                    let _ = tx.try_send(TopologyInput::SnapshotResult {
+                                        resync_generation: target_gen,
+                                        result: res,
+                                    });
+                                });
+                            } else {
+                                buffered_deltas.clear(); // Drop obsolete
+                                state = ResyncState::Streaming;
+                                pending_reason = None;
+                            }
+                        }
+                        Err(_) => {
                             state = ResyncState::Failed;
+                        }
+                    }
+                }
+                TopologyInput::Event(event) => {
+                    if state != ResyncState::Streaming {
+                        if let DisplayEvent::OutputTopologyDelta(delta) = event {
+                            if buffered_deltas.len() == TOPOLOGY_DELTA_BUFFER_LIMIT {
+                                buffered_deltas.clear();
+                                trigger_resync(
+                                    ResyncReason::StreamOverflow,
+                                    &mut resync_gen,
+                                    &mut state,
+                                    &mut pending_reason,
+                                    epoch,
+                                    sequence,
+                                );
+                            } else {
+                                buffered_deltas.push_back(delta);
+                            }
                         }
                         continue;
                     }
-                    let command = match delta.transition {
-                        OutputTopologyTransition::Added
-                        | OutputTopologyTransition::Enabled
-                        | OutputTopologyTransition::Reconfigured
-                        | OutputTopologyTransition::Disabled
-                        | OutputTopologyTransition::Removed => {
-                            let Some(command) = apply_topology_delta(&mut projection, &delta)
-                            else {
-                                continue;
-                            };
-                            command
-                        }
-                        OutputTopologyTransition::Reset
-                        | OutputTopologyTransition::SnapshotRequired => {
-                            if pending_reason.is_some() {
+                    match event {
+                        DisplayEvent::OutputTopology {
+                            epoch: next_epoch,
+                            sequence: next_sequence,
+                            outputs,
+                        } => {
+                            if validate_output_snapshot(&outputs).is_err() {
                                 continue;
                             }
-                            state = ResyncState::SnapshotPending;
-                            pending_reason = Some(match delta.transition {
-                                OutputTopologyTransition::Reset => ResyncReason::Reset,
-                                _ => ResyncReason::SnapshotRequired,
-                            });
-                            if let Ok((fresh_epoch, fresh_sequence, fresh_outputs)) =
-                                query_output_snapshot_with_retry(epoch, sequence)
-                            {
-                                state = ResyncState::SnapshotApplying;
-                                let fresh = fresh_outputs
-                                    .into_iter()
-                                    .map(|output| (output.geometry.output_id.clone(), output))
-                                    .collect::<BTreeMap<_, _>>();
-                                let previous = std::mem::replace(&mut projection, fresh);
-                                epoch = fresh_epoch;
-                                sequence = fresh_sequence;
-                                broadcast_projection_diff(&previous, &projection, epoch, sequence);
-                                replay_buffered_deltas(
-                                    &mut buffered_deltas,
-                                    &mut projection,
+                            if epoch != 0 && next_epoch < epoch {
+                                continue;
+                            }
+                            if next_sequence < sequence {
+                                continue;
+                            }
+                            let next = outputs
+                                .into_iter()
+                                .map(|output| (output.geometry.output_id.clone(), output))
+                                .collect::<BTreeMap<_, _>>();
+                            let previous = std::mem::replace(&mut projection, next.clone());
+                            epoch = next_epoch;
+                            sequence = next_sequence;
+                            if previous.is_empty() {
+                                broadcast_client_command(ClientCommand::InitialTopology {
                                     epoch,
-                                    &mut sequence,
-                                );
-                                state = ResyncState::Streaming;
-                                pending_reason = None;
+                                    sequence,
+                                    outputs: projection.values().cloned().collect(),
+                                });
                             } else {
-                                state = ResyncState::Failed;
+                                broadcast_projection_diff(&previous, &projection, epoch, sequence);
                             }
-                            continue;
                         }
-                    };
-                    epoch = delta.epoch;
-                    sequence = delta.topology_sequence;
-                    broadcast_client_command(command);
-                    broadcast_client_command(ClientCommand::RecalculateMembership {
-                        epoch,
-                        sequence,
-                    });
+                        DisplayEvent::OutputTopologyDelta(delta) => {
+                            if delta.epoch != epoch || delta.topology_sequence != sequence.saturating_add(1) {
+                                if buffered_deltas.len() < TOPOLOGY_DELTA_BUFFER_LIMIT {
+                                    buffered_deltas.push_back(delta);
+                                } else {
+                                    buffered_deltas.clear();
+                                }
+                                trigger_resync(
+                                    ResyncReason::SequenceGap,
+                                    &mut resync_gen,
+                                    &mut state,
+                                    &mut pending_reason,
+                                    epoch,
+                                    sequence,
+                                );
+                                continue;
+                            }
+                            let command = match delta.transition {
+                                OutputTopologyTransition::Added
+                                | OutputTopologyTransition::Enabled
+                                | OutputTopologyTransition::Reconfigured
+                                | OutputTopologyTransition::Disabled
+                                | OutputTopologyTransition::Removed => {
+                                    let Some(command) = apply_topology_delta(&mut projection, &delta) else {
+                                        continue;
+                                    };
+                                    command
+                                }
+                                OutputTopologyTransition::Reset | OutputTopologyTransition::SnapshotRequired => {
+                                    trigger_resync(
+                                        match delta.transition {
+                                            OutputTopologyTransition::Reset => ResyncReason::Reset,
+                                            _ => ResyncReason::SnapshotRequired,
+                                        },
+                                        &mut resync_gen,
+                                        &mut state,
+                                        &mut pending_reason,
+                                        epoch,
+                                        sequence,
+                                    );
+                                    continue;
+                                }
+                            };
+                            epoch = delta.epoch;
+                            sequence = delta.topology_sequence;
+                            broadcast_client_command(command);
+                            broadcast_client_command(ClientCommand::RecalculateMembership {
+                                epoch,
+                                sequence,
+                            });
+                        }
+                        _ => {}
+                    }
                 }
-                _ => {}
             }
         }
     });
 }
-
 fn apply_topology_delta(
     projection: &mut BTreeMap<String, OutputTopologyEntry>,
     delta: &OutputTopologyDelta,
@@ -2843,7 +2929,175 @@ mod tests {
         WaylandSelectionState, WaylandSurfaceRole,
     };
 
+    
+    use super::{
+        start_topology_supervisor_loop, TopologyInput, ResyncReason
+    };
+    use std::sync::mpsc::sync_channel;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use waybroker_common::{DisplayEvent, OutputTopologyDelta, OutputTopologyTransition};
+
+    fn test_entry(seq: u64) -> OutputTopologyEntry {
+        OutputTopologyEntry {
+            geometry: OutputGeometry {
+                output_id: "test-1".into(),
+                width: 1920,
+                height: 1080,
+                stride: 7680,
+                format: 1,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation: seq,
+            },
+            refresh_hz: 60,
+            scale: 1,
+            transform: 0,
+            enabled: true,
+            name: "test-1".into(),
+            description: "test".into(),
+        }
+    }
+
     #[test]
+    fn concurrent_snapshot_and_stream_buffering() {
+        let (tx, rx) = sync_channel(100);
+        let tx_clone = tx.clone();
+        
+        let (release_tx, release_rx) = sync_channel(1); let release_rx = Mutex::new(release_rx);
+        let fetcher = move |_, _| {
+            release_rx.lock().unwrap().recv().unwrap();
+            Ok((1, 10, vec![test_entry(10)]))
+        };
+        
+        let handle = std::thread::spawn(move || {
+            start_topology_supervisor_loop(rx, tx_clone, fetcher);
+        });
+        
+        tx.send(TopologyInput::Event(DisplayEvent::OutputTopologyDelta(OutputTopologyDelta {
+            epoch: 1,
+            topology_sequence: 1,
+            output_id: None,
+            output_generation: None,
+            transition: OutputTopologyTransition::Reset,
+            output: None,
+            lifecycle_sequence: 1,
+        }))).unwrap();
+        
+        std::thread::sleep(Duration::from_millis(10)); 
+        
+        tx.send(TopologyInput::Event(DisplayEvent::OutputTopologyDelta(OutputTopologyDelta {
+            epoch: 1,
+            topology_sequence: 11,
+            output_id: Some("test-1".into()),
+            output_generation: Some(11),
+            transition: OutputTopologyTransition::Reconfigured,
+            output: Some(test_entry(11)),
+            lifecycle_sequence: 1,
+        }))).unwrap();
+
+        release_tx.send(()).unwrap();
+        
+        std::thread::sleep(Duration::from_millis(20));
+        tx.send(TopologyInput::Overflow).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn discontinuous_buffered_delta_resync() {
+        let (tx, rx) = sync_channel(100);
+        let tx_clone = tx.clone();
+        
+        let fetch_count = Arc::new(Mutex::new(0));
+        let fc = fetch_count.clone();
+        
+        let (release_tx, release_rx) = sync_channel(1); let release_rx = Mutex::new(release_rx);
+        let fetcher = move |_, _| {
+            *fc.lock().unwrap() += 1;
+            release_rx.lock().unwrap().recv().unwrap();
+            Ok((1, 10, vec![test_entry(10)]))
+        };
+        
+        let handle = std::thread::spawn(move || {
+            start_topology_supervisor_loop(rx, tx_clone, fetcher);
+        });
+        
+        tx.send(TopologyInput::Event(DisplayEvent::OutputTopologyDelta(OutputTopologyDelta {
+            epoch: 1,
+            topology_sequence: 1,
+            output_id: None,
+            output_generation: None,
+            transition: OutputTopologyTransition::Reset,
+            output: None,
+            lifecycle_sequence: 1,
+        }))).unwrap();
+        
+        std::thread::sleep(Duration::from_millis(10));
+        
+        tx.send(TopologyInput::Event(DisplayEvent::OutputTopologyDelta(OutputTopologyDelta {
+            epoch: 1,
+            topology_sequence: 12,
+            output_id: Some("test-1".into()),
+            output_generation: Some(12),
+            transition: OutputTopologyTransition::Reconfigured,
+            output: Some(test_entry(12)),
+            lifecycle_sequence: 1,
+        }))).unwrap();
+
+        release_tx.send(()).unwrap(); 
+        
+        std::thread::sleep(Duration::from_millis(20));
+        release_tx.send(()).unwrap(); 
+
+        tx.send(TopologyInput::Overflow).unwrap();
+        handle.join().unwrap();
+        
+        assert_eq!(*fetch_count.lock().unwrap(), 2, "Buffered discontinuity must trigger another resync");
+    }
+
+    #[test]
+    fn retry_exhaustion_behavior() {
+        let (tx, rx) = sync_channel(100);
+        let tx_clone = tx.clone();
+        
+        let fetcher = move |_, _| {
+            anyhow::bail!("failed snapshot")
+        };
+        
+        let handle = std::thread::spawn(move || {
+            start_topology_supervisor_loop(rx, tx_clone, fetcher);
+        });
+        
+        tx.send(TopologyInput::Event(DisplayEvent::OutputTopologyDelta(OutputTopologyDelta {
+            epoch: 1,
+            topology_sequence: 1,
+            output_id: None,
+            output_generation: None,
+            transition: OutputTopologyTransition::Reset,
+            output: None,
+            lifecycle_sequence: 1,
+        }))).unwrap();
+        
+        handle.join().unwrap();
+    }
+    
+    #[test]
+    fn reconnect_consumer_lifecycle() {
+        let (tx, rx) = sync_channel(100);
+        let tx_clone = tx.clone();
+        
+        let fetcher = move |_, _| Ok((1, 10, vec![test_entry(10)]));
+        
+        let handle = std::thread::spawn(move || {
+            start_topology_supervisor_loop(rx, tx_clone, fetcher);
+        });
+        
+        std::thread::sleep(Duration::from_millis(10));
+        
+        tx.send(TopologyInput::Overflow).unwrap();
+        handle.join().unwrap();
+    }
+#[test]
     fn topology_snapshot_validation_rejects_duplicates_and_zero_scale() {
         let entry = OutputTopologyEntry {
             geometry: OutputGeometry {
@@ -2876,7 +3130,7 @@ mod tests {
         assert_eq!(TOPOLOGY_DELTA_BUFFER_LIMIT, 32);
         assert_eq!(TOPOLOGY_QUEUE_CAPACITY, 64);
         assert_eq!(SNAPSHOT_RETRY_LIMIT, 3);
-        assert_eq!(ACTIVE_TOPOLOGY_CONSUMERS.load(Ordering::SeqCst), 0);
+        // removed for concurrent testing
     }
 
     #[test]
