@@ -66,6 +66,7 @@ pub struct HeadlessWireCore {
     runtime_global_names: std::collections::BTreeMap<String, u32>,
     events_out: Vec<WaylandMessage>,
     defer_frame_callbacks: bool,
+    next_global_name: u32,
 }
 
 impl Default for HeadlessWireCore {
@@ -102,6 +103,7 @@ impl Default for HeadlessWireCore {
             runtime_global_names: std::collections::BTreeMap::new(),
             events_out: Vec::new(),
             defer_frame_callbacks: false,
+            next_global_name: 100, // start after initial globals
         };
 
         // Standard globals
@@ -205,6 +207,13 @@ impl HeadlessWireCore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn drain_events(&mut self) -> Vec<WaylandMessage> {
+        let events = self.events_out.clone();
+        self.events_out.clear();
+        events
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn add_topology_output(
         &mut self,
         name: &str,
@@ -218,8 +227,8 @@ impl HeadlessWireCore {
         if self.runtime_global_names.contains_key(name) {
             return;
         }
-        let global_name =
-            self.globals.iter().map(|global| global.name).max().unwrap_or(0).saturating_add(1);
+        let global_name = self.next_global_name;
+        self.next_global_name += 1;
         self.real_outputs.push((name.to_string(), x, y, width, height, refresh_nsec, scale));
         self.runtime_global_names.insert(name.to_owned(), global_name);
         self.globals.push(WireGlobal {
@@ -250,13 +259,20 @@ impl HeadlessWireCore {
             .find(|entry| entry.0 == name)
             .ok_or_else(|| WireError::ProtocolError(format!("unknown output {name}")))?;
         *entry = (name.to_owned(), x, y, width, height, refresh_nsec, scale);
-        for output in self.output.outputs.values_mut().filter(|output| output.name == name) {
-            output.x = x;
-            output.y = y;
-            output.scale = scale as i32;
-            output.width = width;
-            output.height = height;
-            output.refresh_nsec = refresh_nsec;
+        let mut to_send = Vec::new();
+        for (id, output) in self.output.outputs.iter_mut() {
+            if output.name == name {
+                output.x = x;
+                output.y = y;
+                output.scale = scale as i32;
+                output.width = width;
+                output.height = height;
+                output.refresh_nsec = refresh_nsec;
+                to_send.push(*id);
+            }
+        }
+        for id in to_send {
+            self.send_output_state(id, x, y, width, height, refresh_nsec, scale, name);
         }
         let surface_ids: Vec<_> = self.surfaces.surfaces.keys().copied().collect();
         for surface_id in surface_ids {
@@ -648,9 +664,62 @@ impl HeadlessWireCore {
                     output.scale = scale as i32;
                 }
                 self.output.set_mode(new_id, width, height, refresh);
+                self.send_output_state(new_id, x, y, width, height, refresh, scale, &output_name);
             }
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_output_state(
+        &mut self,
+        output_id: WaylandObjectId,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        refresh: u32,
+        scale: u32,
+        name: &str,
+    ) {
+        let mut p = Vec::with_capacity(64);
+        let mut b = [0u8; 4];
+        byteorder::LittleEndian::write_i32(&mut b, x);
+        p.extend(&b);
+        byteorder::LittleEndian::write_i32(&mut b, y);
+        p.extend(&b);
+        byteorder::LittleEndian::write_i32(&mut b, 1920);
+        p.extend(&b);
+        byteorder::LittleEndian::write_i32(&mut b, 1080);
+        p.extend(&b);
+        byteorder::LittleEndian::write_i32(&mut b, 0);
+        p.extend(&b);
+        crate::args::encode_string("TUFF", &mut p);
+        crate::args::encode_string(name, &mut p);
+        byteorder::LittleEndian::write_i32(&mut b, 0);
+        p.extend(&b);
+        self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(0), p));
+
+        let mut p = vec![0u8; 16];
+        byteorder::LittleEndian::write_u32(&mut p[0..4], 1);
+        byteorder::LittleEndian::write_i32(&mut p[4..8], width);
+        byteorder::LittleEndian::write_i32(&mut p[8..12], height);
+        byteorder::LittleEndian::write_i32(&mut p[12..16], refresh as i32);
+        self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(1), p));
+
+        let mut p = vec![0u8; 4];
+        byteorder::LittleEndian::write_i32(&mut p[0..4], scale as i32);
+        self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(3), p));
+
+        let mut p = Vec::new();
+        crate::args::encode_string(name, &mut p);
+        self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(4), p));
+
+        let mut p = Vec::new();
+        crate::args::encode_string("TUFF Virtual Display", &mut p);
+        self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(5), p));
+
+        self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(2), vec![]));
     }
 
     fn send_xdg_ping(&mut self, wm_base_id: WaylandObjectId) {
