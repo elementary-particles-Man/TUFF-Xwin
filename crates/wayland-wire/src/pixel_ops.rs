@@ -42,7 +42,7 @@ pub fn normalize_bgra_to_rgba_bytes(bytes: &mut [u8]) -> Result<(), &'static str
         return Err("pixel buffer must be 4-byte aligned");
     }
 
-    for chunk in bytes.chunks_exact_mut(4) {
+    for chunk in bytes.chunks_mut(4) {
         chunk.swap(0, 2);
     }
 
@@ -79,20 +79,21 @@ fn normalize_bgra_to_rgba_in_place_avx2(pixels: &mut [u32]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn normalize_bgra_to_rgba_in_place_avx2_impl(pixels: &mut [u32]) {
-    let mut chunks = pixels.chunks_exact_mut(8);
     let mask = _mm256_setr_epi8(
         2, 1, 0, 3, 6, 5, 4, 7, 10, 9, 8, 11, 14, 13, 12, 15, 2, 1, 0, 3, 6, 5, 4, 7, 10, 9, 8, 11,
         14, 13, 12, 15,
     );
 
-    for chunk in &mut chunks {
+    for chunk in pixels.chunks_mut(8) {
+        if chunk.len() < 8 {
+            normalize_bgra_to_rgba_in_place_portable(chunk);
+            break;
+        }
         let ptr = chunk.as_mut_ptr() as *mut __m256i;
         let data = _mm256_loadu_si256(ptr);
         let shuffled = _mm256_shuffle_epi8(data, mask);
         _mm256_storeu_si256(ptr, shuffled);
     }
-
-    normalize_bgra_to_rgba_in_place_portable(chunks.into_remainder());
 }
 
 #[cfg(test)]

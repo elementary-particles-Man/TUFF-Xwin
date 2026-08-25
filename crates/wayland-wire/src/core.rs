@@ -203,7 +203,7 @@ impl HeadlessWireCore {
         self.surfaces
             .surfaces
             .get_mut(&surface_id)
-            .map(|surface| surface.callbacks.drain(..).collect())
+            .map(|surface| std::mem::take(&mut surface.callbacks))
             .unwrap_or_default()
     }
 
@@ -997,7 +997,7 @@ impl HeadlessWireCore {
 
         // Handle frame callbacks
         if let Some(surface) = self.surfaces.surfaces.get_mut(&id) {
-            for callback_id in surface.callbacks.drain(..).collect::<Vec<_>>() {
+            for callback_id in std::mem::take(&mut surface.callbacks) {
                 if self.defer_frame_callbacks {
                     surface.callbacks.push(callback_id);
                     continue;
