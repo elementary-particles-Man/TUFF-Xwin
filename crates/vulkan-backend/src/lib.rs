@@ -1105,18 +1105,20 @@ impl VulkanBackend {
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     unsafe fn refine_pixels_avx2(&self, pixels: &mut [u32]) {
-        let mut chunks = pixels.chunks_exact_mut(8);
         let mask = _mm256_setr_epi8(
             2, 1, 0, 3, 6, 5, 4, 7, 10, 9, 8, 11, 14, 13, 12, 15, 2, 1, 0, 3, 6, 5, 4, 7, 10, 9, 8,
             11, 14, 13, 12, 15,
         );
-        for chunk in &mut chunks {
+        for chunk in pixels.chunks_mut(8) {
+            if chunk.len() < 8 {
+                refine_pixels_portable(chunk);
+                break;
+            }
             let ptr = chunk.as_mut_ptr().cast::<__m256i>();
             let data = _mm256_loadu_si256(ptr);
             let shuffled = _mm256_shuffle_epi8(data, mask);
             _mm256_storeu_si256(ptr, shuffled);
         }
-        refine_pixels_portable(chunks.into_remainder());
     }
 }
 
