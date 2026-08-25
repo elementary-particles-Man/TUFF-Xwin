@@ -43,7 +43,7 @@ pub struct ArgSpec {
 impl ProtocolSpec {
     pub fn parse(xml: &str) -> Result<Self> {
         let mut reader = Reader::from_str(xml);
-        reader.trim_text(true);
+        reader.config_mut().trim_text(true);
 
         let mut protocol_name = String::new();
         let mut interfaces = HashMap::new();

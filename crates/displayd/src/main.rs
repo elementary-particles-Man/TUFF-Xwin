@@ -5725,6 +5725,7 @@ mod tests {
 
     #[tokio::test]
     async fn existing_displayd_capture_tests_still_pass() {
+        ensure_runtime_dir().expect("test runtime directory");
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
         let mut state = DisplayState::new_test();
         let mut clock = FakePresentationClock;
