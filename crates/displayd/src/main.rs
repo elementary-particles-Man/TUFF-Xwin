@@ -1,14 +1,14 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     env, fs,
-    io::BufReader,
+    io::{BufReader, Write},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{
-    LazyLock, Mutex,
+    LazyLock, Mutex, OnceLock,
     mpsc::{SyncSender, sync_channel},
 };
 
@@ -22,20 +22,43 @@ use vulkan_backend::{
 use waybroker_common::{
     BackendOutputEvent, CommittedSceneState, DisplayCommand, DisplayEvent,
     DisplayReconciliationState, IpcEnvelope, MessageKind, OutputGeometry, OutputMode,
-    OutputPublicationOutcome, OutputPublicationResult, OutputReadiness, OutputReadinessState,
-    OutputTopologyDelta, OutputTopologyEntry, OutputTopologyTransition, PixelTransportError,
-    PixelTransportPayload, PixelTransportStore, PresentationCadence, PresentationCompletion,
-    PresentationSchedulerState, PresentationToken, PublicationFailure, ScenePublicationResult,
-    ServiceBanner, ServiceEndpoint, ServiceReadiness, ServiceReadinessState, ServiceRole,
-    ServiceStream, accel::global_accel_policy, bind_service_socket, ensure_runtime_dir,
-    now_unix_timestamp, read_json_line, sanitize_artifact_filename, send_json_line,
-    session_artifact_path, validate_artifact_filename,
+    OutputReadiness, OutputReadinessState, OutputTopologyDelta, OutputTopologyEntry,
+    OutputTopologyTransition, PixelTransportError, PixelTransportPayload, PixelTransportStore,
+    PresentationCadence, PresentationCompletion, PresentationSchedulerState, PresentationToken,
+    ScenePublicationResult, ServiceBanner, ServiceEndpoint, ServiceReadiness,
+    ServiceReadinessState, ServiceRole, ServiceStream, accel::global_accel_policy,
+    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
+    sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
-static TOPOLOGY_SUBSCRIBERS: LazyLock<Mutex<Vec<SyncSender<IpcEnvelope>>>> =
+const MAX_TOPOLOGY_SUBSCRIBERS: usize = 64;
+const TOPOLOGY_SUBSCRIBER_QUEUE_DEPTH: usize = 64;
+const MAX_OUTPUTS: usize = 64;
+const MAX_SCENE_SURFACES: usize = 4096;
+const MAX_SCENE_PIXEL_PAYLOADS: usize = 4096;
+const MAX_SCENE_PIXEL_BYTES: usize = 256 * 1024 * 1024;
+const MAX_SINGLE_PIXEL_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DAMAGE_RECTS: usize = 4096;
+const MAX_PRESENTATION_OBLIGATIONS: usize = 4096;
+const MAX_PRESENTATION_FEEDBACKS: usize = 4096;
+const MAX_ACTIVE_RECORDINGS: usize = MAX_OUTPUTS;
+const MAX_OUTPUT_DIMENSION: u32 = 32_768;
+const MAX_OUTPUT_FRAMEBUFFER_BYTES: usize = 512 * 1024 * 1024;
+const MAX_TOTAL_FRAMEBUFFER_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_HEADLESS_PENDING_SUBMISSIONS: usize = MAX_OUTPUTS;
+const MAX_SCENE_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(target_arch = "x86_64")]
+const SIMD_XRGB_MIN_PIXELS: usize = 64;
+
+type TopologySubscriber = (u64, SyncSender<IpcEnvelope>);
+static TOPOLOGY_SUBSCRIBERS: LazyLock<Mutex<Vec<TopologySubscriber>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
+static NEXT_TOPOLOGY_SUBSCRIBER_ID: AtomicU64 = AtomicU64::new(1);
 static TOPOLOGY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static NEXT_SNAPSHOT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+#[cfg(test)]
+static NEXT_TEST_SNAPSHOT_ID: AtomicU64 = AtomicU64::new(1);
 const BACKGROUND_PIXEL: u32 = 0xFF00_0000;
 const MOCK_BACKEND_INSTANCE_ID: u64 = 1;
 const HEADLESS_SHM_BACKEND_INSTANCE_ID: u64 = 2;
@@ -61,7 +84,13 @@ async fn main() -> Result<()> {
     let banner = ServiceBanner::new(ServiceRole::Displayd, "drm/kms, input, seat broker");
     println!("{}", banner.render());
 
-    let vulkan = if config.use_vulkan && global_accel_policy().prefers_vulkan() {
+    let accel_policy = global_accel_policy();
+    println!(
+        "service=displayd op=accel_policy event=selected simd={:?} vulkan_enabled={}",
+        accel_policy.selected_simd_flavor(),
+        accel_policy.prefers_vulkan()
+    );
+    let vulkan = if config.use_vulkan && accel_policy.prefers_vulkan() {
         let backend = VulkanBackend::new(VulkanBackendConfig::default());
         let caps = backend.initialize();
         println!(
@@ -96,7 +125,7 @@ async fn main() -> Result<()> {
 
     let mut record_backend = FakeRecordBackend;
     let mut display_backend: Box<dyn DisplayBackend> = match config.display_backend {
-        DisplayBackendType::Mock => Box::new(MockDisplayBackend::default()),
+        DisplayBackendType::Mock => Box::new(MockDisplayBackend::production()),
         DisplayBackendType::HeadlessShm => {
             let mut backend = HeadlessShmDisplayBackend::new_with_instance_id(state.display_epoch);
             backend.queue_connected_output(OutputGeometry {
@@ -350,11 +379,23 @@ async fn handle_client(
             send_json_line(&mut stream, &response)?;
             return Ok(());
         }
-        let (sender, receiver) = sync_channel(64);
+        let subscriber_id = NEXT_TOPOLOGY_SUBSCRIBER_ID.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = sync_channel(TOPOLOGY_SUBSCRIBER_QUEUE_DEPTH);
         let initial = topology_snapshot_event(state);
         {
             let mut subscribers = TOPOLOGY_SUBSCRIBERS.lock().unwrap();
-            subscribers.push(sender);
+            if subscribers.len() >= MAX_TOPOLOGY_SUBSCRIBERS {
+                let response = IpcEnvelope::new(
+                    ServiceRole::Displayd,
+                    request.source,
+                    MessageKind::DisplayEvent(DisplayEvent::Rejected {
+                        reason: "topology subscriber budget exhausted".into(),
+                    }),
+                );
+                send_json_line(&mut stream, &response)?;
+                return Ok(());
+            }
+            subscribers.push((subscriber_id, sender));
         }
         let response = IpcEnvelope::new(
             ServiceRole::Displayd,
@@ -367,6 +408,9 @@ async fn handle_client(
                 if send_json_line(&mut stream, &message).is_err() {
                     break;
                 }
+            }
+            if let Ok(mut subscribers) = TOPOLOGY_SUBSCRIBERS.lock() {
+                subscribers.retain(|(id, _)| *id != subscriber_id);
             }
         });
         return Ok(());
@@ -475,7 +519,19 @@ fn publish_topology_delta(state: &DisplayState, event: &BackendOutputEvent) {
         MessageKind::DisplayEvent(delta),
     );
     let mut subscribers = TOPOLOGY_SUBSCRIBERS.lock().unwrap();
-    subscribers.retain(|subscriber| subscriber.try_send(message.clone()).is_ok());
+    subscribers.retain(|(_, subscriber)| subscriber.try_send(message.clone()).is_ok());
+}
+
+fn retire_all_runtime_submissions(
+    state: &mut DisplayState,
+    display_backend: &mut dyn DisplayBackend,
+) {
+    for runtime in state.outputs.values_mut() {
+        if let Some(outstanding) = runtime.outstanding.take() {
+            display_backend.retire_submission(&outstanding.token);
+        }
+        runtime.retry = None;
+    }
 }
 
 fn apply_backend_output_events(
@@ -486,9 +542,6 @@ fn apply_backend_output_events(
         let published_event = event.clone();
         apply_backend_output_event(state, display_backend, event)?;
         publish_topology_delta(state, &published_event);
-    }
-    if state.reconciliation_state == DisplayReconciliationState::Recovering {
-        state.reconciliation_state = DisplayReconciliationState::ReconciledAwaitingPresentation;
     }
     Ok(())
 }
@@ -535,11 +588,28 @@ fn apply_backend_output_event(
                     geometry.output_generation.saturating_add(state.display_epoch);
             }
             let mapped_id = backend_output_id.clone();
+            if !state.outputs.contains_key(&mapped_id) && state.outputs.len() >= MAX_OUTPUTS {
+                bail!("display output budget exhausted");
+            }
             if geometry.output_id != mapped_id {
                 bail!("backend output identity does not match geometry output_id");
             }
             let next_state =
                 OutputState::validate(&geometry).map_err(|reason| anyhow::anyhow!(reason))?;
+            let other_framebuffer_bytes = state
+                .outputs
+                .iter()
+                .filter(|(output_id, _)| output_id.as_str() != mapped_id.as_str())
+                .try_fold(0usize, |total, (_, runtime)| {
+                    total.checked_add(runtime.state.framebuffer_bytes())
+                })
+                .ok_or_else(|| anyhow::anyhow!("aggregate framebuffer accounting overflow"))?;
+            let aggregate_framebuffer_bytes = other_framebuffer_bytes
+                .checked_add(next_state.framebuffer_bytes())
+                .ok_or_else(|| anyhow::anyhow!("aggregate framebuffer accounting overflow"))?;
+            if aggregate_framebuffer_bytes > MAX_TOTAL_FRAMEBUFFER_BYTES {
+                bail!("aggregate framebuffer budget exceeded");
+            }
             if let Some(previous) = state.outputs.get(&mapped_id) {
                 if previous.backend_instance_id != 0
                     && previous.backend_instance_id != backend_instance_id
@@ -559,8 +629,24 @@ fn apply_backend_output_event(
             runtime.backend_output_id = backend_output_id;
             runtime.scheduler.cadence = cadence;
             runtime.pending_damage = vec![runtime.state.bounds()];
+            runtime.pending_scene_epoch = state.last_scene_epoch;
             runtime.pending_scene_generation = state.last_scene_generation;
-            state.outputs.insert(mapped_id, runtime);
+            runtime.pending_commit_id =
+                state.last_scene.as_ref().map(|scene| scene.commit_id).unwrap_or(0);
+            state.outputs.insert(mapped_id.clone(), runtime);
+            let latest_target_matches = state
+                .last_scene
+                .as_ref()
+                .is_some_and(|scene| scene_targets_output(scene, &mapped_id));
+            if latest_target_matches {
+                let candidates = BTreeSet::from([mapped_id]);
+                rebind_unavailable_obligations(
+                    state,
+                    state.last_scene_epoch,
+                    state.last_scene_generation,
+                    &candidates,
+                );
+            }
         }
         BackendOutputEvent::Disabled { backend_output_id, output_generation, .. } => {
             let effective_generation = if backend_instance_id == 0 {
@@ -600,6 +686,13 @@ fn apply_backend_output_event(
             {
                 bail!("backend disconnect event generation or identity mismatch");
             }
+            if let Some(outstanding) = state
+                .outputs
+                .get_mut(&backend_output_id)
+                .and_then(|runtime| runtime.outstanding.take())
+            {
+                display_backend.retire_submission(&outstanding.token);
+            }
             display_backend.remove_output(&backend_output_id);
             state.outputs.remove(&backend_output_id);
         }
@@ -611,6 +704,11 @@ fn apply_backend_output_event(
                 .map(|(output_id, _)| output_id.clone())
                 .collect();
             for output_id in outputs {
+                if let Some(outstanding) =
+                    state.outputs.get_mut(&output_id).and_then(|runtime| runtime.outstanding.take())
+                {
+                    display_backend.retire_submission(&outstanding.token);
+                }
                 display_backend.remove_output(&output_id);
                 state.outputs.remove(&output_id);
             }
@@ -723,7 +821,7 @@ async fn handle_display_command(
             if epoch != state.display_epoch {
                 bail!("topology subscription epoch mismatch");
             }
-            if sequence > state.display_epoch {
+            if sequence > TOPOLOGY_SEQUENCE.load(Ordering::Acquire) {
                 bail!("topology subscription sequence is ahead of displayd");
             }
             // The first subscription response is an atomic snapshot. Future
@@ -742,6 +840,7 @@ async fn handle_display_command(
             .await
         }
         DisplayCommand::BeginReconciliation { epoch } => {
+            retire_all_runtime_submissions(state, display_backend);
             state.begin_restart(epoch)?;
             Ok(DisplayEvent::Reconciliation {
                 epoch,
@@ -772,13 +871,15 @@ async fn handle_display_command(
                 pixel_payloads,
                 scene_epoch,
                 scene_generation,
-                ServiceRole::Waylandd,
+                source,
                 config,
                 state,
                 clock,
                 display_backend,
             )?;
             if matches!(result, DisplayEvent::SceneCommitted { .. }) {
+                state.reconciliation_state =
+                    DisplayReconciliationState::ReconciledAwaitingPresentation;
                 Ok(DisplayEvent::Reconciled { epoch, scene_generation, payload_count })
             } else {
                 Ok(result)
@@ -805,6 +906,7 @@ async fn handle_display_command(
                         source,
                         config,
                         state,
+                        vulkan,
                         clock,
                         display_backend,
                         true,
@@ -816,11 +918,7 @@ async fn handle_display_command(
             Ok(DisplayEvent::PresentationAdvanced { output_id, tick_sequence, eligible })
         }
         DisplayCommand::CompletePresentation { token, outcome } => {
-            if matches!(outcome, PresentationCompletion::Presented) {
-                display_backend.complete_submission(&token)?;
-            }
-            display_backend.retire_submission(&token);
-            let result = complete_presentation(state, token.clone(), outcome.clone());
+            let result = finish_backend_completion(state, display_backend, token.clone(), outcome);
             Ok(DisplayEvent::PresentationCompleted { token, outcome: result })
         }
         DisplayCommand::EnumerateOutputs => {
@@ -1194,10 +1292,27 @@ async fn handle_display_command(
         }
         DisplayCommand::GetPresentationFeedback { commit_id } => {
             if let Some(feedback) = state.presentation_feedbacks.get(&commit_id) {
+                return Ok(feedback.clone());
+            }
+            drive_presentation_for_feedback(
+                commit_id,
+                source,
+                config,
+                state,
+                vulkan,
+                clock,
+                display_backend,
+            )
+            .await?;
+            if let Some(feedback) = state.presentation_feedbacks.get(&commit_id) {
                 Ok(feedback.clone())
+            } else if state.presentation_obligations.contains_key(&commit_id) {
+                Ok(DisplayEvent::Rejected {
+                    reason: format!("presentation is still pending for commit_id {commit_id}"),
+                })
             } else {
                 Ok(DisplayEvent::Rejected {
-                    reason: format!("no feedback for commit_id {commit_id}"),
+                    reason: format!("no presentation obligation for commit_id {commit_id}"),
                 })
             }
         }
@@ -1227,6 +1342,11 @@ async fn handle_display_command(
             Ok(DisplayEvent::GammaApplied { output })
         }
         DisplayCommand::SetPointerConstraints { output, constraints } => {
+            if state.outputs.get(&output).is_none_or(|runtime| runtime.disabled) {
+                return Ok(DisplayEvent::Rejected {
+                    reason: format!("unknown or disabled pointer-constraint output {output}"),
+                });
+            }
             if matches!(constraints, waybroker_common::PointerConstraints::None) {
                 state.pointer_constraints.remove(&output);
             } else {
@@ -1252,106 +1372,641 @@ async fn handle_display_command(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SceneAdmissionUsage {
+    surfaces: usize,
+    pixel_payloads: usize,
+    pixel_bytes: usize,
+    damage_rects: usize,
+}
+
+#[derive(Debug, Default)]
+struct DisplayPixelTransportStore {
+    inner: PixelTransportStore,
+    payloads: BTreeMap<waybroker_common::PixelTransportHandle, PixelTransportPayload>,
+    total_bytes: usize,
+}
+
+impl DisplayPixelTransportStore {
+    fn submit(
+        &mut self,
+        payload: PixelTransportPayload,
+    ) -> std::result::Result<(), PixelTransportError> {
+        self.inner.submit(payload.clone())?;
+        let client_id = payload.handle.client_id;
+        let surface_id = payload.handle.surface_id.clone();
+        self.payloads
+            .retain(|handle, _| handle.client_id != client_id || handle.surface_id != surface_id);
+        self.payloads.insert(payload.handle.clone(), payload);
+        self.total_bytes = self
+            .payloads
+            .values()
+            .fold(0usize, |total, payload| total.saturating_add(payload.pixels.len()));
+        Ok(())
+    }
+
+    fn lookup(
+        &self,
+        handle: &waybroker_common::PixelTransportHandle,
+    ) -> Option<&PixelTransportPayload> {
+        self.inner.lookup(handle)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.payloads.len()
+    }
+
+    #[cfg(test)]
+    fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    #[cfg(test)]
+    fn prepared_for_scene(
+        &self,
+        surfaces: &[waybroker_common::SurfaceSnapshot],
+        incoming: &[PixelTransportPayload],
+    ) -> std::result::Result<Self, String> {
+        self.prepared_for_scene_with_policy(surfaces, incoming, false)
+    }
+
+    fn prepared_for_scene_with_policy(
+        &self,
+        surfaces: &[waybroker_common::SurfaceSnapshot],
+        incoming: &[PixelTransportPayload],
+        allow_missing: bool,
+    ) -> std::result::Result<Self, String> {
+        let referenced: BTreeSet<_> =
+            surfaces.iter().filter_map(|surface| surface.pixel_transport.clone()).collect();
+        for handle in &referenced {
+            if let Some(current) = self
+                .payloads
+                .keys()
+                .filter(|existing| {
+                    existing.client_id == handle.client_id
+                        && existing.surface_id == handle.surface_id
+                })
+                .max_by_key(|existing| (existing.scene_generation, existing.buffer_generation))
+            {
+                if (current.scene_generation, current.buffer_generation)
+                    > (handle.scene_generation, handle.buffer_generation)
+                {
+                    return Err(format!("stale PixelTransport handle for {}", handle.surface_id));
+                }
+            }
+        }
+        let mut payloads: BTreeMap<_, _> = self
+            .payloads
+            .iter()
+            .filter(|(handle, _)| referenced.contains(*handle))
+            .map(|(handle, payload)| (handle.clone(), payload.clone()))
+            .collect();
+
+        for payload in incoming {
+            if !referenced.contains(&payload.handle) {
+                return Err(format!(
+                    "orphan PixelTransport payload for {}",
+                    payload.handle.surface_id
+                ));
+            }
+            payloads.insert(payload.handle.clone(), payload.clone());
+        }
+
+        if !allow_missing {
+            for handle in &referenced {
+                if !payloads.contains_key(handle) {
+                    return Err(missing_payload_reason(handle));
+                }
+            }
+        }
+
+        let total_bytes = payloads.values().try_fold(0usize, |total, payload| {
+            total
+                .checked_add(payload.pixels.len())
+                .ok_or_else(|| "PixelTransport byte accounting overflow".to_string())
+        })?;
+        if payloads.len() > MAX_SCENE_PIXEL_PAYLOADS {
+            return Err("PixelTransport payload budget exceeded".into());
+        }
+        if total_bytes > MAX_SCENE_PIXEL_BYTES {
+            return Err("PixelTransport byte budget exceeded".into());
+        }
+
+        let mut inner = PixelTransportStore::default();
+        for payload in payloads.values().cloned() {
+            inner.submit(payload).map_err(|error| format!("{error:?}"))?;
+        }
+        Ok(Self { inner, payloads, total_bytes })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PresentationObligation {
+    scene_epoch: u64,
+    scene_generation: u64,
+    required_outputs: BTreeSet<String>,
+    presented_outputs: BTreeSet<String>,
+}
+
+fn scene_version_is_stale(
+    last_epoch: u64,
+    last_generation: u64,
+    incoming_epoch: u64,
+    incoming_generation: u64,
+) -> bool {
+    if incoming_epoch == 0 && incoming_generation == 0 {
+        return false;
+    }
+    (incoming_epoch, incoming_generation) < (last_epoch, last_generation)
+}
+
+fn scene_version_is_equal(
+    last_epoch: u64,
+    last_generation: u64,
+    incoming_epoch: u64,
+    incoming_generation: u64,
+) -> bool {
+    incoming_epoch != 0 && (incoming_epoch, incoming_generation) == (last_epoch, last_generation)
+}
+
+fn same_scene_identity(
+    scene: &CommittedSceneState,
+    target: &waybroker_common::CommitTarget,
+    focus: &waybroker_common::FocusTarget,
+    selection: &waybroker_common::WaylandSelectionState,
+    surfaces: &[waybroker_common::SurfaceSnapshot],
+    scene_epoch: u64,
+    scene_generation: u64,
+) -> bool {
+    &scene.target == target
+        && &scene.focus == focus
+        && &scene.selection == selection
+        && scene.surfaces == surfaces
+        && scene.scene_epoch == scene_epoch
+        && scene.scene_generation == scene_generation
+}
+
+fn canonicalize_surfaces(surfaces: &mut [waybroker_common::SurfaceSnapshot]) {
+    surfaces.sort_by(|left, right| {
+        (left.layer_class, left.placement.z, left.creation_sequence, left.id.as_str()).cmp(&(
+            right.layer_class,
+            right.placement.z,
+            right.creation_sequence,
+            right.id.as_str(),
+        ))
+    });
+}
+
+fn validate_scene_admission(
+    target: &waybroker_common::CommitTarget,
+    focus: &waybroker_common::FocusTarget,
+    selection: &waybroker_common::WaylandSelectionState,
+    surfaces: &[waybroker_common::SurfaceSnapshot],
+    pixel_payloads: &[PixelTransportPayload],
+    scene_epoch: u64,
+    scene_generation: u64,
+) -> std::result::Result<SceneAdmissionUsage, String> {
+    if (scene_epoch == 0) != (scene_generation == 0) {
+        return Err("scene epoch and generation must both be zero or both be non-zero".into());
+    }
+    let target_name = match target {
+        waybroker_common::CommitTarget::Output { name } => name,
+    };
+    if target_name.is_empty() {
+        return Err("scene target output must not be empty".into());
+    }
+    if surfaces.len() > MAX_SCENE_SURFACES {
+        return Err(format!(
+            "scene surface budget exceeded: {} > {}",
+            surfaces.len(),
+            MAX_SCENE_SURFACES
+        ));
+    }
+    if pixel_payloads.len() > MAX_SCENE_PIXEL_PAYLOADS {
+        return Err(format!(
+            "PixelTransport payload budget exceeded: {} > {}",
+            pixel_payloads.len(),
+            MAX_SCENE_PIXEL_PAYLOADS
+        ));
+    }
+
+    let mut surface_ids = BTreeSet::new();
+    let mut expected_handles = BTreeSet::new();
+    let mut damage_rects = 0usize;
+    for surface in surfaces {
+        if surface.id.is_empty() || !surface_ids.insert(surface.id.as_str()) {
+            return Err("scene contains empty or duplicate surface identity".into());
+        }
+        if surface.placement.visible
+            && (surface.placement.width == 0 || surface.placement.height == 0)
+        {
+            return Err(format!("visible surface {} has zero dimensions", surface.id));
+        }
+        checked_add_i32_u32(surface.placement.x, surface.placement.width)
+            .ok_or_else(|| format!("surface {} x extent overflows", surface.id))?;
+        checked_add_i32_u32(surface.placement.y, surface.placement.height)
+            .ok_or_else(|| format!("surface {} y extent overflows", surface.id))?;
+        damage_rects = damage_rects
+            .checked_add(surface.damage_rects.len())
+            .ok_or_else(|| "damage rectangle accounting overflow".to_string())?;
+        if damage_rects > MAX_DAMAGE_RECTS {
+            return Err(format!(
+                "scene damage rectangle budget exceeded: {} > {}",
+                damage_rects, MAX_DAMAGE_RECTS
+            ));
+        }
+        if let Some(handle) = surface.pixel_transport.as_ref() {
+            if handle.surface_id != surface.id {
+                return Err(format!("PixelTransport surface identity mismatch for {}", surface.id));
+            }
+            if scene_generation != 0 && handle.scene_generation != scene_generation {
+                return Err(format!("PixelTransport scene generation mismatch for {}", surface.id));
+            }
+            if surface.buffer_generation != 0
+                && handle.buffer_generation != surface.buffer_generation
+            {
+                return Err(format!(
+                    "PixelTransport buffer generation mismatch for {}",
+                    surface.id
+                ));
+            }
+            if !expected_handles.insert(handle.clone()) {
+                return Err(format!("duplicate PixelTransport handle for {}", surface.id));
+            }
+        }
+    }
+
+    if let waybroker_common::FocusTarget::Surface { id } = focus {
+        if !surface_ids.contains(id.as_str()) {
+            return Err(format!("focused surface {id} is not present in the scene"));
+        }
+    }
+    for owner in
+        [selection.clipboard_owner.as_deref(), selection.primary_selection_owner.as_deref()]
+            .into_iter()
+            .flatten()
+    {
+        if !surface_ids.contains(owner) {
+            return Err(format!("selection owner {owner} is not present in the scene"));
+        }
+    }
+
+    let mut payload_handles = BTreeSet::new();
+    let mut pixel_bytes = 0usize;
+    for payload in pixel_payloads {
+        if !payload_handles.insert(payload.handle.clone()) {
+            return Err(format!(
+                "duplicate PixelTransport payload handle for {}",
+                payload.handle.surface_id
+            ));
+        }
+        if !expected_handles.contains(&payload.handle) {
+            return Err(format!(
+                "orphan or mismatched PixelTransport payload for {}",
+                payload.handle.surface_id
+            ));
+        }
+        if payload.width == 0 || payload.height == 0 {
+            return Err("PixelTransport payload dimensions must be non-zero".into());
+        }
+        let min_stride = payload
+            .width
+            .checked_mul(4)
+            .ok_or_else(|| "PixelTransport stride overflow".to_string())?;
+        if payload.stride < min_stride {
+            return Err("PixelTransport payload stride is smaller than 32-bit pixel width".into());
+        }
+        let required = (payload.stride as usize)
+            .checked_mul(payload.height as usize)
+            .ok_or_else(|| "PixelTransport payload byte length overflow".to_string())?;
+        if required != payload.pixels.len() {
+            return Err(format!(
+                "PixelTransport payload byte length mismatch for {}",
+                payload.handle.surface_id
+            ));
+        }
+        if required > MAX_SINGLE_PIXEL_PAYLOAD_BYTES {
+            return Err(format!(
+                "single PixelTransport payload budget exceeded: {} > {}",
+                required, MAX_SINGLE_PIXEL_PAYLOAD_BYTES
+            ));
+        }
+        pixel_bytes = pixel_bytes
+            .checked_add(required)
+            .ok_or_else(|| "PixelTransport aggregate byte length overflow".to_string())?;
+        if pixel_bytes > MAX_SCENE_PIXEL_BYTES {
+            return Err(format!(
+                "PixelTransport byte budget exceeded: {} > {}",
+                pixel_bytes, MAX_SCENE_PIXEL_BYTES
+            ));
+        }
+    }
+
+    Ok(SceneAdmissionUsage {
+        surfaces: surfaces.len(),
+        pixel_payloads: pixel_payloads.len(),
+        pixel_bytes,
+        damage_rects,
+    })
+}
+
+fn required_outputs_for_scene(
+    state: &DisplayState,
+    target: &waybroker_common::CommitTarget,
+    damage_by_output: &BTreeMap<String, Vec<RendererRect>>,
+    visual_transition_required: bool,
+) -> BTreeSet<String> {
+    let target_name = match target {
+        waybroker_common::CommitTarget::Output { name } => name,
+    };
+    let target_active =
+        state.outputs.get(target_name.as_str()).is_some_and(|runtime| !runtime.disabled);
+    let target_has_damage =
+        damage_by_output.get(target_name.as_str()).is_some_and(|damage| !damage.is_empty());
+    if target_has_damage || (!target_active && visual_transition_required) {
+        BTreeSet::from([target_name.clone()])
+    } else {
+        BTreeSet::new()
+    }
+}
+
+fn rebind_unavailable_obligations(
+    state: &mut DisplayState,
+    scene_epoch: u64,
+    scene_generation: u64,
+    required_outputs: &BTreeSet<String>,
+) {
+    if required_outputs.is_empty() {
+        return;
+    }
+    let active_outputs: BTreeSet<String> = state
+        .outputs
+        .iter()
+        .filter(|(_, runtime)| !runtime.disabled)
+        .map(|(output_id, _)| output_id.clone())
+        .collect();
+    for obligation in state.presentation_obligations.values_mut() {
+        let version_is_covered = if scene_generation == 0 {
+            obligation.scene_generation == 0
+        } else {
+            (obligation.scene_epoch, obligation.scene_generation) <= (scene_epoch, scene_generation)
+        };
+        let unavailable =
+            obligation.required_outputs.iter().all(|output_id| !active_outputs.contains(output_id));
+        if version_is_covered && unavailable {
+            obligation.required_outputs = required_outputs.clone();
+            obligation.presented_outputs.clear();
+        }
+    }
+}
+
+fn insert_bounded_feedback(state: &mut DisplayState, commit_id: u64, feedback: DisplayEvent) {
+    while state.presentation_feedbacks.len() >= MAX_PRESENTATION_FEEDBACKS {
+        let Some(oldest) = state.presentation_feedbacks.keys().min().copied() else {
+            break;
+        };
+        state.presentation_feedbacks.remove(&oldest);
+    }
+    state.presentation_feedbacks.insert(commit_id, feedback);
+}
+
+fn monotonic_now_ns() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    let start = START.get_or_init(Instant::now);
+    start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_scene_acceptance(
     target: waybroker_common::CommitTarget,
     focus: waybroker_common::FocusTarget,
     selection: waybroker_common::WaylandSelectionState,
-    surfaces: Vec<waybroker_common::SurfaceSnapshot>,
+    mut surfaces: Vec<waybroker_common::SurfaceSnapshot>,
     pixel_payloads: Vec<PixelTransportPayload>,
     scene_epoch: u64,
     scene_generation: u64,
     source: ServiceRole,
     _config: &Config,
     state: &mut DisplayState,
-    clock: &mut dyn PresentationClock,
+    _clock: &mut dyn PresentationClock,
     _display_backend: &mut dyn DisplayBackend,
 ) -> Result<DisplayEvent> {
-    let retrying = state.outputs.values().any(|runtime| {
-        runtime
-            .retry
-            .as_ref()
-            .map(|retry| retry.scene_generation == scene_generation)
-            .unwrap_or(false)
-    });
-    if scene_generation != 0
-        && scene_epoch == state.last_scene_epoch
-        && scene_generation <= state.last_scene_generation
-        && !retrying
-    {
-        return Ok(DisplayEvent::Rejected { reason: "stale scene generation".into() });
-    }
-    if let Err(error) = submit_pixel_payloads(&mut state.pixel_transport, pixel_payloads) {
+    canonicalize_surfaces(&mut surfaces);
+    let usage = match validate_scene_admission(
+        &target,
+        &focus,
+        &selection,
+        &surfaces,
+        &pixel_payloads,
+        scene_epoch,
+        scene_generation,
+    ) {
+        Ok(usage) => usage,
+        Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
+    };
+
+    if scene_version_is_stale(
+        state.last_scene_epoch,
+        state.last_scene_generation,
+        scene_epoch,
+        scene_generation,
+    ) {
         return Ok(DisplayEvent::Rejected {
-            reason: format!("pixel transport rejected payload: {error:?}"),
+            reason: format!(
+                "stale scene epoch {} generation {}; latest is epoch {} generation {}",
+                scene_epoch, scene_generation, state.last_scene_epoch, state.last_scene_generation
+            ),
         });
     }
-    if let Err(reason) = verify_pixel_payloads_available(&state.pixel_transport, &surfaces) {
-        return Ok(DisplayEvent::Rejected { reason });
-    }
-    let previous = state.last_scene.clone();
-    for runtime in state.outputs.values_mut() {
-        let initialized = framebuffer_is_initialized(&runtime.framebuffer, &runtime.state);
-        let mut damage = effective_damage_rects(
-            previous.as_ref(),
-            &surfaces,
-            initialized,
-            runtime.state.bounds(),
-        );
-        damage.extend(runtime.pending_damage.iter().copied());
-        if damage.is_empty()
-            && previous.is_none()
-            && surfaces.iter().any(|surface| surface.placement.visible)
-        {
-            damage.push(runtime.state.bounds());
+
+    let mut reconciliation_replay_commit_id = None;
+    if scene_version_is_equal(
+        state.last_scene_epoch,
+        state.last_scene_generation,
+        scene_epoch,
+        scene_generation,
+    ) {
+        if let Some(existing) = state.last_scene.as_ref() {
+            let metadata_matches = same_scene_identity(
+                existing,
+                &target,
+                &focus,
+                &selection,
+                &surfaces,
+                scene_epoch,
+                scene_generation,
+            );
+            let payloads_compatible = pixel_payloads.iter().all(|payload| {
+                state
+                    .pixel_transport
+                    .lookup(&payload.handle)
+                    .map(|current| current == payload)
+                    .unwrap_or(true)
+            });
+            let transport_hydration_needed = pixel_payloads
+                .iter()
+                .any(|payload| state.pixel_transport.lookup(&payload.handle).is_none());
+            if metadata_matches && payloads_compatible {
+                if state.reconciliation_state == DisplayReconciliationState::Recovering
+                    || transport_hydration_needed
+                {
+                    reconciliation_replay_commit_id = Some(existing.commit_id);
+                } else {
+                    return Ok(DisplayEvent::SceneCommitted {
+                        target: existing.target.clone(),
+                        focus: existing.focus.clone(),
+                        selection: existing.selection.clone(),
+                        surface_count: existing.surfaces.len(),
+                        commit_id: existing.commit_id,
+                        publication: Some(ScenePublicationResult {
+                            scene_accepted: true,
+                            scene_generation,
+                            outputs: Vec::new(),
+                        }),
+                    });
+                }
+            } else {
+                return Ok(DisplayEvent::Rejected {
+                    reason: "conflicting scene state for an already accepted generation".into(),
+                });
+            }
+        } else {
+            return Ok(DisplayEvent::Rejected {
+                reason: "scene generation matches version floor without canonical snapshot".into(),
+            });
         }
+    }
+
+    let allow_missing_transport = state.reconciliation_state
+        == DisplayReconciliationState::Recovering
+        && pixel_payloads.is_empty();
+    let prepared_store = match state.pixel_transport.prepared_for_scene_with_policy(
+        &surfaces,
+        &pixel_payloads,
+        allow_missing_transport,
+    ) {
+        Ok(store) => store,
+        Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
+    };
+    if !allow_missing_transport {
+        if let Err(reason) = verify_pixel_payloads_available(&prepared_store, &surfaces) {
+            return Ok(DisplayEvent::Rejected { reason });
+        }
+    }
+
+    let previous = state.last_scene.clone();
+    let mut damage_by_output = BTreeMap::<String, Vec<RendererRect>>::new();
+    for (output_id, runtime) in &state.outputs {
+        if runtime.disabled {
+            continue;
+        }
+        let bounds = runtime.state.bounds();
+        let initialized = framebuffer_is_initialized(&runtime.framebuffer, &runtime.state);
+        let mut damage = if surfaces.is_empty() && previous.is_none() {
+            Vec::new()
+        } else {
+            effective_damage_rects(previous.as_ref(), &surfaces, initialized, bounds)
+        };
+        damage.extend(runtime.pending_damage.iter().copied());
         damage.sort_by_key(|rect| (rect.y0, rect.x0, rect.y1, rect.x1));
         damage.dedup();
+        if damage.len() > MAX_DAMAGE_RECTS {
+            damage.clear();
+            damage.push(bounds);
+        }
         if !damage.is_empty() {
             let payload_surfaces: Vec<_> = surfaces
                 .iter()
                 .filter(|surface| surface.pixel_transport.is_some())
                 .cloned()
                 .collect();
-            if !payload_surfaces.is_empty() {
-                if let Err(reason) = validate_surface_pixels_for_damage(
-                    &state.pixel_transport,
-                    &payload_surfaces,
-                    &damage,
-                ) {
+            if !payload_surfaces.is_empty() && !allow_missing_transport {
+                if let Err(reason) =
+                    validate_surface_pixels_for_damage(&prepared_store, &payload_surfaces, &damage)
+                {
                     return Ok(DisplayEvent::Rejected { reason });
                 }
             }
-            runtime.pending_damage = damage;
-            runtime.pending_scene_generation = scene_generation;
-            runtime.scheduler.scene_generation = scene_generation;
-            runtime.scheduler.state = PresentationSchedulerState::DamagePending;
         }
+        damage_by_output.insert(output_id.clone(), damage);
     }
-    let commit_id = state.next_commit_id;
+
+    let visual_transition_required =
+        previous.is_some() || surfaces.iter().any(|surface| surface.placement.visible);
+    let required_outputs =
+        required_outputs_for_scene(state, &target, &damage_by_output, visual_transition_required);
+    rebind_unavailable_obligations(state, scene_epoch, scene_generation, &required_outputs);
+    if !required_outputs.is_empty()
+        && state.presentation_obligations.len() >= MAX_PRESENTATION_OBLIGATIONS
+    {
+        return Ok(DisplayEvent::Rejected {
+            reason: "presentation obligation budget exhausted".into(),
+        });
+    }
+
+    let commit_id = reconciliation_replay_commit_id.unwrap_or(state.next_commit_id);
     let scene = CommittedSceneState {
         source,
-        target,
-        focus,
-        selection,
-        surfaces,
+        target: target.clone(),
+        focus: focus.clone(),
+        selection: selection.clone(),
+        surfaces: surfaces.clone(),
         scene_epoch,
         scene_generation,
         commit_id,
         unix_timestamp: now_unix_timestamp(),
     };
-    let event_target = scene.target.clone();
-    let event_focus = scene.focus.clone();
-    let event_selection = scene.selection.clone();
-    let surface_count = scene.surfaces.len();
-    state.record_commit(scene)?;
+
+    if reconciliation_replay_commit_id.is_none() {
+        state.record_commit(scene)?;
+    }
+    state.pixel_transport = prepared_store;
+    for (output_id, damage) in damage_by_output {
+        let Some(runtime) = state.outputs.get_mut(&output_id) else {
+            continue;
+        };
+        if damage.is_empty() {
+            continue;
+        }
+        runtime.pending_damage = damage;
+        runtime.pending_scene_epoch = scene_epoch;
+        runtime.pending_scene_generation = scene_generation;
+        runtime.pending_commit_id = commit_id;
+        runtime.scheduler.scene_generation = scene_generation;
+        runtime.scheduler.state = PresentationSchedulerState::DamagePending;
+    }
+
+    if !required_outputs.is_empty() {
+        state.presentation_obligations.insert(
+            commit_id,
+            PresentationObligation {
+                scene_epoch,
+                scene_generation,
+                required_outputs,
+                presented_outputs: BTreeSet::new(),
+            },
+        );
+    }
     state.presentation_feedbacks.remove(&commit_id);
-    let _ = clock;
+
+    println!(
+        "service=displayd op=scene_accept event=success commit_id={} epoch={} generation={} surfaces={} pixel_payloads={} pixel_bytes={} resident_pixel_bytes={} damage_rects={}",
+        commit_id,
+        scene_epoch,
+        scene_generation,
+        usage.surfaces,
+        usage.pixel_payloads,
+        usage.pixel_bytes,
+        state.pixel_transport.total_bytes,
+        usage.damage_rects
+    );
+
     Ok(DisplayEvent::SceneCommitted {
-        target: event_target,
-        focus: event_focus,
-        selection: event_selection,
-        surface_count,
+        target,
+        focus,
+        selection,
+        surface_count: surfaces.len(),
         commit_id,
         publication: Some(ScenePublicationResult {
             scene_accepted: true,
@@ -1361,254 +2016,285 @@ fn handle_scene_acceptance(
     })
 }
 
-// Explicitly carries the shared scene inputs and isolated publication dependency.
+// Presentation publication consumes only the latest canonical scene and the
+// already-bounded PixelTransport store. Commit acceptance and actual presentation
+// remain separate transitions.
 #[allow(clippy::too_many_arguments)]
 async fn handle_multi_output_commit(
-    target: waybroker_common::CommitTarget,
-    focus: waybroker_common::FocusTarget,
-    selection: waybroker_common::WaylandSelectionState,
-    surfaces: Vec<waybroker_common::SurfaceSnapshot>,
-    pixel_payloads: Vec<PixelTransportPayload>,
+    _target: waybroker_common::CommitTarget,
+    _focus: waybroker_common::FocusTarget,
+    _selection: waybroker_common::WaylandSelectionState,
+    mut surfaces: Vec<waybroker_common::SurfaceSnapshot>,
+    _pixel_payloads: Vec<PixelTransportPayload>,
     scene_epoch: u64,
     scene_generation: u64,
-    source: ServiceRole,
-    config: &Config,
+    _source: ServiceRole,
+    _config: &Config,
     state: &mut DisplayState,
-    clock: &mut dyn PresentationClock,
+    vulkan: Option<&VulkanBackend>,
+    _clock: &mut dyn PresentationClock,
     display_backend: &mut dyn DisplayBackend,
     scheduler_tick: bool,
     selected_output: Option<&str>,
 ) -> Result<DisplayEvent> {
-    let retrying = state.outputs.values().any(|runtime| {
-        runtime
-            .retry
-            .as_ref()
-            .map(|retry| retry.scene_generation == scene_generation)
-            .unwrap_or(false)
-    });
-    if scene_generation != 0
-        && scene_epoch == state.last_scene_epoch
-        && scene_generation <= state.last_scene_generation
-        && !retrying
-        && !scheduler_tick
-    {
-        return Ok(DisplayEvent::Rejected { reason: "stale scene generation".into() });
-    }
-    if let Err(error) = submit_pixel_payloads(&mut state.pixel_transport, pixel_payloads) {
+    if !scheduler_tick {
         return Ok(DisplayEvent::Rejected {
-            reason: format!("pixel transport rejected payload: {error:?}"),
+            reason: "display publication requires the presentation scheduler boundary".into(),
         });
     }
-    if let Err(reason) = verify_pixel_payloads_available(&state.pixel_transport, &surfaces) {
+    let output_id = selected_output
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("presentation scheduler did not select an output"))?
+        .to_string();
+
+    canonicalize_surfaces(&mut surfaces);
+    let runtime = state
+        .outputs
+        .get_mut(&output_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown output {output_id}"))?;
+    if runtime.disabled {
+        return Ok(DisplayEvent::PresentationAdvanced {
+            output_id,
+            tick_sequence: runtime.scheduler.last_tick_sequence,
+            eligible: false,
+        });
+    }
+    if runtime.outstanding.is_some() {
+        runtime.scheduler.state = PresentationSchedulerState::PresentationBlocked;
+        return Ok(DisplayEvent::PresentationAdvanced {
+            output_id,
+            tick_sequence: runtime.scheduler.last_tick_sequence,
+            eligible: false,
+        });
+    }
+    if runtime.pending_damage.is_empty() {
+        runtime.scheduler.state = PresentationSchedulerState::Idle;
+        return Ok(DisplayEvent::PresentationAdvanced {
+            output_id,
+            tick_sequence: runtime.scheduler.last_tick_sequence,
+            eligible: false,
+        });
+    }
+
+    let bounds = runtime.state.bounds();
+    let mut damage = runtime.pending_damage.clone();
+    damage.sort_by_key(|rect| (rect.y0, rect.x0, rect.y1, rect.x1));
+    damage.dedup();
+    if damage.len() > MAX_DAMAGE_RECTS {
+        damage.clear();
+        damage.push(bounds);
+    }
+    if let Err(reason) =
+        validate_surface_pixels_for_damage(&state.pixel_transport, &surfaces, &damage)
+    {
         return Ok(DisplayEvent::Rejected { reason });
     }
 
-    let previous = state.last_scene.clone();
-    let output_ids: Vec<String> = state.outputs.keys().cloned().collect();
-    let mut publication_results = Vec::new();
-    for output_id in output_ids {
-        if let Some(selected) = selected_output {
-            if output_id != selected {
-                continue;
-            }
-        }
-        let runtime = state.outputs.get_mut(&output_id).expect("output id collected from registry");
-        if runtime.disabled {
-            continue;
-        }
-        if runtime.published_frame_id != 0
-            && runtime.last_published_scene_generation == scene_generation
-            && runtime.pending_damage.is_empty()
-            && runtime
-                .retry
-                .as_ref()
-                .map(|retry| {
-                    retry.scene_generation == scene_generation
-                        && retry.output_generation == runtime.state.generation
-                        && retry.frame_id < runtime.next_frame_id
-                })
-                .unwrap_or(true)
-        {
-            state.zero_damage_skipped_count += 1;
-            continue;
-        }
-        let bounds = runtime.state.bounds();
-        let mut damage = effective_damage_rects(
-            previous.as_ref(),
-            &surfaces,
-            framebuffer_is_initialized(&runtime.framebuffer, &runtime.state),
-            bounds,
-        );
-        damage.extend(runtime.pending_damage.iter().copied());
-        damage.sort_by_key(|rect| (rect.y0, rect.x0, rect.y1, rect.x1));
-        damage.dedup();
-        if damage.is_empty() {
-            state.zero_damage_skipped_count += 1;
-            continue;
-        }
-        if surfaces.len() == 1
-            && surfaces[0].placement.visible
-            && surfaces[0].placement.x == runtime.state.origin_x
-            && surfaces[0].placement.y == runtime.state.origin_y
-            && surfaces[0].placement.width == runtime.state.width
-            && surfaces[0].placement.height == runtime.state.height
-        {
-            state.direct_scanout_count += 1;
-        } else {
-            state.composition_frame_count += 1;
-        }
-        if let Err(reason) =
-            validate_surface_pixels_for_damage(&state.pixel_transport, &surfaces, &damage)
-        {
-            return Ok(DisplayEvent::Rejected { reason });
-        }
-        let mut scratch = if framebuffer_is_initialized(&runtime.framebuffer, &runtime.state) {
-            runtime.framebuffer.clone()
-        } else {
-            vec![BACKGROUND_PIXEL; runtime.state.framebuffer_words()]
-        };
-        let stats = match compose_damage_rects(
-            &mut scratch,
-            &runtime.state,
-            &state.pixel_transport,
-            &surfaces,
-            &damage,
-        ) {
-            Ok(stats) => stats,
-            Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
-        };
-        let frame_id = runtime.next_frame_id;
-        runtime.scheduler.state = PresentationSchedulerState::DamagePending;
-        runtime.scheduler.scene_generation = scene_generation;
-        let geometry = OutputGeometry {
-            output_id: runtime.state.output_id.clone(),
-            width: runtime.state.width,
-            height: runtime.state.height,
-            stride: runtime.state.stride,
-            format: runtime.state.format,
-            origin_x: runtime.state.origin_x,
-            origin_y: runtime.state.origin_y,
-            output_generation: runtime.state.generation,
-        };
-        let frame = FramePublication {
-            frame_id,
-            output_id: output_id.clone(),
-            output_generation: runtime.state.generation,
-            scene_generation,
-            geometry,
-            format: runtime.state.format,
-            stride: runtime.state.stride,
-            pixels: std::sync::Arc::<[u32]>::from(scratch.clone()),
-            damage: damage.clone(),
-        };
-        let publication = display_backend.submit_frame(frame.clone());
-        if let Err(_error) = publication {
-            runtime.scheduler.state = PresentationSchedulerState::RetryPending;
-            runtime.retry = Some(OutputRetryState {
-                scene_generation,
-                output_generation: runtime.state.generation,
-                frame_id,
-            });
-            runtime.pending_damage = damage;
-            publication_results.push(OutputPublicationResult {
-                output_id: output_id.clone(),
-                output_generation: runtime.state.generation,
-                frame_id,
-                scene_generation,
-                outcome: OutputPublicationOutcome::Failed(PublicationFailure::BackendRejected),
-            });
-            break;
-        }
-        let token = publication.expect("submission result checked above");
-        runtime.submitted_frame_id = frame_id;
-        runtime.scheduler.state = PresentationSchedulerState::SubmissionInFlight;
-        if let Some(previous) = runtime.outstanding.take() {
-            runtime.superseded_tokens.push(previous.token);
-            if runtime.superseded_tokens.len() > 2 {
-                runtime.superseded_tokens.remove(0);
-            }
-        }
-        runtime.outstanding = Some(OutstandingPresentation { token: token.clone(), frame });
-        runtime.next_frame_id = frame_id.saturating_add(1);
-        let output_generation = runtime.state.generation;
-        publication_results.push(OutputPublicationResult {
-            output_id: output_id.clone(),
-            output_generation,
-            frame_id,
-            scene_generation,
-            outcome: OutputPublicationOutcome::Submitted { token },
-        });
-        let auto_complete = display_backend.submission_completes_immediately();
-        let completion_token = match publication_results.last().map(|result| &result.outcome) {
-            Some(OutputPublicationOutcome::Submitted { token }) => Some(token.clone()),
-            _ => None,
-        };
-        let _ = runtime;
-        if auto_complete {
-            if let Some(token) = completion_token {
-                let _ = display_backend.complete_submission(&token);
-                let _ = complete_presentation(state, token, PresentationCompletion::Presented);
-            }
-        }
-        let _ = stats;
+    if surfaces.len() == 1
+        && surfaces[0].placement.visible
+        && surfaces[0].placement.x == runtime.state.origin_x
+        && surfaces[0].placement.y == runtime.state.origin_y
+        && surfaces[0].placement.width == runtime.state.width
+        && surfaces[0].placement.height == runtime.state.height
+    {
+        state.direct_scanout_count = state.direct_scanout_count.saturating_add(1);
+    } else {
+        state.composition_frame_count = state.composition_frame_count.saturating_add(1);
     }
-    if scheduler_tick {
-        return Ok(DisplayEvent::PresentationAdvanced {
-            output_id: selected_output.unwrap_or_default().to_string(),
-            tick_sequence: state
-                .outputs
-                .get(selected_output.unwrap_or_default())
-                .map(|runtime| runtime.scheduler.last_tick_sequence)
-                .unwrap_or_default(),
-            eligible: !publication_results.is_empty(),
-        });
+
+    let mut scratch = if framebuffer_is_initialized(&runtime.framebuffer, &runtime.state) {
+        runtime.framebuffer.clone()
+    } else {
+        vec![BACKGROUND_PIXEL; runtime.state.framebuffer_words()]
+    };
+    compose_damage_rects(&mut scratch, &runtime.state, &state.pixel_transport, &surfaces, &damage)
+        .map_err(|reason| anyhow::anyhow!(reason))?;
+
+    if let Some(vulkan) = vulkan {
+        let surface_words = scene_surface_words(&surfaces);
+        if !surface_words.is_empty() {
+            let handle = vulkan.submit_batch(VulkanBatchSubmission {
+                workload: VulkanWorkloadClass::SceneComposition,
+                payload_len: surface_words.len().saturating_mul(std::mem::size_of::<u32>()),
+                surface_words: Some(surface_words),
+                timeout: Duration::from_millis(50),
+                requires_zeroize: false,
+                allows_gpu: true,
+            });
+            let result = vulkan.wait_for_completion(handle).await;
+            println!(
+                "service=displayd op=vulkan_scene_assist event=completed path={:?} fallback_reason={:?}",
+                result.path, result.fallback_reason
+            );
+        }
     }
-    let commit_id = state.next_commit_id;
-    let scene = CommittedSceneState {
-        source,
-        target,
-        focus,
-        selection,
-        surfaces,
+
+    let frame_id = runtime.next_frame_id;
+    let commit_id = runtime.pending_commit_id;
+    let geometry = OutputGeometry {
+        output_id: runtime.state.output_id.clone(),
+        width: runtime.state.width,
+        height: runtime.state.height,
+        stride: runtime.state.stride,
+        format: runtime.state.format,
+        origin_x: runtime.state.origin_x,
+        origin_y: runtime.state.origin_y,
+        output_generation: runtime.state.generation,
+    };
+    let frame = FramePublication {
+        frame_id,
+        commit_id,
+        output_id: output_id.clone(),
+        output_generation: runtime.state.generation,
         scene_epoch,
         scene_generation,
-        commit_id,
-        unix_timestamp: now_unix_timestamp(),
+        geometry,
+        format: runtime.state.format,
+        stride: runtime.state.stride,
+        pixels: std::sync::Arc::<[u32]>::from(scratch),
+        damage: damage.clone(),
     };
-    let event_target = scene.target.clone();
-    let event_focus = scene.focus.clone();
-    let event_selection = scene.selection.clone();
-    let event_surface_count = scene.surfaces.len();
-    state.record_commit(scene)?;
-    state.presentation_feedbacks.insert(
-        commit_id,
-        DisplayEvent::FramePresented {
-            commit_id,
-            timestamp: clock.now(),
-            refresh_ns: 16_666_666,
-            seq: clock.current_seq(),
-            flags: 0,
-        },
-    );
-    println!(
-        "service=displayd op=multi_output_commit event=success commit_id={commit_id} outputs={}",
-        state.outputs.len()
-    );
-    let _ = config;
-    let publication = ScenePublicationResult {
-        scene_accepted: true,
-        scene_generation,
-        outputs: publication_results,
+
+    let token = match display_backend.submit_frame(frame.clone()) {
+        Ok(token) => token,
+        Err(_error) => {
+            runtime.scheduler.state = PresentationSchedulerState::RetryPending;
+            runtime.retry = Some(OutputRetryState {
+                scene_epoch,
+                scene_generation,
+                output_generation: runtime.state.generation,
+                frame_id,
+                commit_id,
+            });
+            runtime.pending_damage = damage;
+            return Ok(DisplayEvent::PresentationAdvanced {
+                output_id,
+                tick_sequence: runtime.scheduler.last_tick_sequence,
+                eligible: false,
+            });
+        }
     };
-    publication.validate().map_err(|error| anyhow::anyhow!(error))?;
-    Ok(DisplayEvent::SceneCommitted {
-        target: event_target,
-        focus: event_focus,
-        selection: event_selection,
-        surface_count: event_surface_count,
-        commit_id,
-        publication: Some(publication),
+    token.validate().map_err(|reason| anyhow::anyhow!(reason))?;
+    if token.output_id != output_id
+        || token.output_generation != runtime.state.generation
+        || token.scene_generation != scene_generation
+    {
+        display_backend.retire_submission(&token);
+        return Ok(DisplayEvent::Rejected {
+            reason: "display backend returned a mismatched presentation token".into(),
+        });
+    }
+
+    runtime.submitted_frame_id = frame_id;
+    runtime.scheduler.state = PresentationSchedulerState::SubmissionInFlight;
+    runtime.outstanding = Some(OutstandingPresentation { token: token.clone(), frame });
+    runtime.next_frame_id = frame_id.saturating_add(1);
+
+    if display_backend.submission_completes_immediately() {
+        let result = finish_backend_completion(
+            state,
+            display_backend,
+            token,
+            PresentationCompletion::Presented,
+        );
+        if !matches!(result, PresentationCompletion::Presented) {
+            return Ok(DisplayEvent::Rejected {
+                reason: format!("immediate presentation completion failed: {result:?}"),
+            });
+        }
+    }
+
+    Ok(DisplayEvent::PresentationAdvanced {
+        output_id,
+        tick_sequence: state
+            .outputs
+            .get(selected_output.unwrap_or_default())
+            .map(|runtime| runtime.scheduler.last_tick_sequence)
+            .unwrap_or_default(),
+        eligible: true,
     })
+}
+
+fn scene_surface_words(surfaces: &[waybroker_common::SurfaceSnapshot]) -> Vec<u32> {
+    let mut words = Vec::with_capacity(surfaces.len().saturating_mul(8));
+    for surface in surfaces {
+        words.extend_from_slice(&[
+            surface.placement.x as u32,
+            surface.placement.y as u32,
+            surface.placement.width,
+            surface.placement.height,
+            surface.placement.z as u32,
+            u32::from(surface.placement.visible),
+            surface.buffer_generation as u32,
+            surface.creation_sequence as u32,
+        ]);
+    }
+    words
+}
+
+async fn drive_presentation_for_feedback(
+    commit_id: u64,
+    source: ServiceRole,
+    config: &Config,
+    state: &mut DisplayState,
+    vulkan: Option<&VulkanBackend>,
+    clock: &mut dyn PresentationClock,
+    display_backend: &mut dyn DisplayBackend,
+) -> Result<()> {
+    if state.presentation_feedbacks.contains_key(&commit_id) {
+        return Ok(());
+    }
+    let pending_outputs: Vec<String> = match state.presentation_obligations.get(&commit_id) {
+        Some(obligation) => {
+            obligation.required_outputs.difference(&obligation.presented_outputs).cloned().collect()
+        }
+        None => return Ok(()),
+    };
+    let Some(scene) = state.last_scene.clone() else {
+        return Ok(());
+    };
+
+    for output_id in pending_outputs {
+        let Some((generation, tick_sequence, now_ns)) =
+            state.outputs.get(&output_id).map(|runtime| {
+                (
+                    runtime.state.generation,
+                    runtime.scheduler.last_tick_sequence.saturating_add(1),
+                    clock
+                        .now()
+                        .max(runtime.scheduler.last_tick_ns)
+                        .max(runtime.scheduler.next_eligible_ns),
+                )
+            })
+        else {
+            continue;
+        };
+        let eligible = advance_presentation(state, &output_id, generation, now_ns, tick_sequence)?;
+        if eligible {
+            let _ = handle_multi_output_commit(
+                scene.target.clone(),
+                scene.focus.clone(),
+                scene.selection.clone(),
+                scene.surfaces.clone(),
+                Vec::new(),
+                scene.scene_epoch,
+                scene.scene_generation,
+                source,
+                config,
+                state,
+                vulkan,
+                clock,
+                display_backend,
+                true,
+                Some(output_id.as_str()),
+            )
+            .await?;
+        }
+        if state.presentation_feedbacks.contains_key(&commit_id) {
+            break;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1635,11 +2321,13 @@ struct DisplayState {
     active_recordings: HashMap<String, RecordingState>,
     pointer_constraints: HashMap<String, waybroker_common::PointerConstraints>,
     presentation_feedbacks: HashMap<u64, DisplayEvent>,
+    presentation_obligations: BTreeMap<u64, PresentationObligation>,
+    #[cfg_attr(not(test), allow(dead_code))]
     zero_damage_skipped_count: u64,
     direct_scanout_count: u64,
     composition_frame_count: u64,
     outputs: BTreeMap<String, OutputRuntime>,
-    pixel_transport: PixelTransportStore,
+    pixel_transport: DisplayPixelTransportStore,
     backend_sequences: BTreeMap<u64, u64>,
 }
 
@@ -1654,11 +2342,12 @@ struct OutputRuntime {
     published_frame_id: u64,
     last_published_scene_generation: u64,
     pending_damage: Vec<RendererRect>,
+    pending_scene_epoch: u64,
     pending_scene_generation: u64,
+    pending_commit_id: u64,
     retry: Option<OutputRetryState>,
     submitted_frame_id: u64,
     outstanding: Option<OutstandingPresentation>,
-    superseded_tokens: Vec<PresentationToken>,
     scheduler: OutputScheduler,
 }
 
@@ -1681,9 +2370,11 @@ struct OutstandingPresentation {
 
 #[derive(Debug, Clone)]
 struct OutputRetryState {
+    scene_epoch: u64,
     scene_generation: u64,
     output_generation: u64,
     frame_id: u64,
+    commit_id: u64,
 }
 
 impl OutputRuntime {
@@ -1699,11 +2390,12 @@ impl OutputRuntime {
             published_frame_id: 0,
             last_published_scene_generation: 0,
             pending_damage: Vec::new(),
+            pending_scene_epoch: 0,
             pending_scene_generation: 0,
+            pending_commit_id: 0,
             retry: None,
             submitted_frame_id: 0,
             outstanding: None,
-            superseded_tokens: Vec::new(),
             scheduler: OutputScheduler {
                 cadence: PresentationCadence { period_ns: 16_666_667 },
                 state: PresentationSchedulerState::Idle,
@@ -1733,6 +2425,9 @@ impl OutputState {
         if g.output_id.is_empty() || g.width == 0 || g.height == 0 {
             return Err("invalid output identity or zero dimensions".into());
         }
+        if g.width > MAX_OUTPUT_DIMENSION || g.height > MAX_OUTPUT_DIMENSION {
+            return Err("output dimensions exceed displayd bounds".into());
+        }
         if g.format != WL_SHM_FORMAT_XRGB8888 {
             return Err("output framebuffer must be XRGB8888".into());
         }
@@ -1740,12 +2435,11 @@ impl OutputState {
         if g.stride < min || g.stride % 4 != 0 {
             return Err("undersized or unaligned output stride".into());
         }
-        let words = (g.stride as usize)
-            .checked_div(4)
-            .and_then(|row| row.checked_mul(g.height as usize))
+        let framebuffer_bytes = (g.stride as usize)
+            .checked_mul(g.height as usize)
             .ok_or("framebuffer size overflow")?;
-        if words == 0 {
-            return Err("framebuffer size overflow".into());
+        if framebuffer_bytes == 0 || framebuffer_bytes > MAX_OUTPUT_FRAMEBUFFER_BYTES {
+            return Err("framebuffer size exceeds displayd bounds".into());
         }
         Ok(Self {
             output_id: g.output_id.clone(),
@@ -1764,6 +2458,10 @@ impl OutputState {
     }
     fn framebuffer_words(&self) -> usize {
         (self.stride as usize / 4) * self.height as usize
+    }
+
+    fn framebuffer_bytes(&self) -> usize {
+        self.stride as usize * self.height as usize
     }
 }
 
@@ -1828,8 +2526,10 @@ trait DisplayBackend {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FramePublication {
     frame_id: u64,
+    commit_id: u64,
     output_id: String,
     output_generation: u64,
+    scene_epoch: u64,
     scene_generation: u64,
     geometry: OutputGeometry,
     format: u32,
@@ -1863,6 +2563,10 @@ impl Default for MockDisplayBackend {
 }
 
 impl MockDisplayBackend {
+    fn production() -> Self {
+        Self { auto_complete: true, ..Self::default() }
+    }
+
     #[cfg(test)]
     fn queue_output_event(&mut self, event: BackendOutputEvent) {
         self.output_events.push_back(event);
@@ -2030,6 +2734,7 @@ struct HeadlessShmOutput {
 #[derive(Default)]
 struct HeadlessShmDisplayBackend {
     backend_instance_id: u64,
+    configured: BTreeMap<String, OutputGeometry>,
     outputs: BTreeMap<String, HeadlessShmOutput>,
     pending: BTreeMap<PresentationToken, FramePublication>,
     next_sequence: u64,
@@ -2059,6 +2764,7 @@ impl HeadlessShmDisplayBackend {
     }
 
     fn queue_connected_output(&mut self, geometry: OutputGeometry) {
+        self.configured.insert(geometry.output_id.clone(), geometry.clone());
         if self.next_event_sequence == 0 {
             self.next_event_sequence = 1;
         }
@@ -2091,6 +2797,13 @@ impl HeadlessShmDisplayBackend {
     }
 
     fn validate_frame(request: &FramePublication) -> Result<(usize, usize)> {
+        if request.geometry.output_id != request.output_id
+            || request.geometry.output_generation != request.output_generation
+            || request.geometry.stride != request.stride
+            || request.geometry.format != request.format
+        {
+            bail!("headless-shm frame metadata is internally inconsistent");
+        }
         if request.geometry.width == 0 || request.geometry.height == 0 {
             bail!("headless-shm rejects zero-sized output");
         }
@@ -2111,6 +2824,9 @@ impl HeadlessShmDisplayBackend {
                 .ok_or_else(|| anyhow::anyhow!("headless-shm payload size overflow"))?,
         )
         .map_err(|_| anyhow::anyhow!("headless-shm payload does not fit usize"))?;
+        if payload_len > MAX_OUTPUT_FRAMEBUFFER_BYTES {
+            bail!("headless-shm frame exceeds displayd framebuffer budget");
+        }
         let expected_pixels = usize::try_from(
             u64::from(request.geometry.width)
                 .checked_mul(u64::from(request.geometry.height))
@@ -2259,19 +2975,31 @@ impl HeadlessShmDisplayBackend {
 
 impl DisplayBackend for HeadlessShmDisplayBackend {
     fn poll_output_events(&mut self) -> Result<Vec<BackendOutputEvent>> {
-        Ok(self.output_events.drain(..).collect())
+        let events: Vec<_> = self.output_events.drain(..).collect();
+        for event in &events {
+            match event {
+                BackendOutputEvent::Connected { geometry, .. }
+                | BackendOutputEvent::Reconfigured { geometry, .. } => {
+                    self.configured.insert(geometry.output_id.clone(), geometry.clone());
+                }
+                BackendOutputEvent::Disabled { backend_output_id, .. }
+                | BackendOutputEvent::Disconnected { backend_output_id, .. } => {
+                    self.configured.remove(backend_output_id);
+                }
+                BackendOutputEvent::BackendReset { .. } => self.configured.clear(),
+            }
+        }
+        Ok(events)
     }
     fn enumerate_outputs(&self) -> Result<Vec<OutputMode>> {
         Ok(self
-            .outputs
-            .iter()
-            .filter_map(|(name, output)| {
-                output.latest.as_ref().map(|frame| OutputMode {
-                    name: name.clone(),
-                    width: frame.geometry.width,
-                    height: frame.geometry.height,
-                    refresh_hz: 0,
-                })
+            .configured
+            .values()
+            .map(|geometry| OutputMode {
+                name: geometry.output_id.clone(),
+                width: geometry.width,
+                height: geometry.height,
+                refresh_hz: 0,
             })
             .collect())
     }
@@ -2292,6 +3020,19 @@ impl DisplayBackend for HeadlessShmDisplayBackend {
     }
 
     fn submit_frame(&mut self, request: FramePublication) -> Result<PresentationToken> {
+        if self.pending.len() >= MAX_HEADLESS_PENDING_SUBMISSIONS {
+            bail!("headless-shm pending submission budget exhausted");
+        }
+        let pending_bytes = self.pending.values().try_fold(0usize, |total, frame| {
+            total.checked_add(frame.pixels.len().saturating_mul(4))
+        });
+        let request_bytes = request.pixels.len().saturating_mul(4);
+        let aggregate_pending_bytes = pending_bytes
+            .and_then(|bytes| bytes.checked_add(request_bytes))
+            .ok_or_else(|| anyhow::anyhow!("headless-shm pending byte accounting overflow"))?;
+        if aggregate_pending_bytes > MAX_TOTAL_FRAMEBUFFER_BYTES {
+            bail!("headless-shm pending byte budget exhausted");
+        }
         self.publish_atomic(request.clone())?;
         let token = PresentationToken {
             backend_instance_id: self.instance_id(),
@@ -2303,6 +3044,10 @@ impl DisplayBackend for HeadlessShmDisplayBackend {
         };
         self.pending.insert(token.clone(), request);
         Ok(token)
+    }
+
+    fn submission_completes_immediately(&self) -> bool {
+        true
     }
 
     fn retire_submission(&mut self, token: &PresentationToken) {
@@ -2327,6 +3072,9 @@ impl DisplayBackend for HeadlessShmDisplayBackend {
     }
 
     fn reconfigure_output(&mut self, output_id: &str, output_generation: u64) -> Result<()> {
+        if let Some(geometry) = self.configured.get_mut(output_id) {
+            geometry.output_generation = output_generation;
+        }
         if self
             .outputs
             .get(output_id)
@@ -2342,6 +3090,7 @@ impl DisplayBackend for HeadlessShmDisplayBackend {
     }
 
     fn remove_output(&mut self, output_id: &str) {
+        self.configured.remove(output_id);
         self.outputs.remove(output_id);
         self.pending.retain(|token, _| token.output_id != output_id);
     }
@@ -2987,10 +3736,9 @@ impl DisplayState {
             bail!("display epoch must advance monotonically");
         }
         if new_epoch == self.display_epoch {
-            if self.reconciliation_state == DisplayReconciliationState::Recovering {
-                return Ok(());
-            }
-            bail!("display epoch is already active");
+            self.reconciliation_state = DisplayReconciliationState::Recovering;
+            self.presentation_feedbacks.clear();
+            return Ok(());
         }
         self.display_epoch = new_epoch;
         self.reconciliation_state = DisplayReconciliationState::Recovering;
@@ -3042,23 +3790,48 @@ impl DisplayState {
             active_recordings: HashMap::new(),
             pointer_constraints: HashMap::new(),
             presentation_feedbacks: HashMap::new(),
+            presentation_obligations: BTreeMap::new(),
             zero_damage_skipped_count: 0,
             direct_scanout_count: 0,
             composition_frame_count: 0,
             outputs: default_output_registry(),
-            pixel_transport: PixelTransportStore::default(),
+            pixel_transport: DisplayPixelTransportStore::default(),
             backend_sequences: BTreeMap::new(),
         })
     }
 
     fn record_commit(&mut self, scene: CommittedSceneState) -> Result<()> {
-        fs::write(
-            &self.snapshot_path,
-            serde_json::to_vec_pretty(&scene).context("failed to serialize scene snapshot")?,
-        )
-        .with_context(|| {
-            format!("failed to write scene snapshot {}", self.snapshot_path.display())
-        })?;
+        let bytes =
+            serde_json::to_vec_pretty(&scene).context("failed to serialize scene snapshot")?;
+        if bytes.len() > MAX_SCENE_SNAPSHOT_BYTES {
+            bail!("scene snapshot exceeds displayd persistence budget");
+        }
+        let temp_nonce = NEXT_SNAPSHOT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_path = self.snapshot_path.with_extension(format!(
+            "tmp-{}-{}-{}",
+            std::process::id(),
+            scene.commit_id,
+            temp_nonce
+        ));
+        let write_result = (|| -> Result<()> {
+            let mut file = fs::File::create(&temp_path).with_context(|| {
+                format!("failed to create temporary scene snapshot {}", temp_path.display())
+            })?;
+            file.write_all(&bytes).context("failed to write temporary scene snapshot")?;
+            file.sync_all().context("failed to sync temporary scene snapshot")?;
+            fs::rename(&temp_path, &self.snapshot_path).with_context(|| {
+                format!(
+                    "failed to atomically replace scene snapshot {}",
+                    self.snapshot_path.display()
+                )
+            })?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        write_result?;
+
         self.next_commit_id = scene.commit_id.saturating_add(1);
         if scene.scene_generation != 0 {
             self.last_scene_epoch = scene.scene_epoch;
@@ -3086,15 +3859,20 @@ impl DisplayState {
             last_scene_epoch: 0,
             last_scene_generation: 0,
             next_commit_id: 1,
-            snapshot_path: std::env::temp_dir().join("scene-snapshot"),
+            snapshot_path: std::env::temp_dir().join(format!(
+                "scene-snapshot-{}-{}",
+                std::process::id(),
+                NEXT_TEST_SNAPSHOT_ID.fetch_add(1, Ordering::Relaxed)
+            )),
             active_recordings: HashMap::new(),
             pointer_constraints: HashMap::new(),
             presentation_feedbacks: HashMap::new(),
+            presentation_obligations: BTreeMap::new(),
             zero_damage_skipped_count: 0,
             direct_scanout_count: 0,
             composition_frame_count: 0,
             outputs: default_output_registry(),
-            pixel_transport: PixelTransportStore::default(),
+            pixel_transport: DisplayPixelTransportStore::default(),
             backend_sequences: BTreeMap::new(),
         }
     }
@@ -3164,7 +3942,7 @@ fn readiness_from_state(state: &DisplayState, renderer_available: bool) -> Servi
     };
     ServiceReadiness {
         ipc_available: true,
-        canonical_scene_available: true,
+        canonical_scene_available: state.last_scene.is_some(),
         renderer_available,
         configured_output_count: outputs.len(),
         ready_output_count: ready,
@@ -3175,90 +3953,162 @@ fn readiness_from_state(state: &DisplayState, renderer_available: bool) -> Servi
     }
 }
 
+fn preflight_presentation_token(
+    state: &DisplayState,
+    token: &PresentationToken,
+) -> std::result::Result<(), PresentationCompletion> {
+    token.validate().map_err(|_| PresentationCompletion::UnknownToken)?;
+    let runtime =
+        state.outputs.get(&token.output_id).ok_or(PresentationCompletion::UnknownToken)?;
+    if runtime.state.generation != token.output_generation {
+        return Err(PresentationCompletion::StaleGeneration);
+    }
+    if runtime.backend_instance_id != 0 && runtime.backend_instance_id != token.backend_instance_id
+    {
+        return Err(PresentationCompletion::StaleGeneration);
+    }
+    let outstanding = runtime.outstanding.as_ref().ok_or(PresentationCompletion::UnknownToken)?;
+    if outstanding.token != *token {
+        return Err(PresentationCompletion::UnknownToken);
+    }
+    Ok(())
+}
+
+fn note_presented_obligations(
+    state: &mut DisplayState,
+    frame: &FramePublication,
+    output_id: &str,
+    refresh_ns: u32,
+    seq: u64,
+) {
+    let matching: Vec<u64> = state
+        .presentation_obligations
+        .iter_mut()
+        .filter_map(|(commit_id, obligation)| {
+            let generation_matches = if frame.scene_generation == 0 {
+                *commit_id == frame.commit_id
+            } else {
+                obligation.scene_epoch == frame.scene_epoch
+                    && obligation.scene_generation <= frame.scene_generation
+            };
+            if generation_matches && obligation.required_outputs.contains(output_id) {
+                obligation.presented_outputs.insert(output_id.to_string());
+            }
+            (generation_matches
+                && obligation.required_outputs.is_subset(&obligation.presented_outputs))
+            .then_some(*commit_id)
+        })
+        .collect();
+
+    for commit_id in matching {
+        insert_bounded_feedback(
+            state,
+            commit_id,
+            DisplayEvent::FramePresented {
+                commit_id,
+                timestamp: monotonic_now_ns(),
+                refresh_ns,
+                seq,
+                flags: 0,
+            },
+        );
+        state.presentation_obligations.remove(&commit_id);
+    }
+}
+
 fn complete_presentation(
     state: &mut DisplayState,
     token: PresentationToken,
     outcome: PresentationCompletion,
 ) -> PresentationCompletion {
-    if token.validate().is_err() {
-        return PresentationCompletion::UnknownToken;
+    if let Err(result) = preflight_presentation_token(state, &token) {
+        return result;
     }
-    if token.backend_instance_id != MOCK_BACKEND_INSTANCE_ID
-        && token.backend_instance_id != HEADLESS_SHM_BACKEND_INSTANCE_ID
-    {
-        return PresentationCompletion::UnknownToken;
-    }
-    let Some(runtime) = state.outputs.get_mut(&token.output_id) else {
-        return PresentationCompletion::UnknownToken;
+
+    let (outstanding, cadence_period) = {
+        let runtime = state.outputs.get_mut(&token.output_id).expect("preflight output exists");
+        let outstanding = runtime.outstanding.take().expect("preflight outstanding exists");
+        (outstanding, runtime.scheduler.cadence.period_ns)
     };
-    if runtime.backend_instance_id != 0 && runtime.backend_instance_id != token.backend_instance_id
-    {
-        return PresentationCompletion::UnknownToken;
-    }
-    if let Some(index) = runtime.superseded_tokens.iter().position(|old| old == &token) {
-        runtime.superseded_tokens.remove(index);
-        return PresentationCompletion::Superseded;
-    }
-    if runtime.state.generation != token.output_generation {
-        return PresentationCompletion::StaleGeneration;
-    }
-    let Some(outstanding) = runtime.outstanding.clone() else {
-        if runtime.published_frame_id == token.frame_id {
-            return PresentationCompletion::Presented;
-        }
-        return PresentationCompletion::UnknownToken;
-    };
-    if outstanding.token != token {
-        return PresentationCompletion::UnknownToken;
-    }
-    runtime.outstanding = None;
+
     let result = match outcome {
         PresentationCompletion::Presented => {
+            let runtime = state.outputs.get_mut(&token.output_id).expect("preflight output exists");
             runtime.framebuffer = outstanding.frame.pixels.to_vec();
             runtime.published_frame_id = token.frame_id;
             runtime.last_published_scene_generation = token.scene_generation;
-            runtime.pending_damage.clear();
-            runtime.retry = None;
-            runtime.scheduler.state = PresentationSchedulerState::Idle;
-            if let Some(scene) = state
-                .last_scene
-                .as_ref()
-                .filter(|scene| scene.scene_generation == token.scene_generation)
+            if (runtime.pending_scene_epoch, runtime.pending_scene_generation)
+                <= (outstanding.frame.scene_epoch, token.scene_generation)
             {
-                state.presentation_feedbacks.insert(
-                    scene.commit_id,
-                    DisplayEvent::FramePresented {
-                        commit_id: scene.commit_id,
-                        timestamp: 1_000_000_000,
-                        refresh_ns: 16_666_666,
-                        seq: token.frame_id,
-                        flags: 0,
-                    },
-                );
+                runtime.pending_damage.clear();
+                runtime.pending_commit_id = 0;
+                runtime.retry = None;
+                runtime.scheduler.state = PresentationSchedulerState::Idle;
+            } else {
+                runtime.scheduler.state = PresentationSchedulerState::DamagePending;
             }
+            let refresh_ns = cadence_period.min(u64::from(u32::MAX)) as u32;
+            note_presented_obligations(
+                state,
+                &outstanding.frame,
+                &token.output_id,
+                refresh_ns,
+                token.sequence,
+            );
             PresentationCompletion::Presented
         }
-        PresentationCompletion::Failed { reason } => {
-            runtime.pending_damage = outstanding.frame.damage;
+        other => {
+            let runtime = state.outputs.get_mut(&token.output_id).expect("preflight output exists");
+            if (runtime.pending_scene_epoch, runtime.pending_scene_generation)
+                <= (outstanding.frame.scene_epoch, token.scene_generation)
+            {
+                runtime.pending_damage = outstanding.frame.damage.clone();
+                runtime.pending_scene_epoch = outstanding.frame.scene_epoch;
+                runtime.pending_scene_generation = outstanding.frame.scene_generation;
+                runtime.pending_commit_id = outstanding.frame.commit_id;
+            }
             runtime.retry = Some(OutputRetryState {
+                scene_epoch: outstanding.frame.scene_epoch,
                 scene_generation: token.scene_generation,
                 output_generation: token.output_generation,
                 frame_id: token.frame_id,
+                commit_id: outstanding.frame.commit_id,
             });
             runtime.scheduler.state = PresentationSchedulerState::RetryPending;
-            PresentationCompletion::Failed { reason }
+            other
         }
-        other => other,
     };
+
     if result == PresentationCompletion::Presented
         && state.reconciliation_state == DisplayReconciliationState::ReconciledAwaitingPresentation
-        && state.outputs.values().all(|output| {
-            !output.disabled && output.published_frame_id != 0 && output.pending_damage.is_empty()
-        })
+        && state
+            .outputs
+            .values()
+            .filter(|output| !output.disabled)
+            .all(|output| output.published_frame_id != 0 && output.pending_damage.is_empty())
     {
         state.reconciliation_state = DisplayReconciliationState::Ready;
     }
     result
+}
+
+fn finish_backend_completion(
+    state: &mut DisplayState,
+    display_backend: &mut dyn DisplayBackend,
+    token: PresentationToken,
+    outcome: PresentationCompletion,
+) -> PresentationCompletion {
+    if let Err(result) = preflight_presentation_token(state, &token) {
+        return result;
+    }
+    if matches!(outcome, PresentationCompletion::Presented)
+        && display_backend.complete_submission(&token).is_err()
+    {
+        display_backend.retire_submission(&token);
+        return complete_presentation(state, token, PresentationCompletion::BackendUnavailable);
+    }
+    display_backend.retire_submission(&token);
+    complete_presentation(state, token, outcome)
 }
 
 fn advance_presentation(
@@ -3276,6 +4126,19 @@ fn advance_presentation(
         || runtime.scheduler.output_generation != output_generation
     {
         bail!("stale output generation for {output_id}");
+    }
+    if let Some(retry) = runtime.retry.as_ref() {
+        let retry_is_current = retry.output_generation == runtime.state.generation
+            && retry.scene_epoch == runtime.pending_scene_epoch
+            && retry.scene_generation == runtime.pending_scene_generation
+            && retry.commit_id == runtime.pending_commit_id
+            && retry.frame_id <= runtime.next_frame_id;
+        if !retry_is_current {
+            runtime.retry = None;
+            if !runtime.pending_damage.is_empty() {
+                runtime.scheduler.state = PresentationSchedulerState::DamagePending;
+            }
+        }
     }
     if runtime.disabled {
         runtime.scheduler.last_tick_ns = now_ns;
@@ -3305,8 +4168,9 @@ fn advance_presentation(
     Ok(eligible)
 }
 
+#[allow(dead_code)]
 fn submit_pixel_payloads(
-    store: &mut PixelTransportStore,
+    store: &mut DisplayPixelTransportStore,
     payloads: Vec<PixelTransportPayload>,
 ) -> std::result::Result<(), PixelTransportError> {
     for payload in payloads {
@@ -3490,7 +4354,8 @@ fn effective_damage_rects(
     }
 
     damage.sort_by_key(|rect| (rect.y0, rect.x0, rect.y1, rect.x1));
-    damage
+    damage.dedup();
+    if damage.len() > MAX_DAMAGE_RECTS { vec![output_bounds] } else { damage }
 }
 
 fn surface_exposes_or_occupies_different_region(
@@ -3505,15 +4370,24 @@ fn surface_exposes_or_occupies_different_region(
 fn compose_damage_rects(
     framebuffer: &mut [u32],
     output: &OutputState,
-    store: &PixelTransportStore,
+    store: &DisplayPixelTransportStore,
     surfaces: &[waybroker_common::SurfaceSnapshot],
     damage_rects: &[RendererRect],
 ) -> std::result::Result<CompositionStats, String> {
     let mut stats = CompositionStats::default();
+    let mut ordered: Vec<_> = surfaces.iter().collect();
+    ordered.sort_by(|left, right| {
+        (left.layer_class, left.placement.z, left.creation_sequence, left.id.as_str()).cmp(&(
+            right.layer_class,
+            right.placement.z,
+            right.creation_sequence,
+            right.id.as_str(),
+        ))
+    });
     for damage in damage_rects {
         stats.damaged_pixels = stats.damaged_pixels.saturating_add(damage.area());
         fill_framebuffer_rect(framebuffer, output, *damage, BACKGROUND_PIXEL)?;
-        for surface in surfaces {
+        for surface in &ordered {
             let Some(surface_bounds) = surface_output_bounds(surface) else {
                 continue;
             };
@@ -3529,7 +4403,7 @@ fn compose_damage_rects(
 }
 
 fn validate_surface_pixels_for_damage(
-    store: &PixelTransportStore,
+    store: &DisplayPixelTransportStore,
     surfaces: &[waybroker_common::SurfaceSnapshot],
     damage_rects: &[RendererRect],
 ) -> std::result::Result<(), String> {
@@ -3548,7 +4422,7 @@ fn validate_surface_pixels_for_damage(
 }
 
 fn validate_surface_pixel_rect(
-    store: &PixelTransportStore,
+    store: &DisplayPixelTransportStore,
     surface: &waybroker_common::SurfaceSnapshot,
     rect: RendererRect,
 ) -> std::result::Result<(), String> {
@@ -3563,10 +4437,42 @@ fn validate_surface_pixel_rect(
     if payload.stride < payload.width.saturating_mul(4) {
         return Err(format!("invalid stride {} for surface {}", payload.stride, surface.id));
     }
-    for y in rect.y0..rect.y1 {
-        for x in rect.x0..rect.x1 {
-            source_pixel_offset(payload, surface, x, y)?;
-        }
+    let local_x0 = rect
+        .x0
+        .checked_sub(surface.placement.x)
+        .ok_or_else(|| "source x offset overflow".to_string())?;
+    let local_y0 = rect
+        .y0
+        .checked_sub(surface.placement.y)
+        .ok_or_else(|| "source y offset overflow".to_string())?;
+    let local_x1 = rect
+        .x1
+        .checked_sub(surface.placement.x)
+        .ok_or_else(|| "source x extent overflow".to_string())?;
+    let local_y1 = rect
+        .y1
+        .checked_sub(surface.placement.y)
+        .ok_or_else(|| "source y extent overflow".to_string())?;
+    if local_x0 < 0
+        || local_y0 < 0
+        || local_x1 <= local_x0
+        || local_y1 <= local_y0
+        || local_x1 as u32 > payload.width
+        || local_y1 as u32 > payload.height
+    {
+        return Err(format!("pixel payload bounds mismatch for surface {}", surface.id));
+    }
+    let last_row = (local_y1 as usize - 1)
+        .checked_mul(payload.stride as usize)
+        .ok_or_else(|| "source row offset overflow".to_string())?;
+    let last_col = (local_x1 as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "source column offset overflow".to_string())?;
+    let end = last_row
+        .checked_add(last_col)
+        .ok_or_else(|| "source payload extent overflow".to_string())?;
+    if end > payload.pixels.len() {
+        return Err(format!("pixel payload is too short for surface {}", surface.id));
     }
     Ok(())
 }
@@ -3577,14 +4483,16 @@ fn fill_framebuffer_rect(
     rect: RendererRect,
     pixel: u32,
 ) -> std::result::Result<(), String> {
+    let width = (rect.x1 - rect.x0) as usize;
     for y in rect.y0..rect.y1 {
-        let row_start = framebuffer_offset_for_output(output, output.origin_x, y)?;
-        for x in rect.x0..rect.x1 {
-            let index = row_start
-                .checked_add((x - output.origin_x) as usize)
-                .ok_or_else(|| "framebuffer offset overflow".to_string())?;
-            framebuffer[index] = pixel;
-        }
+        let start = framebuffer_offset_for_output(output, rect.x0, y)?;
+        let end = start
+            .checked_add(width)
+            .ok_or_else(|| "framebuffer fill extent overflow".to_string())?;
+        let row = framebuffer
+            .get_mut(start..end)
+            .ok_or_else(|| "framebuffer fill out of bounds".to_string())?;
+        row.fill(pixel);
     }
     Ok(())
 }
@@ -3592,11 +4500,49 @@ fn fill_framebuffer_rect(
 fn copy_surface_rect(
     framebuffer: &mut [u32],
     output: &OutputState,
-    store: &PixelTransportStore,
+    store: &DisplayPixelTransportStore,
     surface: &waybroker_common::SurfaceSnapshot,
     rect: RendererRect,
     fallback_pixel: u32,
 ) -> std::result::Result<(), String> {
+    if let Some(handle) = surface.pixel_transport.as_ref() {
+        let payload = store.lookup(handle).ok_or_else(|| missing_payload_reason(handle))?;
+        if PixelFormatPolicy::from_wire_format(payload.format)? == PixelFormatPolicy::OpaqueXrgb8888
+        {
+            let width = (rect.x1 - rect.x0) as usize;
+            let local_x0 = rect
+                .x0
+                .checked_sub(surface.placement.x)
+                .ok_or_else(|| "source x offset overflow".to_string())?
+                as usize;
+            for y in rect.y0..rect.y1 {
+                let local_y = y
+                    .checked_sub(surface.placement.y)
+                    .ok_or_else(|| "source y offset overflow".to_string())?
+                    as usize;
+                let src_start = local_y
+                    .checked_mul(payload.stride as usize)
+                    .and_then(|row| row.checked_add(local_x0.saturating_mul(4)))
+                    .ok_or_else(|| "source row range overflow".to_string())?;
+                let src_end = src_start
+                    .checked_add(width.saturating_mul(4))
+                    .ok_or_else(|| "source row end overflow".to_string())?;
+                let src = payload.pixels.get(src_start..src_end).ok_or_else(|| {
+                    format!("pixel payload is too short for surface {}", surface.id)
+                })?;
+                let dst_start = framebuffer_offset_for_output(output, rect.x0, y)?;
+                let dst_end = dst_start
+                    .checked_add(width)
+                    .ok_or_else(|| "framebuffer row end overflow".to_string())?;
+                let dst = framebuffer
+                    .get_mut(dst_start..dst_end)
+                    .ok_or_else(|| "framebuffer row out of bounds".to_string())?;
+                copy_xrgb_row(dst, src)?;
+            }
+            return Ok(());
+        }
+    }
+
     for y in rect.y0..rect.y1 {
         let row_start = framebuffer_offset_for_output(output, output.origin_x, y)?;
         for x in rect.x0..rect.x1 {
@@ -3610,6 +4556,53 @@ fn copy_surface_rect(
         }
     }
     Ok(())
+}
+
+fn copy_xrgb_row(dst: &mut [u32], src: &[u8]) -> std::result::Result<(), String> {
+    if src.len() != dst.len().saturating_mul(4) {
+        return Err("XRGB row byte length mismatch".into());
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if dst.len() >= SIMD_XRGB_MIN_PIXELS && global_accel_policy().avx2_available {
+            // SAFETY: runtime feature detection and exact row bounds are checked above.
+            unsafe { copy_xrgb_row_avx2(dst, src) };
+            return Ok(());
+        }
+    }
+    for (pixel, bytes) in dst.iter_mut().zip(src.chunks_exact(4)) {
+        *pixel = 0xFF00_0000
+            | (u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) & 0x00FF_FFFF);
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn copy_xrgb_row_avx2(dst: &mut [u32], src: &[u8]) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_loadu_si256, _mm256_or_si256, _mm256_set1_epi32, _mm256_storeu_si256,
+    };
+
+    let mut index = 0usize;
+    let alpha = _mm256_set1_epi32(0xFF00_0000u32 as i32);
+    while index + 8 <= dst.len() {
+        // SAFETY: the caller validated src/dst lengths and AVX2 availability.
+        unsafe {
+            let src_ptr = src.as_ptr().add(index * 4).cast::<__m256i>();
+            let dst_ptr = dst.as_mut_ptr().add(index).cast::<__m256i>();
+            let value = _mm256_loadu_si256(src_ptr);
+            let opaque = _mm256_or_si256(value, alpha);
+            _mm256_storeu_si256(dst_ptr, opaque);
+        }
+        index += 8;
+    }
+    for (i, pixel) in dst.iter_mut().enumerate().skip(index) {
+        let base = i * 4;
+        *pixel = 0xFF00_0000
+            | (u32::from_le_bytes([src[base], src[base + 1], src[base + 2], src[base + 3]])
+                & 0x00FF_FFFF);
+    }
 }
 
 fn framebuffer_offset_for_output(
@@ -3662,7 +4655,7 @@ fn missing_payload_reason(handle: &waybroker_common::PixelTransportHandle) -> St
 }
 
 fn pixel_for_surface(
-    store: &PixelTransportStore,
+    store: &DisplayPixelTransportStore,
     surface: &waybroker_common::SurfaceSnapshot,
     placement: &waybroker_common::SurfacePlacement,
     x: usize,
@@ -3762,7 +4755,7 @@ fn div255_rounded(value: u32) -> u32 {
 }
 
 fn verify_pixel_payloads_available(
-    store: &PixelTransportStore,
+    store: &DisplayPixelTransportStore,
     surfaces: &[waybroker_common::SurfaceSnapshot],
 ) -> std::result::Result<(), String> {
     for surface in surfaces {
@@ -3783,6 +4776,11 @@ fn verify_pixel_payloads_available(
 }
 
 fn load_scene_snapshot(path: &Path) -> Result<Option<CommittedSceneState>> {
+    if let Ok(metadata) = fs::metadata(path) {
+        if metadata.len() > MAX_SCENE_SNAPSHOT_BYTES as u64 {
+            bail!("scene snapshot exceeds displayd persistence budget");
+        }
+    }
     let raw = match fs::read(path) {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -3825,18 +4823,8 @@ async fn handle_capture_output(
             "service=displayd op=vulkan_refine event=completed workload={:?} path={:?}",
             result.workload, result.path
         );
-
-        // Perform the actual refinement using AVX/SIMD on CPU as well
-        vulkan.refine_screenshot_pixels(&mut pixels);
-    } else {
-        // Manual fallback if no vulkan object (though we could still use SIMD if we had it)
-        // For simplicity, we just use a dummy processing here if no vulkan backend exists
-        for p in pixels.iter_mut() {
-            let b = (*p >> 16) & 0xFF;
-            let r = *p & 0xFF;
-            *p = (*p & 0xFF00FF00) | (r << 16) | b;
-        }
     }
+    refine_screenshot_pixels_accel(&mut pixels);
 
     let artifact_bytes = encode_rgba8888_artifact_bytes(width, height, &pixels)?;
 
@@ -3875,6 +4863,17 @@ async fn handle_start_record(
     state: &mut DisplayState,
     backend: &mut dyn RecordBackend,
 ) -> Result<DisplayEvent> {
+    if fps == 0 || fps > 240 {
+        return Ok(DisplayEvent::Rejected { reason: "recording fps is out of bounds".into() });
+    }
+    if state.outputs.get(output).is_none_or(|runtime| runtime.disabled) {
+        return Ok(DisplayEvent::Rejected {
+            reason: format!("unknown or disabled recording output {output}"),
+        });
+    }
+    if state.active_recordings.len() >= MAX_ACTIVE_RECORDINGS {
+        return Ok(DisplayEvent::Rejected { reason: "recording budget exhausted".into() });
+    }
     if state.active_recordings.contains_key(output) {
         return Ok(DisplayEvent::Rejected {
             reason: format!("recording already active for output {output}"),
@@ -3969,6 +4968,53 @@ fn validate_capture_pixel_count(width: u32, height: u32, pixel_len: usize) -> Re
         );
     }
     Ok(())
+}
+
+fn refine_screenshot_pixels_accel(pixels: &mut [u32]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if pixels.len() >= SIMD_XRGB_MIN_PIXELS && global_accel_policy().avx2_available {
+            // SAFETY: AVX2 availability is checked by the global acceleration policy.
+            unsafe { refine_screenshot_pixels_avx2(pixels) };
+            return;
+        }
+    }
+    for pixel in pixels {
+        let high = (*pixel >> 16) & 0xFF;
+        let low = *pixel & 0xFF;
+        *pixel = (*pixel & 0xFF00_FF00) | (low << 16) | high;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn refine_screenshot_pixels_avx2(pixels: &mut [u32]) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_and_si256, _mm256_loadu_si256, _mm256_or_si256, _mm256_set1_epi32,
+        _mm256_slli_epi32, _mm256_srli_epi32, _mm256_storeu_si256,
+    };
+    let mut index = 0usize;
+    let ag_mask = _mm256_set1_epi32(0xFF00_FF00u32 as i32);
+    let high_mask = _mm256_set1_epi32(0x00FF_0000u32 as i32);
+    let low_mask = _mm256_set1_epi32(0x0000_00FFu32 as i32);
+    while index + 8 <= pixels.len() {
+        // SAFETY: each vector lies within the validated mutable pixel slice.
+        unsafe {
+            let ptr = pixels.as_mut_ptr().add(index).cast::<__m256i>();
+            let value = _mm256_loadu_si256(ptr);
+            let ag = _mm256_and_si256(value, ag_mask);
+            let high = _mm256_srli_epi32(_mm256_and_si256(value, high_mask), 16);
+            let low = _mm256_slli_epi32(_mm256_and_si256(value, low_mask), 16);
+            let swapped = _mm256_or_si256(ag, _mm256_or_si256(high, low));
+            _mm256_storeu_si256(ptr, swapped);
+        }
+        index += 8;
+    }
+    for pixel in &mut pixels[index..] {
+        let high = (*pixel >> 16) & 0xFF;
+        let low = *pixel & 0xFF;
+        *pixel = (*pixel & 0xFF00_FF00) | (low << 16) | high;
+    }
 }
 
 fn u32_to_rgba8888(pixel: u32) -> [u8; 4] {
@@ -4069,8 +5115,10 @@ mod tests {
     fn headless_test_frame(output_id: &str, generation: u64, frame_id: u64) -> FramePublication {
         FramePublication {
             frame_id,
+            commit_id: frame_id,
             output_id: output_id.into(),
             output_generation: generation,
+            scene_epoch: 1,
             scene_generation: 9,
             geometry: OutputGeometry {
                 output_id: output_id.into(),
@@ -4291,10 +5339,7 @@ mod tests {
             output_generation: 1,
         });
         apply_backend_output_events(&mut state, &mut backend).unwrap();
-        assert_eq!(
-            state.reconciliation_state,
-            DisplayReconciliationState::ReconciledAwaitingPresentation
-        );
+        assert_eq!(state.reconciliation_state, DisplayReconciliationState::Recovering);
         assert_eq!(state.outputs["eDP-1"].published_frame_id, 0);
         assert_eq!(state.outputs["eDP-1"].pending_damage.len(), 1);
 
@@ -4304,11 +5349,13 @@ mod tests {
     }
 
     #[test]
-    fn restart_rejects_duplicate_and_backward_epochs() {
+    fn restart_rejects_backward_epochs_and_accepts_current_reconciliation_epoch() {
         let mut state = DisplayState::new_test();
-        assert!(state.begin_restart(1).is_err());
+        assert!(state.begin_restart(1).is_ok());
+        assert_eq!(state.reconciliation_state, DisplayReconciliationState::Recovering);
         state.begin_restart(2).unwrap();
         assert!(state.begin_restart(2).is_ok());
+        assert!(state.begin_restart(1).is_err());
     }
 
     #[test]
@@ -4354,8 +5401,13 @@ mod tests {
         state.outputs.insert("a".into(), right.clone());
         state.outputs.insert("b".into(), right);
         state.outputs.get_mut("a").unwrap().published_frame_id = 3;
-        state.outputs.get_mut("b").unwrap().retry =
-            Some(OutputRetryState { scene_generation: 8, output_generation: 1, frame_id: 1 });
+        state.outputs.get_mut("b").unwrap().retry = Some(OutputRetryState {
+            scene_epoch: 1,
+            scene_generation: 8,
+            output_generation: 1,
+            frame_id: 1,
+            commit_id: 1,
+        });
         let readiness = readiness_from_state(&state, true);
         assert_eq!(readiness.outputs[0].state, OutputReadinessState::Ready);
         assert_eq!(readiness.outputs[1].state, OutputReadinessState::RetryPending);
@@ -4377,8 +5429,10 @@ mod tests {
         };
         let frame = FramePublication {
             frame_id: 1,
+            commit_id: 1,
             output_id: "eDP-1".into(),
             output_generation: runtime.state.generation,
+            scene_epoch: 1,
             scene_generation: 4,
             geometry: OutputGeometry {
                 output_id: "eDP-1".into(),
@@ -4411,7 +5465,7 @@ mod tests {
         );
         assert_eq!(
             complete_presentation(&mut state, token, PresentationCompletion::Presented),
-            PresentationCompletion::Presented
+            PresentationCompletion::UnknownToken
         );
     }
 
@@ -6097,7 +7151,7 @@ exit 0
     #[tokio::test]
     async fn non_tight_stride_partial_row_copy_uses_source_stride() {
         let mut state = DisplayState::new_test();
-        let handle = test_handle(1, "surface-1", 1, 1);
+        let handle = test_handle(1, "surface-1", 1, 2);
         let mut surface = test_surface("surface-1", 0, 0, 3, 2, 1, Some(handle.clone()));
         surface.damage_rects = vec![waybroker_common::Rect { x: 1, y: 1, width: 1, height: 1 }];
         ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
@@ -6133,9 +7187,9 @@ exit 0
     #[tokio::test]
     async fn non_tight_stride_alpha_partial_copy_blends_from_source_stride() {
         let mut state = DisplayState::new_test();
-        let bottom_handle = test_handle(1, "bottom", 1, 1);
+        let bottom_handle = test_handle(1, "bottom", 1, 2);
         let bottom = test_surface("bottom", 0, 0, 3, 2, 1, Some(bottom_handle.clone()));
-        let handle = test_handle(2, "surface-1", 1, 1);
+        let handle = test_handle(2, "surface-1", 1, 2);
         let mut surface = test_surface("surface-1", 0, 0, 3, 2, 2, Some(handle.clone()));
         surface.damage_rects = vec![waybroker_common::Rect { x: 1, y: 1, width: 1, height: 1 }];
         ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
@@ -6216,7 +7270,9 @@ exit 0
     #[tokio::test]
     async fn translucent_overlap_uses_canonical_back_to_front_order() {
         let mut state = DisplayState::new_test();
-        let bottom_handle = test_handle(1, "bottom", 1, 1);
+        let first_bottom_handle = test_handle(1, "bottom", 1, 1);
+        let bottom_handle = test_handle(1, "bottom", 1, 2);
+        let first_bottom = test_surface("bottom", 0, 0, 2, 2, 1, Some(first_bottom_handle.clone()));
         let bottom = test_surface("bottom", 0, 0, 2, 2, 1, Some(bottom_handle.clone()));
         let top_handle = test_handle(2, "top", 1, 2);
         let mut top = test_surface("top", 0, 0, 2, 2, 2, Some(top_handle.clone()));
@@ -6225,8 +7281,8 @@ exit 0
         assert!(matches!(
             commit_test_scene(
                 &mut state,
-                vec![bottom.clone()],
-                vec![test_payload(bottom_handle.clone(), vec![0x000000FF; 4], 2, 2, 8)],
+                vec![first_bottom],
+                vec![test_payload(first_bottom_handle, vec![0x000000FF; 4], 2, 2, 8)],
                 1
             )
             .await,
@@ -6664,8 +7720,10 @@ exit 0
         backend
             .publish_frame(FramePublication {
                 frame_id: 1,
+                commit_id: 1,
                 output_id: "test".into(),
                 output_generation: 1,
+                scene_epoch: 1,
                 scene_generation: 1,
                 geometry: OutputGeometry {
                     output_id: "test".into(),
@@ -6798,5 +7856,668 @@ exit 0
         assert_eq!(retry.publications().len(), 1);
         assert_eq!(retry.publications()[0].output_id, "right");
         assert_eq!(state.outputs["eDP-1"].published_frame_id, 1);
+    }
+}
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    fn completion_surface(
+        id: &str,
+        scene_generation: u64,
+        buffer_generation: u64,
+    ) -> waybroker_common::SurfaceSnapshot {
+        waybroker_common::SurfaceSnapshot {
+            id: id.into(),
+            app_id: "completion.app".into(),
+            placement: waybroker_common::SurfacePlacement {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+                z: 1,
+                visible: true,
+            },
+            buffer_generation,
+            pixel_transport: (buffer_generation != 0).then(|| {
+                waybroker_common::PixelTransportHandle {
+                    client_id: 1,
+                    surface_id: id.into(),
+                    buffer_generation,
+                    scene_generation,
+                }
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn completion_payload(
+        id: &str,
+        scene_generation: u64,
+        buffer_generation: u64,
+        pixel: u32,
+    ) -> PixelTransportPayload {
+        let mut pixels = Vec::with_capacity(16);
+        for _ in 0..4 {
+            pixels.extend_from_slice(&pixel.to_le_bytes());
+        }
+        PixelTransportPayload {
+            handle: waybroker_common::PixelTransportHandle {
+                client_id: 1,
+                surface_id: id.into(),
+                buffer_generation,
+                scene_generation,
+            },
+            pixels,
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: WL_SHM_FORMAT_XRGB8888,
+        }
+    }
+
+    fn completion_frame(
+        output_id: &str,
+        output_generation: u64,
+        scene_epoch: u64,
+        scene_generation: u64,
+        commit_id: u64,
+        frame_id: u64,
+    ) -> FramePublication {
+        FramePublication {
+            frame_id,
+            commit_id,
+            output_id: output_id.into(),
+            output_generation,
+            scene_epoch,
+            scene_generation,
+            geometry: OutputGeometry {
+                output_id: output_id.into(),
+                width: 2,
+                height: 2,
+                stride: 8,
+                format: WL_SHM_FORMAT_XRGB8888,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation,
+            },
+            format: WL_SHM_FORMAT_XRGB8888,
+            stride: 8,
+            pixels: std::sync::Arc::from(vec![0xFF11_2233; 4]),
+            damage: vec![RendererRect { x0: 0, y0: 0, x1: 2, y1: 2 }],
+        }
+    }
+
+    fn completion_token(frame: &FramePublication, backend_instance_id: u64) -> PresentationToken {
+        PresentationToken {
+            backend_instance_id,
+            sequence: frame.frame_id.max(1),
+            output_id: frame.output_id.clone(),
+            output_generation: frame.output_generation,
+            scene_generation: frame.scene_generation,
+            frame_id: frame.frame_id,
+        }
+    }
+
+    #[test]
+    fn completion_scene_admission_rejects_surface_exhaustion() {
+        let surfaces: Vec<_> = (0..=MAX_SCENE_SURFACES)
+            .map(|index| waybroker_common::SurfaceSnapshot {
+                id: format!("surface-{index}"),
+                ..Default::default()
+            })
+            .collect();
+        let result = validate_scene_admission(
+            &waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            &waybroker_common::FocusTarget::None,
+            &waybroker_common::WaylandSelectionState::default(),
+            &surfaces,
+            &[],
+            1,
+            1,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn completion_scene_admission_rejects_payload_size_mismatch() {
+        let surface = completion_surface("surface-1", 1, 1);
+        let mut payload = completion_payload("surface-1", 1, 1, 0x0011_2233);
+        payload.pixels.pop();
+        let result = validate_scene_admission(
+            &waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            &waybroker_common::FocusTarget::None,
+            &waybroker_common::WaylandSelectionState::default(),
+            &[surface],
+            &[payload],
+            1,
+            1,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn completion_pixel_store_transaction_is_atomic_on_missing_payload() {
+        let mut store = DisplayPixelTransportStore::default();
+        let current = completion_payload("surface-1", 1, 1, 0x0001_0203);
+        let current_handle = current.handle.clone();
+        store.submit(current).unwrap();
+        let next_surface = completion_surface("surface-1", 2, 2);
+        assert!(store.prepared_for_scene(&[next_surface], &[]).is_err());
+        assert!(store.lookup(&current_handle).is_some());
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn completion_pixel_store_prunes_unreachable_payloads() {
+        let mut store = DisplayPixelTransportStore::default();
+        let first = completion_payload("surface-1", 1, 1, 0x0001_0203);
+        let second = PixelTransportPayload {
+            handle: waybroker_common::PixelTransportHandle {
+                client_id: 2,
+                surface_id: "surface-2".into(),
+                buffer_generation: 1,
+                scene_generation: 1,
+            },
+            pixels: vec![0; 16],
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: WL_SHM_FORMAT_XRGB8888,
+        };
+        let second_handle = second.handle.clone();
+        store.submit(first).unwrap();
+        store.submit(second).unwrap();
+        let surface = waybroker_common::SurfaceSnapshot {
+            id: "surface-2".into(),
+            placement: waybroker_common::SurfacePlacement {
+                width: 2,
+                height: 2,
+                visible: true,
+                ..Default::default()
+            },
+            buffer_generation: 1,
+            pixel_transport: Some(second_handle.clone()),
+            ..Default::default()
+        };
+        let prepared = store.prepared_for_scene(&[surface], &[]).unwrap();
+        assert_eq!(prepared.len(), 1);
+        assert!(prepared.lookup(&second_handle).is_some());
+        assert_eq!(prepared.total_bytes(), 16);
+    }
+
+    #[test]
+    fn completion_scene_version_rejects_old_epoch() {
+        assert!(scene_version_is_stale(7, 90, 6, 10_000));
+        assert!(scene_version_is_stale(7, 90, 7, 89));
+        assert!(!scene_version_is_stale(7, 90, 7, 90));
+        assert!(!scene_version_is_stale(7, 90, 8, 1));
+    }
+
+    #[test]
+    fn completion_xrgb_copy_matches_portable_semantics() {
+        let words: Vec<u32> = (0..129).map(|index| index as u32 * 0x0001_0101).collect();
+        let mut src = Vec::with_capacity(words.len() * 4);
+        for word in &words {
+            src.extend_from_slice(&word.to_le_bytes());
+        }
+        let mut dst = vec![0u32; words.len()];
+        copy_xrgb_row(&mut dst, &src).unwrap();
+        for (actual, expected) in dst.iter().zip(words) {
+            assert_eq!(*actual, 0xFF00_0000 | (expected & 0x00FF_FFFF));
+        }
+    }
+
+    #[test]
+    fn completion_screenshot_refine_matches_scalar_semantics() {
+        let mut pixels: Vec<u32> = (0..129)
+            .map(|index| 0xAA00_0000 | ((index as u32 & 0xFF) << 16) | 0x0000_0055)
+            .collect();
+        let expected: Vec<u32> = pixels
+            .iter()
+            .map(|pixel| {
+                let high = (*pixel >> 16) & 0xFF;
+                let low = *pixel & 0xFF;
+                (*pixel & 0xFF00_FF00) | (low << 16) | high
+            })
+            .collect();
+        refine_screenshot_pixels_accel(&mut pixels);
+        assert_eq!(pixels, expected);
+    }
+
+    #[test]
+    fn completion_output_geometry_rejects_resource_exhaustion() {
+        let geometry = OutputGeometry {
+            output_id: "huge".into(),
+            width: MAX_OUTPUT_DIMENSION + 1,
+            height: 1,
+            stride: (MAX_OUTPUT_DIMENSION + 1) * 4,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 1,
+        };
+        assert!(OutputState::validate(&geometry).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_headless_pending_submissions_are_bounded() {
+        let mut backend = HeadlessShmDisplayBackend::default();
+        for frame_id in 1..=MAX_HEADLESS_PENDING_SUBMISSIONS as u64 {
+            backend
+                .submit_frame(completion_frame("headless", 1, 1, 1, frame_id, frame_id))
+                .unwrap();
+        }
+        assert!(backend.submit_frame(completion_frame("headless", 1, 1, 1, 999, 999)).is_err());
+    }
+
+    #[test]
+    fn completion_headless_inventory_exists_before_first_frame() {
+        let mut backend = HeadlessShmDisplayBackend::new_with_instance_id(9);
+        backend.queue_connected_output(OutputGeometry {
+            output_id: "headless-0".into(),
+            width: 64,
+            height: 32,
+            stride: 256,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 1,
+        });
+        let outputs = backend.enumerate_outputs().unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].name, "headless-0");
+        assert!(backend.capture_published("headless-0").unwrap().is_none());
+    }
+
+    #[test]
+    fn completion_stale_backend_token_preflight_is_non_mutating() {
+        let mut state = DisplayState::new_test();
+        let runtime = state.outputs.get_mut("eDP-1").unwrap();
+        runtime.backend_instance_id = 7;
+        let frame = completion_frame("eDP-1", runtime.state.generation, 1, 1, 1, 1);
+        let token = completion_token(&frame, 7);
+        runtime.outstanding = Some(OutstandingPresentation { token: token.clone(), frame });
+        let stale = PresentationToken { backend_instance_id: 6, ..token };
+        assert_eq!(
+            preflight_presentation_token(&state, &stale),
+            Err(PresentationCompletion::StaleGeneration)
+        );
+        assert!(state.outputs["eDP-1"].outstanding.is_some());
+    }
+
+    #[test]
+    fn completion_duplicate_presentation_does_not_complete_twice() {
+        let mut state = DisplayState::new_test();
+        let generation = state.outputs["eDP-1"].state.generation;
+        let frame = completion_frame("eDP-1", generation, 1, 1, 1, 1);
+        let token = completion_token(&frame, MOCK_BACKEND_INSTANCE_ID);
+        state.outputs.get_mut("eDP-1").unwrap().outstanding =
+            Some(OutstandingPresentation { token: token.clone(), frame });
+        assert_eq!(
+            complete_presentation(&mut state, token.clone(), PresentationCompletion::Presented),
+            PresentationCompletion::Presented
+        );
+        assert_eq!(
+            complete_presentation(&mut state, token, PresentationCompletion::Presented),
+            PresentationCompletion::UnknownToken
+        );
+    }
+
+    #[test]
+    fn completion_newer_pending_damage_survives_older_completion() {
+        let mut state = DisplayState::new_test();
+        let generation = state.outputs["eDP-1"].state.generation;
+        let frame = completion_frame("eDP-1", generation, 1, 1, 1, 1);
+        let token = completion_token(&frame, MOCK_BACKEND_INSTANCE_ID);
+        let runtime = state.outputs.get_mut("eDP-1").unwrap();
+        runtime.outstanding = Some(OutstandingPresentation { token: token.clone(), frame });
+        runtime.pending_scene_epoch = 1;
+        runtime.pending_scene_generation = 2;
+        runtime.pending_commit_id = 2;
+        runtime.pending_damage = vec![RendererRect { x0: 0, y0: 0, x1: 1, y1: 1 }];
+        assert_eq!(
+            complete_presentation(&mut state, token, PresentationCompletion::Presented),
+            PresentationCompletion::Presented
+        );
+        assert!(!state.outputs["eDP-1"].pending_damage.is_empty());
+        assert_eq!(state.outputs["eDP-1"].pending_commit_id, 2);
+    }
+
+    #[test]
+    fn completion_feedback_exists_only_after_presented_completion() {
+        let mut state = DisplayState::new_test();
+        let generation = state.outputs["eDP-1"].state.generation;
+        let frame = completion_frame("eDP-1", generation, 1, 1, 11, 1);
+        let token = completion_token(&frame, MOCK_BACKEND_INSTANCE_ID);
+        state.presentation_obligations.insert(
+            11,
+            PresentationObligation {
+                scene_epoch: 1,
+                scene_generation: 1,
+                required_outputs: BTreeSet::from(["eDP-1".to_string()]),
+                presented_outputs: BTreeSet::new(),
+            },
+        );
+        state.outputs.get_mut("eDP-1").unwrap().outstanding =
+            Some(OutstandingPresentation { token: token.clone(), frame });
+        assert!(!state.presentation_feedbacks.contains_key(&11));
+        assert_eq!(
+            complete_presentation(&mut state, token, PresentationCompletion::Presented),
+            PresentationCompletion::Presented
+        );
+        assert!(matches!(
+            state.presentation_feedbacks.get(&11),
+            Some(DisplayEvent::FramePresented { commit_id: 11, .. })
+        ));
+    }
+
+    #[test]
+    fn completion_newer_presentation_resolves_older_obligation() {
+        let mut state = DisplayState::new_test();
+        state.presentation_obligations.insert(
+            7,
+            PresentationObligation {
+                scene_epoch: 2,
+                scene_generation: 3,
+                required_outputs: BTreeSet::from(["eDP-1".to_string()]),
+                presented_outputs: BTreeSet::new(),
+            },
+        );
+        let frame = completion_frame("eDP-1", 0, 2, 4, 8, 2);
+        note_presented_obligations(&mut state, &frame, "eDP-1", 16_666_667, 2);
+        assert!(state.presentation_feedbacks.contains_key(&7));
+        assert!(!state.presentation_obligations.contains_key(&7));
+    }
+
+    #[test]
+    fn completion_feedback_history_is_bounded() {
+        let mut state = DisplayState::new_test();
+        for commit_id in 1..=(MAX_PRESENTATION_FEEDBACKS as u64 + 17) {
+            insert_bounded_feedback(
+                &mut state,
+                commit_id,
+                DisplayEvent::FramePresented {
+                    commit_id,
+                    timestamp: commit_id,
+                    refresh_ns: 1,
+                    seq: commit_id,
+                    flags: 0,
+                },
+            );
+        }
+        assert_eq!(state.presentation_feedbacks.len(), MAX_PRESENTATION_FEEDBACKS);
+        assert!(!state.presentation_feedbacks.contains_key(&1));
+    }
+
+    #[test]
+    fn completion_retry_state_is_generation_scoped() {
+        let mut state = DisplayState::new_test();
+        let runtime = state.outputs.get_mut("eDP-1").unwrap();
+        runtime.pending_scene_epoch = 2;
+        runtime.pending_scene_generation = 2;
+        runtime.pending_commit_id = 2;
+        runtime.pending_damage = vec![RendererRect { x0: 0, y0: 0, x1: 1, y1: 1 }];
+        runtime.retry = Some(OutputRetryState {
+            scene_epoch: 1,
+            scene_generation: 1,
+            output_generation: runtime.state.generation,
+            frame_id: 1,
+            commit_id: 1,
+        });
+        let generation = runtime.state.generation;
+        let _ = advance_presentation(&mut state, "eDP-1", generation, 1_000, 1).unwrap();
+        assert!(state.outputs["eDP-1"].retry.is_none());
+    }
+
+    #[test]
+    fn completion_reconciliation_replay_reuses_commit_identity() {
+        let mut state = DisplayState::new_test();
+        let surface = completion_surface("surface-1", 9, 0);
+        state.last_scene_epoch = 4;
+        state.last_scene_generation = 9;
+        state.next_commit_id = 43;
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![surface.clone()],
+            scene_epoch: 4,
+            scene_generation: 9,
+            commit_id: 42,
+            unix_timestamp: 1,
+        });
+        state.reconciliation_state = DisplayReconciliationState::Recovering;
+        let config = Config::default();
+        let mut clock = FakePresentationClock;
+        let mut backend = MockDisplayBackend::default();
+        let event = handle_scene_acceptance(
+            waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            waybroker_common::FocusTarget::None,
+            waybroker_common::WaylandSelectionState::default(),
+            vec![surface],
+            vec![],
+            4,
+            9,
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            &mut clock,
+            &mut backend,
+        )
+        .unwrap();
+        assert!(matches!(event, DisplayEvent::SceneCommitted { commit_id: 42, .. }));
+        assert_eq!(state.next_commit_id, 43);
+    }
+
+    #[test]
+    fn completion_equal_generation_conflict_is_rejected() {
+        let mut state = DisplayState::new_test();
+        state.last_scene_epoch = 1;
+        state.last_scene_generation = 1;
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![],
+            scene_epoch: 1,
+            scene_generation: 1,
+            commit_id: 1,
+            unix_timestamp: 1,
+        });
+        let config = Config::default();
+        let mut clock = FakePresentationClock;
+        let mut backend = MockDisplayBackend::default();
+        let event = handle_scene_acceptance(
+            waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            waybroker_common::FocusTarget::None,
+            waybroker_common::WaylandSelectionState::default(),
+            vec![completion_surface("different-surface", 1, 0)],
+            vec![],
+            1,
+            1,
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            &mut clock,
+            &mut backend,
+        )
+        .unwrap();
+        assert!(matches!(event, DisplayEvent::Rejected { .. }));
+    }
+
+    #[test]
+    fn completion_presentation_obligation_budget_backpressures() {
+        let mut state = DisplayState::new_test();
+        for commit_id in 1..=MAX_PRESENTATION_OBLIGATIONS as u64 {
+            state.presentation_obligations.insert(
+                commit_id,
+                PresentationObligation {
+                    scene_epoch: 1,
+                    scene_generation: commit_id,
+                    required_outputs: BTreeSet::from(["eDP-1".to_string()]),
+                    presented_outputs: BTreeSet::new(),
+                },
+            );
+        }
+        let config = Config::default();
+        let mut clock = FakePresentationClock;
+        let mut backend = MockDisplayBackend::default();
+        let event = handle_scene_acceptance(
+            waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            waybroker_common::FocusTarget::None,
+            waybroker_common::WaylandSelectionState::default(),
+            vec![completion_surface("surface-1", 1, 0)],
+            vec![],
+            1,
+            1,
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            &mut clock,
+            &mut backend,
+        )
+        .unwrap();
+        assert!(matches!(event, DisplayEvent::Rejected { .. }));
+        assert!(state.last_scene.is_none());
+    }
+
+    #[test]
+    fn completion_backend_reconnect_rearms_latest_commit() {
+        let mut state = DisplayState::new_test();
+        state.outputs.clear();
+        state.display_epoch = 5;
+        state.last_scene_epoch = 3;
+        state.last_scene_generation = 8;
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "headless-0".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![],
+            scene_epoch: 3,
+            scene_generation: 8,
+            commit_id: 17,
+            unix_timestamp: 1,
+        });
+        let mut backend = MockDisplayBackend::default();
+        apply_backend_output_event(
+            &mut state,
+            &mut backend,
+            BackendOutputEvent::Connected {
+                backend_instance_id: 5,
+                backend_output_id: "headless-0".into(),
+                event_sequence: 1,
+                geometry: OutputGeometry {
+                    output_id: "headless-0".into(),
+                    width: 64,
+                    height: 32,
+                    stride: 256,
+                    format: WL_SHM_FORMAT_XRGB8888,
+                    origin_x: 0,
+                    origin_y: 0,
+                    output_generation: 1,
+                },
+                cadence: PresentationCadence { period_ns: 16_666_667 },
+            },
+        )
+        .unwrap();
+        assert_eq!(state.outputs["headless-0"].pending_scene_epoch, 3);
+        assert_eq!(state.outputs["headless-0"].pending_scene_generation, 8);
+        assert_eq!(state.outputs["headless-0"].pending_commit_id, 17);
+        assert_eq!(state.outputs["headless-0"].pending_damage.len(), 1);
+    }
+
+    #[test]
+    fn completion_headless_rejects_oversized_frame_before_allocation() {
+        let frame = FramePublication {
+            frame_id: 1,
+            commit_id: 1,
+            output_id: "huge".into(),
+            output_generation: 1,
+            scene_epoch: 1,
+            scene_generation: 1,
+            geometry: OutputGeometry {
+                output_id: "huge".into(),
+                width: 1,
+                height: u32::MAX,
+                stride: 4,
+                format: WL_SHM_FORMAT_XRGB8888,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation: 1,
+            },
+            format: WL_SHM_FORMAT_XRGB8888,
+            stride: 4,
+            pixels: std::sync::Arc::from(Vec::<u32>::new()),
+            damage: vec![],
+        };
+        assert!(HeadlessShmDisplayBackend::validate_frame(&frame).is_err());
+    }
+
+    #[test]
+    fn completion_metadata_only_recovery_can_be_hydrated_without_new_commit_id() {
+        let mut state = DisplayState::new_test();
+        let surface = completion_surface("surface-1", 9, 3);
+        state.last_scene_epoch = 4;
+        state.last_scene_generation = 9;
+        state.next_commit_id = 43;
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![surface.clone()],
+            scene_epoch: 4,
+            scene_generation: 9,
+            commit_id: 42,
+            unix_timestamp: 1,
+        });
+        state.reconciliation_state = DisplayReconciliationState::Recovering;
+        let config = Config::default();
+        let mut clock = FakePresentationClock;
+        let mut backend = MockDisplayBackend::default();
+
+        let recovered = handle_scene_acceptance(
+            waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            waybroker_common::FocusTarget::None,
+            waybroker_common::WaylandSelectionState::default(),
+            vec![surface.clone()],
+            vec![],
+            4,
+            9,
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            &mut clock,
+            &mut backend,
+        )
+        .unwrap();
+        assert!(matches!(recovered, DisplayEvent::SceneCommitted { commit_id: 42, .. }));
+        assert_eq!(state.pixel_transport.len(), 0);
+
+        state.reconciliation_state = DisplayReconciliationState::ReconciledAwaitingPresentation;
+        let payload = completion_payload("surface-1", 9, 3, 0x0011_2233);
+        let hydrated = handle_scene_acceptance(
+            waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            waybroker_common::FocusTarget::None,
+            waybroker_common::WaylandSelectionState::default(),
+            vec![surface.clone()],
+            vec![payload],
+            4,
+            9,
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            &mut clock,
+            &mut backend,
+        )
+        .unwrap();
+        assert!(matches!(hydrated, DisplayEvent::SceneCommitted { commit_id: 42, .. }));
+        assert!(state.pixel_transport.lookup(surface.pixel_transport.as_ref().unwrap()).is_some());
+        assert_eq!(state.next_commit_id, 43);
     }
 }
