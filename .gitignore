@@ -12,3 +12,6 @@
 *.qcow2
 *.raw
 *_OVMF_VARS.fd
+
+# Local ephemeral development helpers
+.scratch/
