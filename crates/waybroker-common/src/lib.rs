@@ -29,11 +29,14 @@ pub use profile::{
     SessionWatchdogComponentReport, SessionWatchdogReport,
 };
 pub use transport::{
-    ServiceEndpoint, ServiceListener, ServiceStream, bind_explicit_unix_socket,
-    bind_service_socket, connect_service_socket, ensure_runtime_dir, is_recoverable_accept_error,
-    read_json_line, runtime_dir, sanitize_artifact_filename, sanitize_session_instance_id,
-    send_json_line, service_socket_path, session_artifact_path, validate_artifact_filename,
-    validate_runtime_socket_path, validate_session_instance_id,
+    MAX_IPC_BINARY_ATTACHMENT_BYTES, MAX_IPC_BINARY_ATTACHMENTS, MAX_IPC_BINARY_TOTAL_BYTES,
+    MAX_IPC_FRAME_METADATA_BYTES, MAX_IPC_JSON_LINE_BYTES, ServiceEndpoint, ServiceListener,
+    ServiceStream, bind_explicit_unix_socket, bind_service_socket, connect_service_socket,
+    ensure_runtime_dir, is_recoverable_accept_error, read_ipc_envelope, read_json_line,
+    runtime_dir, sanitize_artifact_filename, sanitize_session_instance_id,
+    send_ipc_display_command, send_ipc_envelope, send_json_line, service_socket_path,
+    session_artifact_path, validate_artifact_filename, validate_runtime_socket_path,
+    validate_session_instance_id,
 };
 
 pub fn now_unix_timestamp() -> u64 {

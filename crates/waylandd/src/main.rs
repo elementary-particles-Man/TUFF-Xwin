@@ -15,7 +15,7 @@ use std::os::unix::{
 use anyhow::{Context, Result, bail};
 use byteorder::ByteOrder;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{
     LazyLock, Mutex,
     mpsc::{Receiver, SyncSender, sync_channel},
@@ -48,6 +48,9 @@ static TOPOLOGY_REGISTRY: LazyLock<(Mutex<TopologyRegistry>, std::sync::Condvar)
         )
     });
 static ACTIVE_TOPOLOGY_CONSUMERS: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_PRODUCTION_WAYLAND_CLIENTS: AtomicUsize = AtomicUsize::new(0);
+static SCENE_COMMIT_GATE: LazyLock<(Mutex<bool>, std::sync::Condvar)> =
+    LazyLock::new(|| (Mutex::new(false), std::sync::Condvar::new()));
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -69,7 +72,12 @@ const MAX_SCENE_SURFACES: usize = 4096;
 const MAX_SCENE_PIXEL_PAYLOADS: usize = MAX_SCENE_SURFACES;
 const MAX_SCENE_PIXEL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_SINGLE_PIXEL_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PENDING_FRAME_CALLBACKS: usize = 4096;
+const MAX_PRODUCTION_WAYLAND_CLIENTS: usize = 256;
+const MAX_PENDING_WAYLAND_FDS: usize = 64;
+const MAX_WAYLAND_CLIENT_RECEIVE_BYTES: usize = wayland_wire::codec::MAX_WIRE_MESSAGE_BYTES + 4096;
 const SIMD_COPY_THRESHOLD: usize = 512;
+const IPC_SCENE_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SceneResourceUsage {
@@ -108,19 +116,24 @@ fn validate_scene_budget(
         );
     }
 
-    let surface_handles = surfaces
-        .iter()
-        .filter_map(|surface| {
-            surface.pixel_transport.as_ref().map(|handle| {
-                (
-                    handle.client_id,
-                    handle.surface_id.clone(),
-                    handle.buffer_generation,
-                    handle.scene_generation,
-                )
-            })
-        })
-        .collect::<std::collections::BTreeSet<_>>();
+    let mut surface_ids = std::collections::BTreeSet::new();
+    let mut surface_handles = std::collections::BTreeSet::new();
+    for surface in surfaces {
+        if surface.id.is_empty() || !surface_ids.insert(surface.id.as_str()) {
+            bail!("scene contains empty or duplicate surface identity");
+        }
+        if let Some(handle) = surface.pixel_transport.as_ref() {
+            let key = (
+                handle.client_id,
+                handle.surface_id.clone(),
+                handle.buffer_generation,
+                handle.scene_generation,
+            );
+            if !surface_handles.insert(key) {
+                bail!("duplicate PixelTransport surface handle for {}", surface.id);
+            }
+        }
+    }
     let mut payload_handles = std::collections::BTreeSet::new();
 
     for payload in pixel_payloads {
@@ -165,6 +178,10 @@ fn validate_scene_budget(
         if !surface_handles.contains(&key) {
             bail!("orphan PixelTransport payload for {}", payload.handle.surface_id);
         }
+    }
+
+    if !surface_handles.is_subset(&payload_handles) {
+        bail!("canonical surface references PixelTransport payload that is not attached");
     }
 
     if usage.pixel_bytes > MAX_SCENE_PIXEL_BYTES {
@@ -271,7 +288,8 @@ use waybroker_common::{
     SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
     WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
     accel::global_accel_policy, bind_service_socket, connect_service_socket, ensure_runtime_dir,
-    now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
+    now_unix_timestamp, read_ipc_envelope, send_ipc_display_command, send_ipc_envelope,
+    session_artifact_path,
 };
 
 fn run_wire_headless_test() -> Result<()> {
@@ -711,6 +729,8 @@ async fn handle_client(
     config: &Config,
     session_instance_id: &str,
 ) -> Result<()> {
+    stream.set_read_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
     {
         if let Some(ref global) = *GLOBAL_REGISTRY.lock().unwrap() {
             *registry = global.clone();
@@ -718,13 +738,13 @@ async fn handle_client(
     }
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
-        read_json_line(&mut reader)?
+        read_ipc_envelope(&mut reader)?
     };
 
     let (response, registry_changed) =
         build_response(request, registry, ime_state, ime_backend, data_payloads, vulkan, config)
             .await;
-    send_json_line(&mut stream, &response)?;
+    send_ipc_envelope(&mut stream, &response)?;
     if registry_changed {
         {
             let mut global = GLOBAL_REGISTRY.lock().unwrap();
@@ -1022,10 +1042,10 @@ fn request_record_from_displayd(output: &str, fps: Option<u32>) -> Result<Displa
         ServiceRole::Displayd,
         MessageKind::DisplayCommand(command),
     );
-    send_json_line(&mut stream, &request)?;
+    send_ipc_envelope(&mut stream, &request)?;
 
     let mut reader = BufReader::new(stream.try_clone()?);
-    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    let response: IpcEnvelope = read_ipc_envelope(&mut reader)?;
 
     match response.kind {
         MessageKind::DisplayEvent(event) => Ok(event),
@@ -1070,10 +1090,10 @@ fn request_capture_from_displayd(output: &str) -> Result<DisplayEvent> {
         ServiceRole::Displayd,
         MessageKind::DisplayCommand(DisplayCommand::CaptureOutput { output: output.to_string() }),
     );
-    send_json_line(&mut stream, &request)?;
+    send_ipc_envelope(&mut stream, &request)?;
 
     let mut reader = BufReader::new(stream.try_clone()?);
-    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    let response: IpcEnvelope = read_ipc_envelope(&mut reader)?;
 
     if response.source != ServiceRole::Displayd {
         bail!("unexpected response source: {}", response.source.as_str());
@@ -1159,10 +1179,10 @@ fn query_output_inventory() -> Result<Vec<OutputMode>> {
         ServiceRole::Displayd,
         MessageKind::DisplayCommand(DisplayCommand::EnumerateOutputs),
     );
-    send_json_line(&mut stream, &request)?;
+    send_ipc_envelope(&mut stream, &request)?;
 
     let mut reader = BufReader::new(stream);
-    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    let response: IpcEnvelope = read_ipc_envelope(&mut reader)?;
 
     if response.source != ServiceRole::Displayd {
         bail!("unexpected response source: {}", response.source.as_str());
@@ -1189,9 +1209,9 @@ fn query_output_topology() -> Result<Vec<OutputTopologyEntry>> {
         ServiceRole::Displayd,
         MessageKind::DisplayCommand(DisplayCommand::GetOutputTopology),
     );
-    send_json_line(&mut stream, &request)?;
+    send_ipc_envelope(&mut stream, &request)?;
     let mut reader = BufReader::new(stream);
-    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    let response: IpcEnvelope = read_ipc_envelope(&mut reader)?;
     if response.source != ServiceRole::Displayd || response.destination != ServiceRole::Waylandd {
         bail!("invalid displayd topology response envelope");
     }
@@ -1211,9 +1231,9 @@ fn query_output_snapshot() -> Result<(u64, u64, Vec<OutputTopologyEntry>)> {
         ServiceRole::Displayd,
         MessageKind::DisplayCommand(DisplayCommand::GetOutputTopology),
     );
-    send_json_line(&mut stream, &request)?;
+    send_ipc_envelope(&mut stream, &request)?;
     let mut reader = BufReader::new(stream);
-    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    let response: IpcEnvelope = read_ipc_envelope(&mut reader)?;
     match response.kind {
         MessageKind::DisplayEvent(DisplayEvent::OutputTopology { epoch, sequence, outputs }) => {
             Ok((epoch, sequence, outputs))
@@ -1274,9 +1294,9 @@ fn start_topology_subscription() -> Result<()> {
         ServiceRole::Displayd,
         MessageKind::DisplayCommand(DisplayCommand::GetReconciliation),
     );
-    send_json_line(&mut stream, &request)?;
+    send_ipc_envelope(&mut stream, &request)?;
     let mut reader = BufReader::new(stream);
-    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    let response: IpcEnvelope = read_ipc_envelope(&mut reader)?;
     let epoch = match response.kind {
         MessageKind::DisplayEvent(DisplayEvent::Reconciliation { epoch, .. }) => epoch,
         other => bail!("unexpected displayd reconciliation response: {other:?}"),
@@ -1288,12 +1308,12 @@ fn start_topology_subscription() -> Result<()> {
         ServiceRole::Displayd,
         MessageKind::DisplayCommand(DisplayCommand::SubscribeOutputTopology { epoch, sequence: 0 }),
     );
-    send_json_line(&mut stream, &request)?;
+    send_ipc_envelope(&mut stream, &request)?;
     let mut reader = BufReader::new(stream);
     // Keep one bounded slot reserved for the terminal overflow marker.
     let (sender, receiver): (SyncSender<TopologyInput>, Receiver<TopologyInput>) =
         sync_channel(TOPOLOGY_QUEUE_CAPACITY + 1);
-    let initial: IpcEnvelope = read_json_line(&mut reader)?;
+    let initial: IpcEnvelope = read_ipc_envelope(&mut reader)?;
     if let MessageKind::DisplayEvent(event) = initial.kind {
         sender
             .try_send(TopologyInput::Event(event))
@@ -1304,7 +1324,7 @@ fn start_topology_subscription() -> Result<()> {
     *TOPOLOGY_SENDER.lock().unwrap() = Some(sender.clone());
     *TOPOLOGY_RECEIVER.lock().unwrap() = Some(receiver);
     std::thread::spawn(move || {
-        while let Ok(message) = read_json_line::<IpcEnvelope>(&mut reader) {
+        while let Ok(message) = read_ipc_envelope(&mut reader) {
             let event = match message.kind {
                 MessageKind::DisplayEvent(event) => event,
                 _ => break,
@@ -1956,7 +1976,52 @@ fn bind_single_wayland_display_socket_ext(
     Ok(WaylandDisplaySocket { path: path.to_path_buf(), lock_path: lock_path.to_path_buf() })
 }
 
+struct ProductionClientPermit;
+
+impl ProductionClientPermit {
+    fn acquire() -> Result<Self> {
+        let previous = ACTIVE_PRODUCTION_WAYLAND_CLIENTS.fetch_add(1, Ordering::AcqRel);
+        if previous >= MAX_PRODUCTION_WAYLAND_CLIENTS {
+            ACTIVE_PRODUCTION_WAYLAND_CLIENTS.fetch_sub(1, Ordering::AcqRel);
+            bail!("production Wayland client budget exhausted: {}", MAX_PRODUCTION_WAYLAND_CLIENTS);
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for ProductionClientPermit {
+    fn drop(&mut self) {
+        ACTIVE_PRODUCTION_WAYLAND_CLIENTS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct SceneCommitPermit;
+
+impl SceneCommitPermit {
+    fn acquire() -> Self {
+        let (lock, cvar) = &*SCENE_COMMIT_GATE;
+        let mut active = lock.lock().unwrap();
+        while *active {
+            active = cvar.wait(active).unwrap();
+        }
+        *active = true;
+        drop(active);
+        Self
+    }
+}
+
+impl Drop for SceneCommitPermit {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*SCENE_COMMIT_GATE;
+        if let Ok(mut active) = lock.lock() {
+            *active = false;
+            cvar.notify_one();
+        }
+    }
+}
+
 fn handle_production_client(stream: UnixStream, scene_epoch: u64) -> Result<()> {
+    let _client_permit = ProductionClientPermit::acquire()?;
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let (command_sender, command_receiver) = sync_channel(64);
     let _command_guard = ClientCommandGuard { client_id };
@@ -2028,6 +2093,15 @@ fn handle_production_client(stream: UnixStream, scene_epoch: u64) -> Result<()> 
         }
         buffer.extend_from_slice(&read_buf[..n]);
         received_fds.extend(fds);
+        if buffer.len() > MAX_WAYLAND_CLIENT_RECEIVE_BYTES {
+            bail!(
+                "Wayland client receive buffer exceeded {} bytes",
+                MAX_WAYLAND_CLIENT_RECEIVE_BYTES
+            );
+        }
+        if received_fds.len() > MAX_PENDING_WAYLAND_FDS {
+            bail!("Wayland client pending FD budget exceeded: {}", MAX_PENDING_WAYLAND_FDS);
+        }
 
         let mut consumed = 0;
         loop {
@@ -2226,6 +2300,9 @@ impl PendingFrameCallbacks {
                 "duplicate frame callback identity client={client_id} callback={}",
                 callback_id.0
             );
+        }
+        if self.callbacks.len() >= MAX_PENDING_FRAME_CALLBACKS {
+            bail!("pending frame callback budget exhausted: {}", MAX_PENDING_FRAME_CALLBACKS);
         }
         self.callbacks.insert(
             key,
@@ -2445,35 +2522,43 @@ fn stamp_scene_generation(
 
 fn replace_client_pixel_payloads(
     client_id: u64,
-    previous_surfaces: &[SurfaceSnapshot],
     payloads: Vec<PixelTransportPayload>,
 ) -> Result<()> {
     let mut store = PIXEL_TRANSPORT.lock().unwrap();
-    let rollback_payloads = previous_surfaces
-        .iter()
-        .filter_map(|surface| {
-            surface.pixel_transport.as_ref().and_then(|handle| store.lookup(handle).cloned())
-        })
-        .collect::<Vec<_>>();
 
-    store.invalidate_client(client_id);
-
-    for payload in payloads {
-        if let Err(err) = store.submit(payload) {
-            store.invalidate_client(client_id);
-            for rollback in rollback_payloads {
-                if let Err(rollback_err) = store.submit(rollback) {
-                    eprintln!(
-                        "service=waylandd op=pixel_transport_replace event=rollback_failed client_id={} reason={:?}",
-                        client_id, rollback_err
-                    );
-                }
-            }
-            bail!("PixelTransport replacement failed for client {client_id}: {err:?}");
-        }
+    let incoming_bytes = payloads.iter().try_fold(0usize, |total, payload| {
+        total
+            .checked_add(payload.pixels.len())
+            .ok_or_else(|| anyhow::anyhow!("PixelTransport replacement byte accounting overflow"))
+    })?;
+    let retained_other_bytes =
+        store.total_bytes().saturating_sub(store.bytes_for_client(client_id));
+    let next_total_bytes = retained_other_bytes
+        .checked_add(incoming_bytes)
+        .ok_or_else(|| anyhow::anyhow!("PixelTransport retained byte accounting overflow"))?;
+    if next_total_bytes > MAX_SCENE_PIXEL_BYTES {
+        bail!(
+            "retained PixelTransport byte budget exceeded: {} > {}",
+            next_total_bytes,
+            MAX_SCENE_PIXEL_BYTES
+        );
     }
 
-    Ok(())
+    let retained_other_count = store.len().saturating_sub(store.len_for_client(client_id));
+    let next_payload_count = retained_other_count
+        .checked_add(payloads.len())
+        .ok_or_else(|| anyhow::anyhow!("PixelTransport retained payload accounting overflow"))?;
+    if next_payload_count > MAX_SCENE_PIXEL_PAYLOADS {
+        bail!(
+            "retained PixelTransport payload budget exceeded: {} > {}",
+            next_payload_count,
+            MAX_SCENE_PIXEL_PAYLOADS
+        );
+    }
+
+    store
+        .replace_client(client_id, payloads)
+        .map_err(|err| anyhow::anyhow!("PixelTransport replacement failed: {err:?}"))
 }
 
 fn upsert_client_scene(
@@ -2490,8 +2575,27 @@ fn upsert_client_scene(
     // Replace this client's transport set before publishing the canonical
     // generation. No callback can therefore observe a new generation paired
     // with stale transport ownership.
-    let previous_surfaces = scene.clients.get(&client_id).cloned().unwrap_or_default();
-    replace_client_pixel_payloads(client_id, &previous_surfaces, payloads)?;
+    let other_surface_count = scene
+        .clients
+        .iter()
+        .filter(|(existing_client_id, _)| **existing_client_id != client_id)
+        .try_fold(0usize, |total, (_, existing_surfaces)| {
+            total
+                .checked_add(existing_surfaces.len())
+                .ok_or_else(|| anyhow::anyhow!("canonical surface accounting overflow"))
+        })?;
+    let next_surface_count = other_surface_count
+        .checked_add(surfaces.len())
+        .ok_or_else(|| anyhow::anyhow!("canonical surface accounting overflow"))?;
+    if next_surface_count > MAX_SCENE_SURFACES {
+        bail!(
+            "canonical scene surface budget exceeded: {} > {}",
+            next_surface_count,
+            MAX_SCENE_SURFACES
+        );
+    }
+
+    replace_client_pixel_payloads(client_id, payloads)?;
     scene.generation = scene_generation;
     scene.clients.insert(client_id, surfaces.clone());
 
@@ -2519,11 +2623,14 @@ struct CanonicalSceneState {
     generation: u64,
     clients: std::collections::BTreeMap<u64, Vec<SurfaceSnapshot>>,
     pending: Option<PendingCanonicalCommit>,
+    last_presented_generation: u64,
+    last_presentation: Option<DisplayEvent>,
 }
 
 struct PendingCanonicalCommit {
     generation: u64,
     surfaces: Vec<SurfaceSnapshot>,
+    #[cfg(test)]
     pixel_payloads: Vec<PixelTransportPayload>,
     reason: String,
 }
@@ -2566,7 +2673,15 @@ fn order_scene_surfaces(mut surfaces: Vec<SurfaceSnapshot>) -> Vec<SurfaceSnapsh
 }
 
 fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<DisplayEvent> {
+    // Only one canonical scene publication owns a large transport snapshot at a
+    // time. The permit is not a mutex guard and no mutex is held across IPC.
+    let _commit_permit = SceneCommitPermit::acquire();
+
     let (generation, surfaces, pixel_payloads) = {
+        // Snapshot canonical metadata and its exact generation-bound payloads
+        // under the same lock order used by upsert (scene -> PixelTransport).
+        // This prevents a concurrent client commit from invalidating payloads
+        // between metadata capture and transport resolution.
         let mut scene = CANONICAL_SCENE.lock().unwrap();
         if scene
             .pending
@@ -2576,25 +2691,30 @@ fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<Di
         {
             scene.pending = None;
         }
-        match pending_replay_commit(&scene) {
-            Some((generation, surfaces, pixel_payloads, reason)) => {
+
+        if scene.pending.is_none()
+            && scene.last_presented_generation >= scene.generation
+            && scene.last_presentation.is_some()
+        {
+            return Ok(scene.last_presentation.clone().expect("checked presentation cache"));
+        }
+
+        let (generation, surfaces) = match pending_replay_commit(&scene) {
+            Some((generation, surfaces, reason)) => {
                 eprintln!(
                     "service=waylandd op=canonical_recommit event=retry generation={} reason={}",
                     generation, reason
                 );
-                (generation, surfaces, pixel_payloads)
+                (generation, surfaces)
             }
-            None => {
-                let (generation, surfaces) = canonical_scene_surfaces_from(&scene);
-                (generation, surfaces, Vec::new())
-            }
-        }
+            None => canonical_scene_surfaces_from(&scene),
+        };
+
+        let store = PIXEL_TRANSPORT.lock().unwrap();
+        let pixel_payloads = resolve_pixel_payloads_for_surfaces_from_store(&store, &surfaces);
+        (generation, surfaces, pixel_payloads)
     };
-    let pixel_payloads = if pixel_payloads.is_empty() {
-        resolve_pixel_payloads_for_surfaces(&surfaces)
-    } else {
-        pixel_payloads
-    };
+
     let usage = validate_scene_budget(&surfaces, &pixel_payloads)?;
     if usage.pixel_payloads > 0 {
         println!(
@@ -2603,7 +2723,7 @@ fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<Di
         );
     }
 
-    match commit_production_scene(&surfaces, &pixel_payloads, generation, scene_epoch, outputs) {
+    match commit_production_scene(&surfaces, pixel_payloads, generation, scene_epoch, outputs) {
         Ok(event) => {
             let mut scene = CANONICAL_SCENE.lock().unwrap();
             if scene
@@ -2613,6 +2733,10 @@ fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<Di
                 .unwrap_or(false)
             {
                 scene.pending = None;
+            }
+            if generation >= scene.last_presented_generation {
+                scene.last_presented_generation = generation;
+                scene.last_presentation = Some(event.clone());
             }
             Ok(event)
         }
@@ -2631,7 +2755,8 @@ fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<Di
                     PendingCanonicalCommit {
                         generation,
                         surfaces,
-                        pixel_payloads,
+                        #[cfg(test)]
+                        pixel_payloads: Vec::new(),
                         reason: err.to_string(),
                     },
                 );
@@ -2643,20 +2768,16 @@ fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<Di
 
 fn pending_replay_commit(
     scene: &CanonicalSceneState,
-) -> Option<(u64, Vec<SurfaceSnapshot>, Vec<PixelTransportPayload>, String)> {
+) -> Option<(u64, Vec<SurfaceSnapshot>, String)> {
     let pending = scene.pending.as_ref()?;
-    (pending.generation >= scene.generation).then(|| {
-        (
-            pending.generation,
-            pending.surfaces.clone(),
-            pending.pixel_payloads.clone(),
-            pending.reason.clone(),
-        )
-    })
+    (pending.generation >= scene.generation)
+        .then(|| (pending.generation, pending.surfaces.clone(), pending.reason.clone()))
 }
 
-fn resolve_pixel_payloads_for_surfaces(surfaces: &[SurfaceSnapshot]) -> Vec<PixelTransportPayload> {
-    let store = PIXEL_TRANSPORT.lock().unwrap();
+fn resolve_pixel_payloads_for_surfaces_from_store(
+    store: &PixelTransportStore,
+    surfaces: &[SurfaceSnapshot],
+) -> Vec<PixelTransportPayload> {
     surfaces
         .iter()
         .filter_map(|surface| {
@@ -2722,45 +2843,45 @@ fn read_shm_buffer(
 
 fn commit_production_scene(
     surfaces: &[SurfaceSnapshot],
-    pixel_payloads: &[PixelTransportPayload],
+    pixel_payloads: Vec<PixelTransportPayload>,
     scene_generation: u64,
     scene_epoch: u64,
     outputs: &[OutputMode],
 ) -> Result<DisplayEvent> {
-    validate_scene_budget(surfaces, pixel_payloads)?;
+    validate_scene_budget(surfaces, &pixel_payloads)?;
     let mut stream =
         connect_service_socket(ServiceRole::Compd).context("production Wayland requires compd")?;
+    stream.set_read_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
     let output = outputs.first().context("displayd returned no output")?;
-    let request = IpcEnvelope::new(
-        ServiceRole::Waylandd,
-        ServiceRole::Compd,
-        MessageKind::DisplayCommand(DisplayCommand::CommitScene {
-            target: CommitTarget::Output { name: output.name.clone() },
-            focus: FocusTarget::None,
-            selection: WaylandSelectionState::default(),
-            surfaces: surfaces.to_vec(),
-            pixel_payloads: pixel_payloads.to_vec(),
-            scene_epoch,
-            scene_generation,
-        }),
-    );
-    send_json_line(&mut stream, &request)?;
+    let command = DisplayCommand::CommitScene {
+        target: CommitTarget::Output { name: output.name.clone() },
+        focus: FocusTarget::None,
+        selection: WaylandSelectionState::default(),
+        surfaces: surfaces.to_vec(),
+        pixel_payloads,
+        scene_epoch,
+        scene_generation,
+    };
+    send_ipc_display_command(&mut stream, ServiceRole::Waylandd, ServiceRole::Compd, &command)?;
     let mut reader = BufReader::new(stream);
-    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    let response: IpcEnvelope = read_ipc_envelope(&mut reader)?;
     let commit_id = match response.kind {
         MessageKind::DisplayEvent(DisplayEvent::SceneCommitted { commit_id, .. }) => commit_id,
         other => bail!("scene commit failed before presentation: {other:?}"),
     };
 
     let mut feedback_stream = connect_service_socket(ServiceRole::Compd)?;
+    feedback_stream.set_read_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
+    feedback_stream.set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
     let feedback_request = IpcEnvelope::new(
         ServiceRole::Waylandd,
         ServiceRole::Compd,
         MessageKind::DisplayCommand(DisplayCommand::GetPresentationFeedback { commit_id }),
     );
-    send_json_line(&mut feedback_stream, &feedback_request)?;
+    send_ipc_envelope(&mut feedback_stream, &feedback_request)?;
     let mut feedback_reader = BufReader::new(feedback_stream);
-    let feedback: IpcEnvelope = read_json_line(&mut feedback_reader)?;
+    let feedback: IpcEnvelope = read_ipc_envelope(&mut feedback_reader)?;
     match feedback.kind {
         MessageKind::DisplayEvent(event @ DisplayEvent::FramePresented { .. }) => Ok(event),
         other => bail!("scene commit did not reach presentation: {other:?}"),
@@ -3593,6 +3714,28 @@ mod tests {
     }
 
     #[test]
+    fn completion_waylandd_pending_frame_callbacks_are_bounded() {
+        let mut callbacks = PendingFrameCallbacks::default();
+        for id in 1..=super::MAX_PENDING_FRAME_CALLBACKS {
+            callbacks
+                .register(7, wayland_wire::WaylandObjectId(id as u32), 3, 11, vec!["eDP-1".into()])
+                .unwrap();
+        }
+        assert_eq!(callbacks.len(), super::MAX_PENDING_FRAME_CALLBACKS);
+        let error = callbacks
+            .register(
+                7,
+                wayland_wire::WaylandObjectId((super::MAX_PENDING_FRAME_CALLBACKS + 1) as u32),
+                3,
+                11,
+                vec!["eDP-1".into()],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("callback budget exhausted"));
+        assert_eq!(callbacks.len(), super::MAX_PENDING_FRAME_CALLBACKS);
+    }
+
+    #[test]
     fn frame_callback_cleanup_is_scoped_to_surface_and_client() {
         let mut callbacks = PendingFrameCallbacks::default();
         callbacks
@@ -3718,6 +3861,8 @@ mod tests {
             .into_iter()
             .collect(),
             pending: None,
+            last_presented_generation: 0,
+            last_presentation: None,
         };
 
         let (generation, surfaces) = super::canonical_scene_surfaces_from(&scene);
@@ -3734,7 +3879,7 @@ mod tests {
         let surface_id = wayland_wire::WaylandObjectId(3);
         let pool_id = wayland_wire::WaylandObjectId(4);
         let buffer_id = wayland_wire::WaylandObjectId(5);
-        core.shm.create_pool_from_fake(pool_id, 16);
+        core.shm.create_pool_from_fake(pool_id, 16).unwrap();
         core.shm.create_buffer(buffer_id, pool_id, 0, 2, 2, 8, 0).unwrap();
         core.surfaces.surfaces.insert(
             surface_id,
@@ -3767,20 +3912,12 @@ mod tests {
     }
 
     #[test]
-    fn pending_replay_carries_transport_payload_bundle_once() {
+    fn pending_replay_retains_metadata_without_pixel_byte_duplication() {
         let handle = waybroker_common::PixelTransportHandle {
             client_id: 7,
             surface_id: "client-7-surface-3".into(),
             buffer_generation: 3,
             scene_generation: 4,
-        };
-        let payload = waybroker_common::PixelTransportPayload {
-            handle: handle.clone(),
-            pixels: vec![0; 16],
-            width: 2,
-            height: 2,
-            stride: 8,
-            format: 1,
         };
         let scene = super::CanonicalSceneState {
             generation: 4,
@@ -3792,22 +3929,24 @@ mod tests {
                     pixel_transport: Some(handle),
                     ..Default::default()
                 }],
-                pixel_payloads: vec![payload],
+                #[cfg(test)]
+                pixel_payloads: Vec::new(),
                 reason: "displayd unavailable".into(),
             }),
+            ..Default::default()
         };
 
-        let (generation, surfaces, payloads, _) = super::pending_replay_commit(&scene).unwrap();
+        let (generation, surfaces, reason) = super::pending_replay_commit(&scene).unwrap();
 
         assert_eq!(generation, 4);
         assert_eq!(surfaces.len(), 1);
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0].handle.surface_id, surfaces[0].id);
-        assert_eq!(payloads[0].format, 1);
+        assert_eq!(surfaces[0].id, "client-7-surface-3");
+        assert_eq!(reason, "displayd unavailable");
+        assert!(std::mem::size_of::<super::PendingCanonicalCommit>() < 128);
     }
 
     #[test]
-    fn pending_replay_retains_surface_damage_with_payload_bundle() {
+    fn pending_replay_retains_surface_damage_metadata() {
         let handle = waybroker_common::PixelTransportHandle {
             client_id: 7,
             surface_id: "client-7-surface-3".into(),
@@ -3822,27 +3961,47 @@ mod tests {
                 generation: 4,
                 surfaces: vec![SurfaceSnapshot {
                     id: handle.surface_id.clone(),
-                    pixel_transport: Some(handle.clone()),
+                    pixel_transport: Some(handle),
                     damage_rects: vec![damage],
                     ..Default::default()
                 }],
-                pixel_payloads: vec![waybroker_common::PixelTransportPayload {
-                    handle,
-                    pixels: vec![0; 16],
-                    width: 2,
-                    height: 2,
-                    stride: 8,
-                    format: 0,
-                }],
+                #[cfg(test)]
+                pixel_payloads: Vec::new(),
                 reason: "displayd unavailable".into(),
             }),
+            ..Default::default()
         };
 
-        let (_, surfaces, payloads, _) = super::pending_replay_commit(&scene).unwrap();
+        let (_, surfaces, _) = super::pending_replay_commit(&scene).unwrap();
 
         assert_eq!(surfaces[0].damage_rects, vec![damage]);
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0].format, 0);
+    }
+
+    #[test]
+    fn completion_waylandd_10k_scene_storm_coalesces_to_latest_metadata_only() {
+        let mut scene = super::CanonicalSceneState::default();
+        for generation in 1..=10_000 {
+            super::coalesce_pending_commit(
+                &mut scene,
+                super::PendingCanonicalCommit {
+                    generation,
+                    surfaces: vec![SurfaceSnapshot {
+                        id: format!("surface-{generation}"),
+                        ..Default::default()
+                    }],
+                    #[cfg(test)]
+                    pixel_payloads: Vec::new(),
+                    reason: format!("deferred-{generation}"),
+                },
+            );
+        }
+
+        let pending = scene.pending.as_ref().expect("latest pending scene");
+        assert_eq!(pending.generation, 10_000);
+        assert_eq!(pending.surfaces.len(), 1);
+        assert_eq!(pending.surfaces[0].id, "surface-10000");
+        assert_eq!(pending.reason, "deferred-10000");
+        assert!(std::mem::size_of::<super::PendingCanonicalCommit>() < 128);
     }
 
     #[test]

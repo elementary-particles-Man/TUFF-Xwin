@@ -2,6 +2,9 @@ use crate::{core::HeadlessWireCore, Result, WireError};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
+const MAX_SERVER_RECEIVE_BYTES: usize = crate::codec::MAX_WIRE_MESSAGE_BYTES + 4096;
+const MAX_SERVER_PENDING_FDS: usize = 64;
+
 pub struct WireServerConfig {
     pub socket_path: PathBuf,
 }
@@ -45,6 +48,18 @@ impl WireServer {
             }
             buffer.extend_from_slice(&read_buf[..n]);
             self.received_fds.extend(fds);
+            if buffer.len() > MAX_SERVER_RECEIVE_BYTES {
+                return Err(WireError::ProtocolError(format!(
+                    "wire receive buffer exceeds {} bytes",
+                    MAX_SERVER_RECEIVE_BYTES
+                )));
+            }
+            if self.received_fds.len() > MAX_SERVER_PENDING_FDS {
+                return Err(WireError::ProtocolError(format!(
+                    "pending wire FD budget exceeds {}",
+                    MAX_SERVER_PENDING_FDS
+                )));
+            }
 
             let mut consumed = 0;
             loop {

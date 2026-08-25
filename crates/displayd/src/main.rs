@@ -27,8 +27,9 @@ use waybroker_common::{
     PresentationCadence, PresentationCompletion, PresentationSchedulerState, PresentationToken,
     ScenePublicationResult, ServiceBanner, ServiceEndpoint, ServiceReadiness,
     ServiceReadinessState, ServiceRole, ServiceStream, accel::global_accel_policy,
-    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
-    sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
+    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_ipc_envelope,
+    sanitize_artifact_filename, send_ipc_envelope, session_artifact_path,
+    validate_artifact_filename,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
@@ -48,6 +49,7 @@ const MAX_OUTPUT_FRAMEBUFFER_BYTES: usize = 512 * 1024 * 1024;
 const MAX_TOTAL_FRAMEBUFFER_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_HEADLESS_PENDING_SUBMISSIONS: usize = MAX_OUTPUTS;
 const MAX_SCENE_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_arch = "x86_64")]
 const SIMD_XRGB_MIN_PIXELS: usize = 64;
 
@@ -357,10 +359,12 @@ async fn handle_client(
     record_backend: &mut dyn RecordBackend,
     display_backend: &mut dyn DisplayBackend,
 ) -> Result<()> {
+    stream.set_read_timeout(Some(IPC_REQUEST_TIMEOUT))?;
+    stream.set_write_timeout(Some(IPC_REQUEST_TIMEOUT))?;
     apply_backend_output_events(state, display_backend)?;
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
-        read_json_line(&mut reader)?
+        read_ipc_envelope(&mut reader)?
     };
 
     if let MessageKind::DisplayCommand(DisplayCommand::SubscribeOutputTopology {
@@ -376,7 +380,7 @@ async fn handle_client(
                     reason: "topology subscription epoch or sequence mismatch".into(),
                 }),
             );
-            send_json_line(&mut stream, &response)?;
+            send_ipc_envelope(&mut stream, &response)?;
             return Ok(());
         }
         let subscriber_id = NEXT_TOPOLOGY_SUBSCRIBER_ID.fetch_add(1, Ordering::Relaxed);
@@ -392,7 +396,7 @@ async fn handle_client(
                         reason: "topology subscriber budget exhausted".into(),
                     }),
                 );
-                send_json_line(&mut stream, &response)?;
+                send_ipc_envelope(&mut stream, &response)?;
                 return Ok(());
             }
             subscribers.push((subscriber_id, sender));
@@ -402,10 +406,10 @@ async fn handle_client(
             request.source,
             MessageKind::DisplayEvent(initial),
         );
-        send_json_line(&mut stream, &response)?;
+        send_ipc_envelope(&mut stream, &response)?;
         std::thread::spawn(move || {
             for message in receiver {
-                if send_json_line(&mut stream, &message).is_err() {
+                if send_ipc_envelope(&mut stream, &message).is_err() {
                     break;
                 }
             }
@@ -427,7 +431,7 @@ async fn handle_client(
         display_backend,
     )
     .await?;
-    send_json_line(&mut stream, &response)?;
+    send_ipc_envelope(&mut stream, &response)?;
     Ok(())
 }
 

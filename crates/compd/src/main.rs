@@ -17,7 +17,7 @@ use waybroker_common::{
     SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
     WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
     accel::global_accel_policy, bind_service_socket, connect_service_socket,
-    is_recoverable_accept_error, read_json_line, send_json_line,
+    is_recoverable_accept_error, read_ipc_envelope, send_ipc_display_command, send_ipc_envelope,
 };
 
 const MAX_RELAY_SURFACES: usize = 4096;
@@ -25,6 +25,7 @@ const MAX_RELAY_PIXEL_PAYLOADS: usize = 4096;
 const MAX_RELAY_PIXEL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_RELAY_SINGLE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 const DISPLAY_RECONNECT_RETRY_LIMIT: u8 = 3;
+const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RelayResourceUsage {
@@ -44,6 +45,7 @@ impl RelayScene {
         (self.scene.scene_epoch, self.scene.scene_generation)
     }
 
+    #[cfg(test)]
     fn to_commit_command(&self) -> DisplayCommand {
         DisplayCommand::CommitScene {
             target: CommitTarget::Output { name: self.scene.target_output.clone() },
@@ -56,7 +58,19 @@ impl RelayScene {
         }
     }
 
-    fn to_reconcile_command(&self, display_epoch: u64) -> DisplayCommand {
+    fn take_commit_command(&mut self) -> DisplayCommand {
+        DisplayCommand::CommitScene {
+            target: CommitTarget::Output { name: self.scene.target_output.clone() },
+            focus: self.scene.focus.clone(),
+            selection: self.scene.selection.clone(),
+            surfaces: self.scene.surfaces.clone(),
+            pixel_payloads: std::mem::take(&mut self.pixel_payloads),
+            scene_epoch: self.scene.scene_epoch,
+            scene_generation: self.scene.scene_generation,
+        }
+    }
+
+    fn take_reconcile_command(&mut self, display_epoch: u64) -> DisplayCommand {
         DisplayCommand::ReconcileScene {
             epoch: display_epoch,
             scene_epoch: self.scene.scene_epoch,
@@ -65,8 +79,16 @@ impl RelayScene {
             focus: self.scene.focus.clone(),
             selection: self.scene.selection.clone(),
             surfaces: self.scene.surfaces.clone(),
-            pixel_payloads: self.pixel_payloads.clone(),
+            pixel_payloads: std::mem::take(&mut self.pixel_payloads),
         }
+    }
+
+    fn restore_payloads_from_command(&mut self, command: DisplayCommand) {
+        self.pixel_payloads = match command {
+            DisplayCommand::CommitScene { pixel_payloads, .. }
+            | DisplayCommand::ReconcileScene { pixel_payloads, .. } => pixel_payloads,
+            _ => Vec::new(),
+        };
     }
 }
 
@@ -717,13 +739,15 @@ fn handle_client(
     config: &Config,
     relay_state: &mut CompdRelayState,
 ) -> Result<()> {
+    stream.set_read_timeout(Some(IPC_REQUEST_TIMEOUT))?;
+    stream.set_write_timeout(Some(IPC_REQUEST_TIMEOUT))?;
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
-        read_json_line(&mut reader)?
+        read_ipc_envelope(&mut reader)?
     };
 
     let response = build_response(request, config, relay_state);
-    send_json_line(&mut stream, &response)?;
+    send_ipc_envelope(&mut stream, &response)?;
     Ok(())
 }
 
@@ -780,14 +804,11 @@ fn build_response(
 fn send_display_command(command: &DisplayCommand) -> Result<DisplayEvent> {
     let mut stream = connect_service_socket(ServiceRole::Displayd)
         .context("compd could not connect to displayd")?;
-    let request = IpcEnvelope::new(
-        ServiceRole::Compd,
-        ServiceRole::Displayd,
-        MessageKind::DisplayCommand(command.clone()),
-    );
-    send_json_line(&mut stream, &request)?;
+    stream.set_read_timeout(Some(IPC_REQUEST_TIMEOUT))?;
+    stream.set_write_timeout(Some(IPC_REQUEST_TIMEOUT))?;
+    send_ipc_display_command(&mut stream, ServiceRole::Compd, ServiceRole::Displayd, command)?;
     let mut reader = BufReader::new(stream);
-    let response: IpcEnvelope = read_json_line(&mut reader)?;
+    let response: IpcEnvelope = read_ipc_envelope(&mut reader)?;
     if response.source != ServiceRole::Displayd {
         bail!("displayd returned response from {}", response.source.as_str());
     }
@@ -904,8 +925,10 @@ fn forward_display_command(
                 usage.pixel_bytes
             );
 
-            let direct_command = relay.to_commit_command();
-            match send_display_command(&direct_command) {
+            let direct_command = relay.take_commit_command();
+            let direct_result = send_display_command(&direct_command);
+            relay.restore_payloads_from_command(direct_command);
+            match direct_result {
                 Ok(event @ DisplayEvent::SceneCommitted { .. }) => {
                     relay_state.note_forwarded(&relay);
                     mark_display_connected(0);
@@ -922,7 +945,7 @@ fn forward_display_command(
                 Ok(other) => bail!("displayd returned unexpected scene response: {other:?}"),
                 Err(transport_error) => {
                     mark_display_disconnected();
-                    match reconcile_relay_scene_to_displayd(&relay) {
+                    match reconcile_relay_scene_to_displayd(&mut relay) {
                         Ok(receipt) => {
                             relay_state.note_forwarded(&relay);
                             Ok(scene_committed_event(&relay, receipt))
@@ -978,7 +1001,10 @@ fn forward_display_command(
                     ),
                 });
             }
-            match send_display_command(&relay.to_reconcile_command(epoch)) {
+            let reconcile_command = relay.take_reconcile_command(epoch);
+            let reconcile_result = send_display_command(&reconcile_command);
+            relay.restore_payloads_from_command(reconcile_command);
+            match reconcile_result {
                 Ok(event @ DisplayEvent::Reconciled { .. }) => {
                     relay_state.note_forwarded(&relay);
                     Ok(event)
@@ -1097,10 +1123,12 @@ struct SceneCommitReceipt {
 }
 
 fn commit_scene_to_displayd(scene: &CompdScene) -> Result<SceneCommitReceipt> {
-    let relay = RelayScene { scene: scene.clone(), pixel_payloads: Vec::new() };
+    let mut relay = RelayScene { scene: scene.clone(), pixel_payloads: Vec::new() };
     validate_relay_scene(&relay, false)?;
-    let command = relay.to_commit_command();
-    match send_display_command(&command) {
+    let command = relay.take_commit_command();
+    let result = send_display_command(&command);
+    relay.restore_payloads_from_command(command);
+    match result {
         Ok(DisplayEvent::SceneCommitted { surface_count, commit_id, .. }) => {
             mark_display_connected(0);
             Ok(SceneCommitReceipt { surface_count, commit_id })
@@ -1115,7 +1143,7 @@ fn commit_scene_to_displayd(scene: &CompdScene) -> Result<SceneCommitReceipt> {
         Ok(other) => bail!("unexpected displayd response: {other:?}"),
         Err(err) => {
             mark_display_disconnected();
-            reconcile_relay_scene_to_displayd(&relay).map_err(|reconcile_err| {
+            reconcile_relay_scene_to_displayd(&mut relay).map_err(|reconcile_err| {
                 anyhow::anyhow!(
                     "displayd transport lost ({err}); reconciliation failed: {reconcile_err}"
                 )
@@ -1168,7 +1196,7 @@ fn reconciliation_commit_id(
     Ok(snapshot.commit_id)
 }
 
-fn reconcile_relay_scene_to_displayd(relay: &RelayScene) -> Result<SceneCommitReceipt> {
+fn reconcile_relay_scene_to_displayd(relay: &mut RelayScene) -> Result<SceneCommitReceipt> {
     let mut last_error = None;
 
     for attempt in 1..=DISPLAY_RECONNECT_RETRY_LIMIT {
@@ -1211,7 +1239,10 @@ fn reconcile_relay_scene_to_displayd(relay: &RelayScene) -> Result<SceneCommitRe
             }
         }
 
-        let event = match send_display_command(&relay.to_reconcile_command(epoch)) {
+        let reconcile_command = relay.take_reconcile_command(epoch);
+        let reconcile_result = send_display_command(&reconcile_command);
+        relay.restore_payloads_from_command(reconcile_command);
+        let event = match reconcile_result {
             Ok(event) => event,
             Err(err) => {
                 if let Ok(Some(receipt)) = matching_snapshot_receipt(relay) {
@@ -1276,12 +1307,12 @@ fn query_surface_registry_from_waylandd() -> Result<SurfaceRegistrySnapshot> {
         ServiceRole::Waylandd,
         MessageKind::WaylandCommand(WaylandCommand::GetSurfaceRegistry),
     );
-    send_json_line(&mut stream, &request)
+    send_ipc_envelope(&mut stream, &request)
         .context("failed to query surface registry from waylandd")?;
 
     let mut reader = BufReader::new(stream);
     let response: IpcEnvelope =
-        read_json_line(&mut reader).context("failed to read surface registry from waylandd")?;
+        read_ipc_envelope(&mut reader).context("failed to read surface registry from waylandd")?;
 
     if response.source != ServiceRole::Waylandd {
         bail!("unexpected response source: {}", response.source.as_str());
@@ -1313,12 +1344,12 @@ fn send_selection_handoff_to_waylandd(
             handoff: WaylandSelectionHandoff { focus: focus.clone(), selection: selection.clone() },
         }),
     );
-    send_json_line(&mut stream, &request)
+    send_ipc_envelope(&mut stream, &request)
         .context("failed to send selection handoff to waylandd")?;
 
     let mut reader = BufReader::new(stream);
     let response: IpcEnvelope =
-        read_json_line(&mut reader).context("failed to read selection handoff response")?;
+        read_ipc_envelope(&mut reader).context("failed to read selection handoff response")?;
 
     if response.source != ServiceRole::Waylandd {
         bail!("unexpected response source: {}", response.source.as_str());
@@ -2494,5 +2525,22 @@ mod tests {
         relay.scene.surfaces[0].placement.width = 2;
         let error = super::validate_relay_scene(&relay, true).unwrap_err();
         assert!(error.to_string().contains("placement overflows"));
+    }
+
+    #[test]
+    fn completion_compd_10k_scene_storm_retains_only_latest_pending_marker() {
+        let mut state = super::CompdRelayState::default();
+        for generation in 1..=10_000 {
+            let relay = completion_relay_scene(generation);
+            state.defer_latest(&relay, format!("deferred-{generation}"));
+        }
+
+        let pending = state.pending.as_ref().expect("latest pending scene");
+        assert_eq!(pending.version, (1, 10_000));
+        assert_eq!(pending.reason, "deferred-10000");
+        assert_eq!(pending.usage.pixel_bytes, 16);
+        assert_eq!(state.deferred_count, 10_000);
+        assert_eq!(state.superseded_count, 9_999);
+        assert!(std::mem::size_of::<super::PendingRelayScene>() <= 128);
     }
 }

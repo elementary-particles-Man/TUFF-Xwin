@@ -26,6 +26,11 @@ use crate::{
 };
 use byteorder::{ByteOrder, LittleEndian};
 
+const MAX_CLIENT_SURFACES: usize = 4096;
+const MAX_CLIENT_REGIONS: usize = 4096;
+const MAX_CLIENT_PENDING_DAMAGE_RECTS: usize = 4096;
+const MAX_CLIENT_FRAME_CALLBACKS: usize = 4096;
+
 #[derive(Clone)]
 pub struct WireGlobal {
     pub name: u32,
@@ -861,6 +866,11 @@ impl HeadlessWireCore {
             return Err(WireError::Incomplete);
         }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        if !self.surfaces.surfaces.contains_key(&id)
+            && self.surfaces.surfaces.len() >= MAX_CLIENT_SURFACES
+        {
+            return Err(WireError::ProtocolError("wl_surface resource budget exhausted".into()));
+        }
         self.registry.register_client_object(id, "wl_surface", 4)?;
         self.surfaces.create_surface(id);
         Ok(())
@@ -871,6 +881,11 @@ impl HeadlessWireCore {
             return Err(WireError::Incomplete);
         }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        if !self.surfaces.regions.contains_key(&id)
+            && self.surfaces.regions.len() >= MAX_CLIENT_REGIONS
+        {
+            return Err(WireError::ProtocolError("wl_region resource budget exhausted".into()));
+        }
         self.registry.register_client_object(id, "wl_region", 1)?;
         self.surfaces.create_region(id);
         Ok(())
@@ -934,6 +949,17 @@ impl HeadlessWireCore {
         let y = LittleEndian::read_i32(&message.payload[4..8]);
         let width = LittleEndian::read_u32(&message.payload[8..12]);
         let height = LittleEndian::read_u32(&message.payload[12..16]);
+        let pending_damage_count = self
+            .surfaces
+            .surfaces
+            .values()
+            .try_fold(0usize, |total, surface| total.checked_add(surface.pending.damage.len()))
+            .ok_or_else(|| WireError::ProtocolError("damage accounting overflow".into()))?;
+        if pending_damage_count >= MAX_CLIENT_PENDING_DAMAGE_RECTS {
+            return Err(WireError::ProtocolError(
+                "wl_surface pending damage budget exhausted".into(),
+            ));
+        }
         if let Some(surface) = self.surfaces.surfaces.get_mut(&message.header.object_id) {
             surface.pending.damage.push(Rect { x, y, width, height });
         }
@@ -945,6 +971,17 @@ impl HeadlessWireCore {
             return Err(WireError::Incomplete);
         }
         let callback_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
+        let callback_count = self
+            .surfaces
+            .surfaces
+            .values()
+            .try_fold(0usize, |total, surface| total.checked_add(surface.callbacks.len()))
+            .ok_or_else(|| WireError::ProtocolError("frame callback accounting overflow".into()))?;
+        if callback_count >= MAX_CLIENT_FRAME_CALLBACKS {
+            return Err(WireError::ProtocolError(
+                "wl_surface frame callback budget exhausted".into(),
+            ));
+        }
         self.registry.register_client_object(callback_id, "wl_callback", 1)?;
         if let Some(surface) = self.surfaces.surfaces.get_mut(&message.header.object_id) {
             surface.callbacks.push(callback_id);
@@ -1061,21 +1098,27 @@ impl HeadlessWireCore {
 
         self.registry.register_client_object(id, "wl_shm_pool", 1)?;
 
-        // Find FD arg
-        for arg in args {
-            if let crate::WireArg::AncillaryFd = arg {
-                if !fd_queue.is_empty() {
-                    let fd = fd_queue.remove(0);
-                    self.shm.create_pool_from_fd(id, fd, size);
+        // Keep the object registry and SHM ownership transactional. A malformed
+        // pool request must not leave a registered wl_shm_pool behind.
+        let create_result = (|| {
+            for arg in args {
+                if let crate::WireArg::AncillaryFd = arg {
+                    if !fd_queue.is_empty() {
+                        let fd = fd_queue.remove(0);
+                        self.shm.create_pool_from_fd(id, fd, size)?;
+                        return Ok(());
+                    }
+                } else if let crate::WireArg::Fd(_) = arg {
+                    self.shm.create_pool_from_fake(id, size)?;
                     return Ok(());
                 }
-            } else if let crate::WireArg::Fd(_) = arg {
-                self.shm.create_pool_from_fake(id, size);
-                return Ok(());
             }
+            Err(WireError::ProtocolError("missing FD for wl_shm.create_pool".into()))
+        })();
+        if create_result.is_err() {
+            let _ = self.registry.destroy_object(id);
         }
-
-        Err(WireError::ProtocolError("missing FD for wl_shm.create_pool".into()))
+        create_result
     }
 
     fn handle_shm_pool_create_buffer(&mut self, message: WaylandMessage) -> Result<()> {
@@ -1090,7 +1133,19 @@ impl HeadlessWireCore {
         let format = LittleEndian::read_u32(&message.payload[20..24]);
 
         self.registry.register_client_object(id, "wl_buffer", 1)?;
-        self.shm.create_buffer(id, message.header.object_id, offset, width, height, stride, format)
+        let create_result = self.shm.create_buffer(
+            id,
+            message.header.object_id,
+            offset,
+            width,
+            height,
+            stride,
+            format,
+        );
+        if create_result.is_err() {
+            let _ = self.registry.destroy_object(id);
+        }
+        create_result
     }
 
     fn send_shm_formats(&mut self, shm_id: WaylandObjectId) {
@@ -1204,6 +1259,44 @@ mod tests {
         assert_eq!(res.events.len(), 2);
         assert_eq!(res.events[0].header.object_id.0, 13);
         assert_eq!(res.events[1].header.object_id.0, 12);
+    }
+
+    #[test]
+    fn completion_wire_scene_input_resources_are_bounded_before_growth() {
+        let mut core = HeadlessWireCore::default();
+        let surface_id = WaylandObjectId(90);
+        core.surfaces.surfaces.insert(
+            surface_id,
+            crate::surface::SurfaceInstance {
+                pending: crate::surface::SurfaceState {
+                    damage: vec![
+                        crate::surface::Rect { x: 0, y: 0, width: 1, height: 1 };
+                        MAX_CLIENT_PENDING_DAMAGE_RECTS
+                    ],
+                    ..Default::default()
+                },
+                current: Default::default(),
+                callbacks: (0..MAX_CLIENT_FRAME_CALLBACKS)
+                    .map(|index| WaylandObjectId(10_000 + index as u32))
+                    .collect(),
+            },
+        );
+
+        let mut damage = vec![0u8; 16];
+        LittleEndian::write_i32(&mut damage[0..4], 0);
+        LittleEndian::write_i32(&mut damage[4..8], 0);
+        LittleEndian::write_u32(&mut damage[8..12], 1);
+        LittleEndian::write_u32(&mut damage[12..16], 1);
+        let damage_error = core
+            .handle_surface_damage(WaylandMessage::new(surface_id, WaylandOpcode(2), damage))
+            .unwrap_err();
+        assert!(matches!(damage_error, WireError::ProtocolError(_)));
+
+        let callback = 99_999u32.to_le_bytes().to_vec();
+        let callback_error = core
+            .handle_surface_frame(WaylandMessage::new(surface_id, WaylandOpcode(3), callback))
+            .unwrap_err();
+        assert!(matches!(callback_error, WireError::ProtocolError(_)));
     }
 }
 
