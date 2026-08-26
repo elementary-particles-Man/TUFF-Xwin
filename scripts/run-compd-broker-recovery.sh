@@ -13,6 +13,7 @@ target_dir="$(
     python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
 )/debug"
 profile_id="demo-wayland-compd-recovery"
+session_instance_id="${WAYBROKER_SESSION_INSTANCE_ID:-compd-broker-recovery}"
 displayd_pid=""
 waylandd_pid=""
 watchdog_pid=""
@@ -22,7 +23,7 @@ lock_path_artifact=""
 
 cleanup_launch_states() {
   local launch_state
-  for launch_state in "$WAYBROKER_RUNTIME_DIR"/launch-state-*.json; do
+  for launch_state in "$WAYBROKER_RUNTIME_DIR"/session-*-launch-state.json; do
     [[ -f "$launch_state" ]] || continue
     while read -r pid; do
       kill "$pid" 2>/dev/null || true
@@ -100,18 +101,18 @@ echo "==> Pre-building all packages..."
 cargo build --workspace
 
 echo "==> Starting displayd"
-"$target_dir/displayd" > "$WAYBROKER_RUNTIME_DIR/displayd.log" 2>&1 &
+"$target_dir/displayd" --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/displayd.log" 2>&1 &
 displayd_pid=$!
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/displayd.sock"
 
 echo "==> Starting waylandd registry broker"
-"$target_dir/waylandd" --serve-ipc --registry "$repo_root/examples/minimal-scene/surface-registry.json" \
+"$target_dir/waylandd" --serve-ipc --session-instance-id "$session_instance_id" --registry "$repo_root/examples/minimal-scene/surface-registry.json" \
   > "$WAYBROKER_RUNTIME_DIR/waylandd.log" 2>&1 &
 waylandd_pid=$!
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/waylandd.sock"
 
 echo "==> Starting watchdog"
-"$target_dir/watchdog" --serve-ipc > "$WAYBROKER_RUNTIME_DIR/watchdog.log" 2>&1 &
+"$target_dir/watchdog" --serve-ipc --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/watchdog.log" 2>&1 &
 watchdog_pid=$!
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/watchdog.sock"
 
@@ -125,10 +126,11 @@ echo "==> Priming displayd committed scene"
   --scene "$repo_root/examples/minimal-scene/scene.json" \
   --commit-demo \
   --require-displayd \
+  --session-instance-id "$session_instance_id" \
   > "$WAYBROKER_RUNTIME_DIR/compd-prime.log" 2>&1
 
-snapshot_file="$WAYBROKER_RUNTIME_DIR/displayd-last-scene.json"
-wayland_registry_file="$WAYBROKER_RUNTIME_DIR/waylandd-surface-registry.json"
+snapshot_file="$WAYBROKER_RUNTIME_DIR/session-${session_instance_id}-scene-snapshot.json"
+wayland_registry_file="$WAYBROKER_RUNTIME_DIR/session-${session_instance_id}-surface-registry.json"
 wait_for_file "$snapshot_file"
 rg -q '"id": "panel-1"' "$snapshot_file"
 wait_for_file "$wayland_registry_file"
@@ -137,12 +139,13 @@ rg -q '"clipboard_payload_id": "panel-clipboard-v1"' "$wayland_registry_file"
 rg -q '"clipboard_source_serial": 41' "$wayland_registry_file"
 
 echo "==> Selecting profile $profile_id"
-"$target_dir/sessiond" --select-profile "$profile_id" --write-selection > /dev/null
+"$target_dir/sessiond" --select-profile "$profile_id" --write-selection --session-instance-id "$session_instance_id" > /dev/null
 
 echo "==> Starting managed sessiond"
 managed_log="$WAYBROKER_RUNTIME_DIR/sessiond-managed.log"
-launch_state_file="$WAYBROKER_RUNTIME_DIR/launch-state-$profile_id.json"
+launch_state_file="$WAYBROKER_RUNTIME_DIR/session-${session_instance_id}-launch-state.json"
 "$target_dir/sessiond" --serve-ipc --manage-active --spawn-components --notify-watchdog \
+  --session-instance-id "$session_instance_id" \
   > "$managed_log" 2>&1 &
 sessiond_pid=$!
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/sessiond.sock"
@@ -161,10 +164,11 @@ fi
 
 echo "==> Triggering resume scenario: compd-trouble"
 "$target_dir/sessiond" --resume-scenario "compd-trouble" \
+  --session-instance-id "$session_instance_id" \
   > "$WAYBROKER_RUNTIME_DIR/resume-trigger.log" 2>&1
 
-execution_artifact="$WAYBROKER_RUNTIME_DIR/watchdog-action-execution-compd.json"
-lock_path_artifact="$WAYBROKER_RUNTIME_DIR/lock-ui-path-compd-trouble.json"
+execution_artifact="$WAYBROKER_RUNTIME_DIR/session-${session_instance_id}-watchdog-action-execution-compd.json"
+lock_path_artifact="$WAYBROKER_RUNTIME_DIR/session-${session_instance_id}-lock-ui-path-compd-trouble.json"
 wait_for_file "$execution_artifact"
 wait_for_file "$lock_path_artifact"
 

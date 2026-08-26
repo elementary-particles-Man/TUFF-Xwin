@@ -136,6 +136,10 @@ fn write_watchdog_execution_artifact(
     Ok(path)
 }
 
+fn watchdog_recovery_artifact_path(session_instance_id: &str, role: ServiceRole) -> PathBuf {
+    session_artifact_path(session_instance_id, &format!("watchdog-recovery-{}", role.as_str()))
+}
+
 fn main() -> Result<()> {
     let config = Config::from_args(env::args().skip(1))?;
     let profiles_dir = config.profiles_dir();
@@ -2113,14 +2117,13 @@ impl SessionSupervisor {
     }
 
     fn process_recovery_requests(&mut self, config: &Config) -> Result<bool> {
-        let runtime = ensure_runtime_dir()?;
         let mut executed_any = false;
 
         // Support roles
         let supported_roles = [ServiceRole::Compd, ServiceRole::Lockd];
 
         for role in supported_roles {
-            let recovery_path = runtime.join(format!("watchdog-recovery-{}.json", role.as_str()));
+            let recovery_path = watchdog_recovery_artifact_path(&self.session_instance_id, role);
             if !recovery_path.exists() {
                 continue;
             }
@@ -2627,6 +2630,19 @@ mod tests {
         SessionLaunchComponentState, SessionLaunchState, SessionWatchdogComponentReport,
         SessionWatchdogReport, WatchdogCommand,
     };
+
+    #[test]
+    fn recovery_request_path_is_session_scoped() {
+        let path = super::watchdog_recovery_artifact_path(
+            "role-scoped-recovery-execution",
+            ServiceRole::Compd,
+        );
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("session-role-scoped-recovery-execution-watchdog-recovery-compd.json")
+        );
+    }
 
     #[test]
     fn resolves_absolute_executable_path() {

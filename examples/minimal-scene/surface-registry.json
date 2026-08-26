@@ -4,14 +4,26 @@
     {
       "id": "terminal-1",
       "app_id": "org.kde.konsole",
-      "role": "toplevel",
+      "role": {
+        "type": "toplevel"
+      },
       "mapped": true,
       "buffer_attached": true
     },
     {
       "id": "panel-1",
       "app_id": "org.kde.plasma.panel",
-      "role": "layer",
+      "role": {
+        "type": "layer",
+        "layer": 0,
+        "anchor": 0,
+        "exclusive_zone": 0,
+        "margin_top": 0,
+        "margin_bottom": 0,
+        "margin_left": 0,
+        "margin_right": 0,
+        "keyboard_interactivity": 0
+      },
       "mapped": false,
       "buffer_attached": false
     }

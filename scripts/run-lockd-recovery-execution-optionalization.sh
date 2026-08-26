@@ -47,27 +47,42 @@ wait_for_socket() {
   sleep 0.1
 }
 
+wait_for_file() {
+  local path=$1
+  local timeout=${2:-10}
+  local count=0
+  while [[ ! -f "$path" ]]; do
+    if [[ $count -ge $((timeout * 10)) ]]; then
+      echo "FAILED: timeout waiting for file $path" >&2
+      return 1
+    fi
+    sleep 0.1
+    count=$((count + 1))
+  done
+}
+
 run_scenario() {
   local scenario=$1
   local profile_id=$2
   local expect_watchdog_request=$3
   local expect_execution_result=$4
+  local session_instance_id="lockd-recovery-${scenario}"
 
   echo
   echo "==> [Scenario: $scenario] (Profile: $profile_id)"
 
   # Pre-select profile
-  "$target_dir/sessiond" --select-profile "$profile_id" --write-selection > /dev/null
+  "$target_dir/sessiond" --select-profile "$profile_id" --write-selection --session-instance-id "$session_instance_id" > /dev/null
 
   # Start services
-  "$target_dir/displayd" > "$WAYBROKER_RUNTIME_DIR/displayd-$scenario.log" 2>&1 &
+  "$target_dir/displayd" --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/displayd-$scenario.log" 2>&1 &
   wait_for_socket "$WAYBROKER_RUNTIME_DIR/displayd.sock"
 
-  "$target_dir/watchdog" --serve-ipc > "$WAYBROKER_RUNTIME_DIR/watchdog-$scenario.log" 2>&1 &
+  "$target_dir/watchdog" --serve-ipc --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/watchdog-$scenario.log" 2>&1 &
   wait_for_socket "$WAYBROKER_RUNTIME_DIR/watchdog.sock"
 
   # Start sessiond in manage-active mode
-  "$target_dir/sessiond" --serve-ipc --manage-active --spawn-components --notify-watchdog > "$WAYBROKER_RUNTIME_DIR/sessiond-managed-$scenario.log" 2>&1 &
+  "$target_dir/sessiond" --serve-ipc --manage-active --spawn-components --notify-watchdog --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/sessiond-managed-$scenario.log" 2>&1 &
   wait_for_socket "$WAYBROKER_RUNTIME_DIR/sessiond.sock"
 
   # Inject faulty lockd
@@ -81,24 +96,17 @@ run_scenario() {
   pkill -u "$USER" -f "$target_dir/compd" || true
   sleep 0.5
   rm -f "$WAYBROKER_RUNTIME_DIR/compd.sock"
-  "$target_dir/compd" --serve-ipc > "$WAYBROKER_RUNTIME_DIR/compd-$scenario.log" 2>&1 &
+  "$target_dir/compd" --serve-ipc --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/compd-$scenario.log" 2>&1 &
   wait_for_socket "$WAYBROKER_RUNTIME_DIR/compd.sock"
 
   # Trigger resume failure on lockd
   echo "==> Triggering lockd resume failure..."
-  "$target_dir/sessiond" --resume-scenario "lockd-trouble" > "$WAYBROKER_RUNTIME_DIR/resume-trigger-$scenario.log" 2>&1
-
-  # Wait a bit for potential background execution
-  sleep 1.5
+  "$target_dir/sessiond" --resume-scenario "lockd-trouble" --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/resume-trigger-$scenario.log" 2>&1
 
   echo "==> Verifying artifacts..."
 
-  local lock_artifact_files=("$WAYBROKER_RUNTIME_DIR"/session-*-lock-ui-path-lockd-trouble.json)
-  local lock_artifact="${lock_artifact_files[0]:-}"
-  if [[ ! -f "$lock_artifact" ]]; then
-    echo "FAILED: Lock artifact not found"
-    exit 1
-  fi
+  local lock_artifact="$WAYBROKER_RUNTIME_DIR/session-${session_instance_id}-lock-ui-path-lockd-trouble.json"
+  wait_for_file "$lock_artifact" 10
 
   local actual_final_state=$(grep '"final_state":' "$lock_artifact" | cut -d'"' -f4)
   if [[ "$actual_final_state" != "blank-only" ]]; then
@@ -113,18 +121,14 @@ run_scenario() {
     exit 1
   fi
 
-  local exec_artifact_files=("$WAYBROKER_RUNTIME_DIR"/session-*-watchdog-action-execution-lockd.json)
-  local exec_artifact="${exec_artifact_files[0]:-}"
+  local exec_artifact="$WAYBROKER_RUNTIME_DIR/session-${session_instance_id}-watchdog-action-execution-lockd.json"
   if [[ "$expect_execution_result" == "none" ]]; then
     if [[ -f "$exec_artifact" ]]; then
       echo "FAILED: Execution artifact should not exist"
       exit 1
     fi
   else
-    if [[ ! -f "$exec_artifact" ]]; then
-      echo "FAILED: Execution artifact not found"
-      exit 1
-    fi
+    wait_for_file "$exec_artifact" 10
     local actual_exec_result=$(grep '"result":' "$exec_artifact" | cut -d'"' -f4)
     if [[ "$actual_exec_result" != "$expect_execution_result" ]]; then
       echo "FAILED: Expected execution result $expect_execution_result, got $actual_exec_result"
@@ -148,7 +152,8 @@ run_scenario "lockd-trouble-optin-enabled" "demo-x11-lockd-recovery-optin" "acce
 
 # 3. lockd-trouble-optin-missing-binding
 echo "==> [Scenario: lockd-trouble-optin-missing-binding]"
-cat << 'EOF' > "$WAYBROKER_RUNTIME_DIR/active-profile.json"
+missing_session_instance_id="lockd-recovery-optin-missing-binding"
+cat << 'EOF' > "$WAYBROKER_RUNTIME_DIR/session-${missing_session_instance_id}-active-profile.json"
 {
   "id": "demo-optin-missing",
   "display_name": "Demo Optin Missing Binding",
@@ -172,31 +177,25 @@ cat << 'EOF' > "$WAYBROKER_RUNTIME_DIR/active-profile.json"
 }
 EOF
 
-"$target_dir/displayd" > "$WAYBROKER_RUNTIME_DIR/displayd-missing.log" 2>&1 &
+"$target_dir/displayd" --session-instance-id "$missing_session_instance_id" > "$WAYBROKER_RUNTIME_DIR/displayd-missing.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/displayd.sock"
 
-"$target_dir/watchdog" --serve-ipc > "$WAYBROKER_RUNTIME_DIR/watchdog-missing.log" 2>&1 &
+"$target_dir/watchdog" --serve-ipc --session-instance-id "$missing_session_instance_id" > "$WAYBROKER_RUNTIME_DIR/watchdog-missing.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/watchdog.sock"
 
 "$target_dir/lockd" --serve-ipc --fail-resume > "$WAYBROKER_RUNTIME_DIR/lockd-missing.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/lockd.sock"
 
-"$target_dir/compd" --serve-ipc > "$WAYBROKER_RUNTIME_DIR/compd-missing.log" 2>&1 &
+"$target_dir/compd" --serve-ipc --session-instance-id "$missing_session_instance_id" > "$WAYBROKER_RUNTIME_DIR/compd-missing.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/compd.sock"
 
-"$target_dir/sessiond" --serve-ipc --manage-active > "$WAYBROKER_RUNTIME_DIR/sessiond-managed-missing.log" 2>&1 &
+"$target_dir/sessiond" --serve-ipc --manage-active --session-instance-id "$missing_session_instance_id" > "$WAYBROKER_RUNTIME_DIR/sessiond-managed-missing.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/sessiond.sock"
 
-"$target_dir/sessiond" --resume-scenario "lockd-trouble" > "$WAYBROKER_RUNTIME_DIR/resume-trigger-missing.log" 2>&1
+"$target_dir/sessiond" --resume-scenario "lockd-trouble" --session-instance-id "$missing_session_instance_id" > "$WAYBROKER_RUNTIME_DIR/resume-trigger-missing.log" 2>&1
 
-sleep 1.5
-
-exec_artifact_files=("$WAYBROKER_RUNTIME_DIR"/session-*-watchdog-action-execution-lockd.json)
-exec_artifact="${exec_artifact_files[0]:-}"
-if [[ ! -f "$exec_artifact" ]]; then
-  echo "FAILED: Execution artifact not found for missing binding"
-  exit 1
-fi
+exec_artifact="$WAYBROKER_RUNTIME_DIR/session-${missing_session_instance_id}-watchdog-action-execution-lockd.json"
+wait_for_file "$exec_artifact" 10
 actual_exec_result=$(grep '"result":' "$exec_artifact" | cut -d'"' -f4)
 if [[ "$actual_exec_result" != "no-executor" && "$actual_exec_result" != "config-error" ]]; then
   echo "FAILED: Expected execution result no-executor or config-error, got $actual_exec_result"
