@@ -16,19 +16,39 @@ jobs:
           command: check licenses advisories
 
   check:
+    name: authoritative validation
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      DISPLAY: ""
+      WAYLAND_DISPLAY: ""
+      XDG_RUNTIME_DIR: ${{ github.workspace }}/.ci-runtime
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install optional capture build dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libpipewire-0.3-dev
       - uses: Swatinem/rust-cache@v2
-      - name: Format
+      - name: Prepare isolated runtime directory
+        run: mkdir -p "$XDG_RUNTIME_DIR"
+      - name: Cargo format gate
+        timeout-minutes: 5
         run: cargo fmt --all --check
-      - name: Check
-        run: cargo check --workspace
-      - name: Test
-        run: cargo test --workspace
+      - name: Cargo check gate (warnings denied)
+        timeout-minutes: 15
+        run: RUSTFLAGS="-D warnings" cargo check --all-targets
+      - name: Cargo test gate
+        timeout-minutes: 15
+        run: cargo test --all-targets
+      - name: Cargo Clippy gate (warnings denied)
+        timeout-minutes: 15
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Repository dev-check gate
+        timeout-minutes: 15
+        run: bash scripts/dev-check.sh
       - name: Integration Smoke Test
         run: ./scripts/run-integration-smoke.sh
       - name: Resume Scenarios Smoke Test

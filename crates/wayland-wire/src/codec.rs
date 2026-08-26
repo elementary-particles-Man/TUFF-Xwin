@@ -168,7 +168,7 @@ mod tests {
     fn rejects_invalid_message_size() {
         let mut bytes = vec![0u8; 8];
         LittleEndian::write_u32(&mut bytes[0..4], 1);
-        LittleEndian::write_u32(&mut bytes[4..8], (4u32 << 16) | 0);
+        LittleEndian::write_u32(&mut bytes[4..8], 4u32 << 16);
         assert!(matches!(decode_message(&bytes), Err(WireError::InvalidSize(4))));
     }
 }

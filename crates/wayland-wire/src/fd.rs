@@ -1,6 +1,8 @@
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 
+const MAX_ANCILLARY_FDS: usize = 16;
+
 #[derive(Debug)]
 pub struct WireOwnedFd(pub OwnedFd);
 
@@ -23,23 +25,35 @@ pub fn send_with_fds(stream: &UnixStream, data: &[u8], fds: &[RawFd]) -> std::io
     msg.msg_iov = &mut io;
     msg.msg_iovlen = 1;
 
-    let mut control_buf = [0u8; 128]; // Enough for a few FDs
+    let mut control_buf = [0u8; 128]; // Bounded ancillary-data budget.
+    if fds.len() > MAX_ANCILLARY_FDS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "too many FDs for one Wayland message",
+        ));
+    }
     if !fds.is_empty() {
+        let required_control = unsafe { CMSG_SPACE(std::mem::size_of_val(fds) as u32) } as usize;
+        if required_control > control_buf.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "too many FDs for bounded Wayland ancillary buffer",
+            ));
+        }
         msg.msg_control = control_buf.as_mut_ptr() as *mut c_void;
-        msg.msg_controllen =
-            unsafe { CMSG_SPACE((fds.len() * std::mem::size_of::<RawFd>()) as u32) } as _;
+        msg.msg_controllen = required_control as _;
 
         let cmsg = unsafe { CMSG_FIRSTHDR(&msg) };
         if !cmsg.is_null() {
             unsafe {
                 (*cmsg).cmsg_level = SOL_SOCKET;
                 (*cmsg).cmsg_type = SCM_RIGHTS;
-                (*cmsg).cmsg_len = CMSG_LEN((fds.len() * std::mem::size_of::<RawFd>()) as u32) as _;
+                (*cmsg).cmsg_len = CMSG_LEN(std::mem::size_of_val(fds) as u32) as _;
                 let data_ptr = CMSG_DATA(cmsg);
                 ptr::copy_nonoverlapping(
                     fds.as_ptr() as *const u8,
                     data_ptr,
-                    fds.len() * std::mem::size_of::<RawFd>(),
+                    std::mem::size_of_val(fds),
                 );
             }
         }
@@ -59,7 +73,7 @@ pub fn recv_with_fds(
 ) -> std::io::Result<(usize, Vec<WireOwnedFd>)> {
     use libc::{
         c_void, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR,
-        SCM_RIGHTS, SOL_SOCKET,
+        MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
     };
     use std::mem;
 
@@ -77,24 +91,59 @@ pub fn recv_with_fds(
     if n < 0 {
         return Err(std::io::Error::last_os_error());
     }
+    let ancillary_truncated = msg.msg_flags & MSG_CTRUNC != 0;
 
     let mut received_fds = Vec::new();
     let mut cmsg = unsafe { CMSG_FIRSTHDR(&msg) };
     while !cmsg.is_null() {
         if unsafe { (*cmsg).cmsg_level == SOL_SOCKET && (*cmsg).cmsg_type == SCM_RIGHTS } {
             let data_ptr = unsafe { CMSG_DATA(cmsg) };
-            let len = unsafe { (*cmsg).cmsg_len } as usize - unsafe { CMSG_LEN(0) } as usize;
+            let header_len = unsafe { CMSG_LEN(0) } as usize;
+            let cmsg_len = unsafe { (*cmsg).cmsg_len } as usize;
+            if cmsg_len < header_len {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed Wayland ancillary FD header",
+                ));
+            }
+            let len = cmsg_len - header_len;
+            if !len.is_multiple_of(mem::size_of::<RawFd>()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "misaligned Wayland ancillary FD payload",
+                ));
+            }
             let count = len / mem::size_of::<RawFd>();
-
+            // Take ownership of every received descriptor before returning an
+            // error so malformed ancillary input cannot leak descriptors into
+            // the process. Dropping this temporary vector closes them.
+            let mut current = Vec::with_capacity(count.min(MAX_ANCILLARY_FDS + 1));
             unsafe {
                 let fds_ptr = data_ptr as *const RawFd;
                 for i in 0..count {
-                    let fd = fds_ptr.add(i).read();
-                    received_fds.push(WireOwnedFd::from_raw(fd));
+                    current.push(WireOwnedFd::from_raw(fds_ptr.add(i).read()));
                 }
             }
+            if count > MAX_ANCILLARY_FDS
+                || received_fds.len().saturating_add(count) > MAX_ANCILLARY_FDS
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "too many FDs in one Wayland ancillary message",
+                ));
+            }
+            received_fds.extend(current);
         }
         cmsg = unsafe { CMSG_NXTHDR(&msg, cmsg) };
+    }
+
+    if ancillary_truncated {
+        // received_fds owns every descriptor that fit in the bounded control
+        // buffer; dropping it on this error closes those descriptors.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "truncated Wayland ancillary FD data",
+        ));
     }
 
     Ok((n as usize, received_fds))
@@ -132,5 +181,13 @@ mod tests {
         assert_eq!(content, "hello fd");
 
         send_handle.join().unwrap();
+    }
+
+    #[test]
+    fn rejects_ancillary_fd_count_before_sendmsg() {
+        let (s1, _s2) = UnixStream::pair().unwrap();
+        let fds = [0; MAX_ANCILLARY_FDS + 1];
+        let error = send_with_fds(&s1, b"x", &fds).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

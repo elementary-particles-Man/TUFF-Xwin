@@ -1,5 +1,3 @@
-use crate::{Result, WaylandObjectId};
-
 pub trait ImeBackend: Send + Sync {
     fn handle_surrounding_text(&mut self, text: &str, cursor: i32, anchor: i32);
     fn handle_commit(&mut self) -> Vec<ImeRequest>;
@@ -12,6 +10,7 @@ pub enum ImeRequest {
     DeleteSurroundingText { before: u32, after: u32 },
 }
 
+#[derive(Default)]
 pub struct FakeImeBackend {
     pub last_text: String,
     pub requests: Vec<ImeRequest>,

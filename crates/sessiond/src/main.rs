@@ -136,6 +136,10 @@ fn write_watchdog_execution_artifact(
     Ok(path)
 }
 
+fn watchdog_recovery_artifact_path(session_instance_id: &str, role: ServiceRole) -> PathBuf {
+    session_artifact_path(session_instance_id, &format!("watchdog-recovery-{}", role.as_str()))
+}
+
 fn main() -> Result<()> {
     let config = Config::from_args(env::args().skip(1))?;
     let profiles_dir = config.profiles_dir();
@@ -258,11 +262,11 @@ fn main() -> Result<()> {
     }
 
     if config.resume_demo {
-        run_resume_scenario(&config, ResumeScenario::Normal, &session_instance_id)?;
+        run_resume_scenario(ResumeScenario::Normal, &session_instance_id)?;
     }
 
     if let Some(scenario) = config.resume_scenario {
-        run_resume_scenario(&config, scenario, &session_instance_id)?;
+        run_resume_scenario(scenario, &session_instance_id)?;
     }
 
     if config.serve_ipc {
@@ -521,10 +525,6 @@ fn active_profile_path(session_instance_id: &str) -> PathBuf {
     session_artifact_path(session_instance_id, "active-profile")
 }
 
-fn launch_state_path(session_instance_id: &str) -> PathBuf {
-    session_artifact_path(session_instance_id, "launch-state")
-}
-
 fn new_session_instance_id(profile_id: &str) -> String {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos();
     format!("{profile_id}-{}-{nonce}", std::process::id())
@@ -585,7 +585,7 @@ fn resolve_lockd_resume_binding(
     }
 
     if profile.protocol == waybroker_common::DesktopProtocol::WaylandNative
-        && profile.broker_services.iter().any(|service| *service == ServiceRole::Lockd)
+        && profile.broker_services.contains(&ServiceRole::Lockd)
     {
         return (
             None,
@@ -598,11 +598,7 @@ fn resolve_lockd_resume_binding(
     (None, "missing".into(), "missing".into(), "no lockd binding found".into())
 }
 
-fn run_resume_scenario(
-    config: &Config,
-    scenario: ResumeScenario,
-    session_instance_id: &str,
-) -> Result<()> {
+fn run_resume_scenario(scenario: ResumeScenario, session_instance_id: &str) -> Result<()> {
     println!(
         "service=sessiond op=resume_sequence event=begin scenario={} session_instance_id={}",
         scenario.as_str(),
@@ -1216,7 +1212,7 @@ fn run_resume_scenario(
     let lock_artifact = LockPathArtifact {
         scenario: scenario.as_str().into(),
         service: "lockd".into(),
-        binding_source: lockd_binding_source.into(),
+        binding_source: lockd_binding_source,
         bound_component_id: lockd_bound_id,
         component_role: ui_component_present.then_some("lockscreen".into()),
         ui_component_present,
@@ -1412,6 +1408,44 @@ fn handle_session_command(
             }
             Ok(SessionCommand::ReleaseIdle { reason })
         }
+        SessionCommand::SuspendRequested => {
+            if let Some(supervisor) = supervisor {
+                supervisor.is_suspended = true;
+                supervisor.suspend_count += 1;
+                println!(
+                    "service=sessiond op=suspend event=success reason=system_suspend suspend_count={}",
+                    supervisor.suspend_count
+                );
+            } else {
+                println!(
+                    "service=sessiond op=suspend event=skipped reason=\"no supervisor active\""
+                );
+            }
+            Ok(SessionCommand::SuspendRequested)
+        }
+        SessionCommand::ResumeHint { stage, output } => {
+            if let Some(supervisor) = supervisor {
+                supervisor.is_suspended = false;
+                println!(
+                    "service=sessiond op=resume event=success stage={:?} output={:?}",
+                    stage, output
+                );
+
+                if let Ok(mut displayd_stream) = connect_service_socket(ServiceRole::Displayd) {
+                    let resume_req = IpcEnvelope::new(
+                        ServiceRole::Sessiond,
+                        ServiceRole::Displayd,
+                        MessageKind::DisplayCommand(waybroker_common::DisplayCommand::ResumeBegin),
+                    );
+                    let _ = send_json_line(&mut displayd_stream, &resume_req);
+                }
+            } else {
+                println!(
+                    "service=sessiond op=resume event=skipped reason=\"no supervisor active\""
+                );
+            }
+            Ok(SessionCommand::ResumeHint { stage, output })
+        }
         other => Ok(SessionCommand::ProfileUnchanged {
             profile_id: "unknown".into(),
             reason: format!("sessiond IPC does not apply {other:?}"),
@@ -1509,7 +1543,15 @@ fn resolve_component_state(
 
     if spawn_components {
         if let Some(command_path) = state.resolved_command.as_ref() {
-            let child = Command::new(command_path)
+            let mut cmd = if command_path.ends_with(".sh") {
+                let mut c = Command::new("bash");
+                c.arg(command_path);
+                c
+            } else {
+                Command::new(command_path)
+            };
+
+            let child = cmd
                 .args(component.command.iter().skip(1))
                 .env("WAYBROKER_PROFILE_ID", profile_id)
                 .env("WAYBROKER_COMPONENT_ID", &component.id)
@@ -1942,6 +1984,8 @@ fn print_watchdog_stream_report(report: &SessionWatchdogReport) {
     );
 }
 
+// Keep the existing value-oriented internal outcome API; boxing would add churn without behavior benefit.
+#[allow(clippy::large_enum_variant)]
 enum WatchdogApplyOutcome {
     Transition { target_profile: DesktopProfile, transition: SessionProfileTransition },
     Unchanged { profile_id: String, reason: String },
@@ -2002,6 +2046,8 @@ struct SessionSupervisor {
     stream_sequence: u64,
     last_streamed_state: Option<SessionLaunchState>,
     idle_inhibitors: Vec<String>,
+    is_suspended: bool,
+    suspend_count: u32,
 }
 
 impl SessionSupervisor {
@@ -2037,6 +2083,8 @@ impl SessionSupervisor {
             stream_sequence: 0,
             last_streamed_state: None,
             idle_inhibitors: Vec::new(),
+            is_suspended: false,
+            suspend_count: 0,
         })
     }
 
@@ -2069,14 +2117,13 @@ impl SessionSupervisor {
     }
 
     fn process_recovery_requests(&mut self, config: &Config) -> Result<bool> {
-        let runtime = ensure_runtime_dir()?;
         let mut executed_any = false;
 
         // Support roles
         let supported_roles = [ServiceRole::Compd, ServiceRole::Lockd];
 
         for role in supported_roles {
-            let recovery_path = runtime.join(format!("watchdog-recovery-{}.json", role.as_str()));
+            let recovery_path = watchdog_recovery_artifact_path(&self.session_instance_id, role);
             if !recovery_path.exists() {
                 continue;
             }
@@ -2490,7 +2537,15 @@ impl RuntimeComponent {
             return Ok(());
         };
 
-        let child = Command::new(command_path)
+        let mut cmd = if command_path.ends_with(".sh") {
+            let mut c = Command::new("bash");
+            c.arg(command_path);
+            c
+        } else {
+            Command::new(command_path)
+        };
+
+        let child = cmd
             .args(self.component.command.iter().skip(1))
             .args(extra_args)
             .arg("--session-instance-id")
@@ -2575,6 +2630,19 @@ mod tests {
         SessionLaunchComponentState, SessionLaunchState, SessionWatchdogComponentReport,
         SessionWatchdogReport, WatchdogCommand,
     };
+
+    #[test]
+    fn recovery_request_path_is_session_scoped() {
+        let path = super::watchdog_recovery_artifact_path(
+            "role-scoped-recovery-execution",
+            ServiceRole::Compd,
+        );
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("session-role-scoped-recovery-execution-watchdog-recovery-compd.json")
+        );
+    }
 
     #[test]
     fn resolves_absolute_executable_path() {
@@ -2662,8 +2730,7 @@ mod tests {
             critical: true,
             launcher: waybroker_common::DesktopLauncher::RepoScript,
         };
-        let mut config = super::Config::default();
-        config.repo_root = Some(temp_dir.clone());
+        let config = super::Config { repo_root: Some(temp_dir.clone()), ..Default::default() };
 
         assert_eq!(resolve_command_path(&component, &config).as_deref(), Some(script.as_path()));
 
@@ -2770,8 +2837,9 @@ mod tests {
             unix_timestamp: 0,
         };
 
-        let outcome = apply_watchdog_report(&active_profile, &[active_profile.clone()], &report)
-            .expect("evaluate transition");
+        let outcome =
+            apply_watchdog_report(&active_profile, std::slice::from_ref(&active_profile), &report)
+                .expect("evaluate transition");
 
         match outcome {
             super::WatchdogApplyOutcome::Transition { .. } => {
@@ -3030,5 +3098,67 @@ mod tests {
         assert_eq!(binding_source, "missing");
         assert_eq!(result, "missing");
         assert_eq!(reason, "no lockd binding found");
+    }
+
+    #[test]
+    fn test_phase7_suspend_resume_lifecycle() {
+        let profile = DesktopProfile {
+            id: "demo-x11".into(),
+            display_name: "Demo X11".into(),
+            protocol: DesktopProtocol::LayerX11,
+            summary: "demo".into(),
+            degraded_profile_id: None,
+            broker_services: vec![ServiceRole::Sessiond],
+            session_components: vec![],
+            service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
+        };
+
+        let mut supervisor = super::SessionSupervisor {
+            profiles: vec![profile.clone()],
+            profile,
+            components: vec![],
+            session_instance_id: "test-session".into(),
+            stream_generation: 1,
+            stream_sequence: 1,
+            last_streamed_state: None,
+            idle_inhibitors: Vec::new(),
+            is_suspended: false,
+            suspend_count: 0,
+        };
+
+        let config = super::Config::default();
+
+        let res_suspend = super::handle_session_command(
+            waybroker_common::SessionCommand::SuspendRequested,
+            &[supervisor.profile.clone()],
+            &config,
+            Some(&mut supervisor),
+        )
+        .expect("handle suspend");
+
+        assert_eq!(res_suspend, waybroker_common::SessionCommand::SuspendRequested);
+        assert!(supervisor.is_suspended);
+        assert_eq!(supervisor.suspend_count, 1);
+
+        let res_resume = super::handle_session_command(
+            waybroker_common::SessionCommand::ResumeHint {
+                stage: waybroker_common::ResumeStage::Complete,
+                output: None,
+            },
+            &[supervisor.profile.clone()],
+            &config,
+            Some(&mut supervisor),
+        )
+        .expect("handle resume");
+
+        assert_eq!(
+            res_resume,
+            waybroker_common::SessionCommand::ResumeHint {
+                stage: waybroker_common::ResumeStage::Complete,
+                output: None,
+            }
+        );
+        assert!(!supervisor.is_suspended);
     }
 }

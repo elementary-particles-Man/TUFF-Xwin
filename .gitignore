@@ -14,3 +14,5 @@
 *_OVMF_VARS.fd
 /dir/
 
+# Local ephemeral development helpers
+.scratch/

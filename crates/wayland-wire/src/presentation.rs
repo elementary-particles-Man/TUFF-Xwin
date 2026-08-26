@@ -1,4 +1,4 @@
-use crate::{Result, WaylandObjectId, WireError};
+use crate::WaylandObjectId;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,6 +13,7 @@ impl PresentationClock for SystemPresentationClock {
     }
 }
 
+#[derive(Default)]
 pub struct PresentationManager {
     pub feedbacks: HashMap<WaylandObjectId, PresentationFeedbackState>,
 }

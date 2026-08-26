@@ -1,6 +1,7 @@
 use crate::{Result, WaylandObjectId, WireError};
 use std::collections::HashMap;
 
+#[derive(Default)]
 pub struct OutputManagementManager {
     pub heads: HashMap<WaylandObjectId, OutputHeadState>,
     pub modes: HashMap<WaylandObjectId, OutputModeState>,
@@ -76,10 +77,9 @@ impl OutputManagementManager {
     pub fn disable_head(
         &mut self,
         config_id: WaylandObjectId,
-        head_id: WaylandObjectId,
+        _head_id: WaylandObjectId,
     ) -> Result<()> {
-        let config =
-            self.configs.get_mut(&config_id).ok_or(WireError::InvalidObjectId(config_id.0))?;
+        self.configs.get(&config_id).ok_or(WireError::InvalidObjectId(config_id.0))?;
 
         // The protocol allows disabling without creating a config head object explicitly,
         // but for wire parity, we just record the intent. We'll add a dummy entry.

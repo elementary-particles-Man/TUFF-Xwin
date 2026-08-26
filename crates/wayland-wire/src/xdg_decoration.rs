@@ -7,6 +7,7 @@ pub enum DecorationMode {
     ServerSide = 2,
 }
 
+#[derive(Default)]
 pub struct XdgDecorationManager {
     pub decorations: HashMap<WaylandObjectId, XdgToplevelDecorationState>,
 }

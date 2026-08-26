@@ -5,18 +5,12 @@ use crate::{
 };
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LayerMargins {
     pub top: i32,
     pub right: i32,
     pub bottom: i32,
     pub left: i32,
-}
-
-impl Default for LayerMargins {
-    fn default() -> Self {
-        Self { top: 0, right: 0, bottom: 0, left: 0 }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +52,7 @@ impl LayerShellState {
         Self::default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_layer_surface(
         &mut self,
         id: WaylandObjectId,
@@ -309,6 +304,7 @@ impl LayerShellState {
         serial
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn calculate_placement(
         &self,
         output_id: Option<WaylandObjectId>,

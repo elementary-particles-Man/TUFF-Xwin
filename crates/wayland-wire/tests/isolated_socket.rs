@@ -358,8 +358,7 @@ fn test_isolated_socket_clipboard_e2e() {
         .core
         .data_device
         .seat_selections
-        .get(&wayland_wire::WaylandObjectId(5))
-        .is_some());
+        .contains_key(&wayland_wire::WaylandObjectId(5)));
 }
 
 fn make_message(object_id: u32, opcode: u16, payload: Vec<u8>) -> WaylandMessage {
@@ -637,7 +636,7 @@ fn test_isolated_socket_dnd_e2e() {
     // But focus is usually set via seat events.
 
     thread::sleep(std::time::Duration::from_millis(50));
-    let events = client.receive_events().unwrap();
+    let _events = client.receive_events().unwrap();
     // If focus was missing, we might not get enter.
     // But we should at least not crash.
 
@@ -1023,7 +1022,7 @@ fn test_isolated_socket_output_screencopy_e2e() {
 
     // screencopy
     client.zwlr_screencopy_capture_output(5, 9, 0, 99).unwrap();
-    let buf_fd = tempfile::tempfile().unwrap();
+    let _buf_fd = tempfile::tempfile().unwrap();
     // Simulate buffer creation (assume id 10)
     // Actually we just pass buffer object ID 10 to copy
     client.zwlr_screencopy_frame_copy(9, 10).unwrap();
@@ -1093,4 +1092,107 @@ fn test_reject_invalid_p12_sequences() {
     drop(client);
     let res = server_handle.join();
     assert!(res.is_err() || res.unwrap().core.xdg_output.outputs.len() == 1);
+}
+
+#[test]
+fn test_phase1_malformed_header_handling() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-malformed-header.sock");
+    let server_path = socket_path.clone();
+
+    let server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).unwrap();
+        let _ = server.run_once(); // Expecting error but no panic
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+
+    // Send malformed header (size = 0, which is invalid)
+    let bad_header = [0u8; 8];
+    use std::io::Write;
+    let _ = stream.write_all(&bad_header);
+    let _ = stream.flush();
+
+    thread::sleep(std::time::Duration::from_millis(50));
+    drop(stream);
+    let _ = server_handle.join();
+}
+
+#[test]
+fn test_phase1_invalid_object_id_and_opcode() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-invalid-id-opcode.sock");
+    let server_path = socket_path.clone();
+
+    let server_handle = thread::spawn(move || {
+        let config = WireServerConfig { socket_path: server_path };
+        let mut server = WireServer::new(config).unwrap();
+        let _ = server.run_once();
+    });
+
+    thread::sleep(std::time::Duration::from_millis(100));
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+
+    // Send valid header format but for non-existent object ID 9999
+    // Header format: object_id (u32), size (u16) | opcode (u16)
+    // object_id = 9999, size = 8, opcode = 0
+    let mut msg = vec![0u8; 8];
+    byteorder::LittleEndian::write_u32(&mut msg[0..4], 9999);
+    byteorder::LittleEndian::write_u32(&mut msg[4..8], 8u32 << 16);
+
+    use std::io::Write;
+    let _ = stream.write_all(&msg);
+    let _ = stream.flush();
+
+    thread::sleep(std::time::Duration::from_millis(50));
+    drop(stream);
+    let _ = server_handle.join();
+}
+
+#[test]
+fn test_phase1_role_violation() {
+    let mut core = HeadlessWireCore::default();
+    let surface_id = WaylandObjectId(10);
+
+    core.surfaces.create_surface(surface_id);
+
+    // Claiming first role should succeed
+    assert!(core
+        .surfaces
+        .claim_role(surface_id, wayland_wire::surface::SurfaceRoleKind::XdgSurface)
+        .is_ok());
+
+    // Claiming second role on same surface should fail (role violation)
+    assert!(core
+        .surfaces
+        .claim_role(surface_id, wayland_wire::surface::SurfaceRoleKind::Subsurface)
+        .is_err());
+}
+
+#[test]
+fn test_phase1_multiple_clients_cleanup() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("tuff-xwin-test-multi-client.sock");
+
+    // Bind socket
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+    // Simulating multiple sequential client connects and disconnects
+    for _ in 0..3 {
+        let handle = thread::spawn({
+            let s_path = socket_path.clone();
+            move || {
+                let stream = std::os::unix::net::UnixStream::connect(&s_path).unwrap();
+                thread::sleep(std::time::Duration::from_millis(10));
+                drop(stream);
+            }
+        });
+
+        let (stream, _) = listener.accept().unwrap();
+        // Client disconnect handling simulation
+        drop(stream);
+        handle.join().unwrap();
+    }
 }

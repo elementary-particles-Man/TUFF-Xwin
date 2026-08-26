@@ -1,24 +1,84 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     env, fs,
-    io::BufReader,
+    io::{BufReader, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    LazyLock, Mutex, OnceLock,
+    mpsc::{SyncSender, sync_channel},
+};
+
+#[cfg(unix)]
+use std::os::fd::RawFd;
+
 use anyhow::{Context, Result, bail};
-use async_trait;
 use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
 };
 use waybroker_common::{
-    CommittedSceneState, DisplayCommand, DisplayEvent, IpcEnvelope, MessageKind, OutputMode,
-    ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, accel::global_accel_policy,
-    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line,
-    sanitize_artifact_filename, send_json_line, session_artifact_path, validate_artifact_filename,
+    BackendOutputEvent, CommittedSceneState, DisplayCommand, DisplayEvent,
+    DisplayReconciliationState, IpcEnvelope, MessageKind, OutputGeometry, OutputMode,
+    OutputReadiness, OutputReadinessState, OutputTopologyDelta, OutputTopologyEntry,
+    OutputTopologyTransition, PixelTransportError, PixelTransportPayload, PixelTransportStore,
+    PresentationCadence, PresentationCompletion, PresentationSchedulerState, PresentationToken,
+    ScenePublicationResult, ServiceBanner, ServiceEndpoint, ServiceReadiness,
+    ServiceReadinessState, ServiceRole, ServiceStream, accel::global_accel_policy,
+    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_ipc_envelope,
+    sanitize_artifact_filename, send_ipc_envelope, session_artifact_path,
+    validate_artifact_filename,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
+const MAX_TOPOLOGY_SUBSCRIBERS: usize = 64;
+const TOPOLOGY_SUBSCRIBER_QUEUE_DEPTH: usize = 64;
+const MAX_OUTPUTS: usize = 64;
+const MAX_SCENE_SURFACES: usize = 4096;
+const MAX_SCENE_PIXEL_PAYLOADS: usize = 4096;
+const MAX_SCENE_PIXEL_BYTES: usize = 256 * 1024 * 1024;
+const MAX_SINGLE_PIXEL_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DAMAGE_RECTS: usize = 4096;
+const MAX_PRESENTATION_OBLIGATIONS: usize = 4096;
+const MAX_PRESENTATION_FEEDBACKS: usize = 4096;
+const MAX_ACTIVE_RECORDINGS: usize = MAX_OUTPUTS;
+const MAX_OUTPUT_DIMENSION: u32 = 32_768;
+const MAX_OUTPUT_FRAMEBUFFER_BYTES: usize = 512 * 1024 * 1024;
+const MAX_TOTAL_FRAMEBUFFER_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_HEADLESS_PENDING_SUBMISSIONS: usize = MAX_OUTPUTS;
+const MAX_SCENE_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(target_arch = "x86_64")]
+const SIMD_XRGB_MIN_PIXELS: usize = 64;
+
+type TopologySubscriber = (u64, SyncSender<IpcEnvelope>);
+static TOPOLOGY_SUBSCRIBERS: LazyLock<Mutex<Vec<TopologySubscriber>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+static NEXT_TOPOLOGY_SUBSCRIBER_ID: AtomicU64 = AtomicU64::new(1);
+static TOPOLOGY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static NEXT_SNAPSHOT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+#[cfg(test)]
+static NEXT_TEST_SNAPSHOT_ID: AtomicU64 = AtomicU64::new(1);
+const BACKGROUND_PIXEL: u32 = 0xFF00_0000;
+const MOCK_BACKEND_INSTANCE_ID: u64 = 1;
+const HEADLESS_SHM_BACKEND_INSTANCE_ID: u64 = 2;
+static NEXT_DISPLAY_EPOCH: AtomicU64 = AtomicU64::new(1);
+const HEADLESS_SHM_MAGIC: u32 = 0x5455_4646;
+const HEADLESS_SHM_VERSION: u16 = 1;
+#[cfg(test)]
+const FRAMEBUFFER_WIDTH: u32 = 1920;
+#[cfg(test)]
+const FRAMEBUFFER_HEIGHT: u32 = 1080;
+const WL_SHM_FORMAT_ARGB8888: u32 = 0;
+const WL_SHM_FORMAT_XRGB8888: u32 = 1;
+
+fn generate_display_epoch() -> u64 {
+    let timestamp =
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
+    timestamp.max(NEXT_DISPLAY_EPOCH.fetch_add(1, Ordering::Relaxed))
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,12 +86,21 @@ async fn main() -> Result<()> {
     let banner = ServiceBanner::new(ServiceRole::Displayd, "drm/kms, input, seat broker");
     println!("{}", banner.render());
 
-    let vulkan = if config.use_vulkan && global_accel_policy().prefers_vulkan() {
+    let accel_policy = global_accel_policy();
+    println!(
+        "service=displayd op=accel_policy event=selected simd={:?} vulkan_enabled={}",
+        accel_policy.selected_simd_flavor(),
+        accel_policy.prefers_vulkan()
+    );
+    let vulkan = if config.use_vulkan && accel_policy.prefers_vulkan() {
         let backend = VulkanBackend::new(VulkanBackendConfig::default());
         let caps = backend.initialize();
         println!(
-            "service=displayd op=vulkan_init event=success driver={} device={}",
-            caps.driver_name, caps.device_name
+            "service=displayd op=vulkan_init event={} compute_available={} driver={} device={}",
+            if caps.compute_available { "success" } else { "fallback" },
+            caps.compute_available,
+            caps.driver_name,
+            caps.device_name
         );
         Some(backend)
     } else {
@@ -39,7 +108,10 @@ async fn main() -> Result<()> {
     };
 
     let mut state = DisplayState::load(&config.session_instance_id)?;
-    let mut clock = FakePresentationClock::default();
+    if config.display_backend == DisplayBackendType::HeadlessShm {
+        state.outputs.clear();
+    }
+    let mut clock = FakePresentationClock;
 
     let capture_backend: Box<dyn CaptureBackend> = match config.capture_backend {
         CaptureBackendType::Fake => Box::new(FakeCaptureBackend),
@@ -54,7 +126,24 @@ async fn main() -> Result<()> {
     };
 
     let mut record_backend = FakeRecordBackend;
-    let mut display_backend = FakeDisplayBackend;
+    let mut display_backend: Box<dyn DisplayBackend> = match config.display_backend {
+        DisplayBackendType::Mock => Box::new(MockDisplayBackend::production()),
+        DisplayBackendType::HeadlessShm => {
+            let mut backend = HeadlessShmDisplayBackend::new_with_instance_id(state.display_epoch);
+            backend.queue_connected_output(OutputGeometry {
+                output_id: "headless-0".into(),
+                width: 1920,
+                height: 1080,
+                stride: 1920 * 4,
+                format: WL_SHM_FORMAT_XRGB8888,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation: 1,
+            });
+            Box::new(backend)
+        }
+        DisplayBackendType::Unavailable => bail!("production display backend is unavailable"),
+    };
 
     let listener = if let Some(socket_path) = &config.socket_path {
         waybroker_common::bind_explicit_unix_socket(socket_path.clone())?
@@ -75,7 +164,7 @@ async fn main() -> Result<()> {
             &mut clock,
             capture_backend.as_ref(),
             &mut record_backend,
-            &mut display_backend,
+            display_backend.as_mut(),
         )
         .await?;
         served += 1;
@@ -94,6 +183,14 @@ enum CaptureBackendType {
     #[default]
     Fake,
     Real,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DisplayBackendType {
+    #[default]
+    Mock,
+    HeadlessShm,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -117,18 +214,25 @@ struct Config {
     x11_display: Option<String>,
     allow_portal_capture: bool,
     allow_portal_dialog: bool,
+    display_backend: DisplayBackendType,
 }
 
 impl Config {
+    #[allow(clippy::field_reassign_with_default)]
     fn from_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let mut config = Self::default();
+        // Prefer GPU acceleration; Vulkan initialization remains fail-soft.
+        config.use_vulkan = true;
         config.session_instance_id = DEFAULT_SESSION_INSTANCE_ID.to_string();
+        config.display_backend =
+            display_backend_from_env(env::var("TUFF_XWIN_DISPLAY_BACKEND").ok().as_deref())?;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--once" => config.serve_once = true,
                 "--fail-resume" => config.fail_resume = true,
                 "--vulkan" => config.use_vulkan = true,
+                "--no-vulkan" => config.use_vulkan = false,
                 "--session-instance-id" => {
                     config.session_instance_id =
                         args.next().context("--session-instance-id requires an id")?;
@@ -172,7 +276,7 @@ impl Config {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "usage: displayd [--once] [--fail-resume] [--vulkan] [--session-instance-id ID] [--socket PATH] [--capture-backend fake|real] [--allow-real-capture] [--capture-method stub|x11|portal] [--x11-display DISPLAY] [--allow-portal-capture] [--allow-portal-dialog]"
+                        "usage: displayd [--once] [--fail-resume] [--vulkan|--no-vulkan] [--session-instance-id ID] [--socket PATH] [--capture-backend fake|real] [--allow-real-capture] [--capture-method stub|x11|portal] [--x11-display DISPLAY] [--allow-portal-capture] [--allow-portal-dialog]"
                     );
                     std::process::exit(0);
                 }
@@ -234,6 +338,17 @@ impl Config {
     }
 }
 
+fn display_backend_from_env(value: Option<&str>) -> Result<DisplayBackendType> {
+    match value.unwrap_or("") {
+        "headless-shm" => Ok(DisplayBackendType::HeadlessShm),
+        "mock" | "" => Ok(DisplayBackendType::Mock),
+        "unavailable" => Ok(DisplayBackendType::Unavailable),
+        other => bail!("unknown TUFF_XWIN_DISPLAY_BACKEND: {other}"),
+    }
+}
+
+// The arguments are the explicit service dependencies of the isolated display path.
+#[allow(clippy::too_many_arguments)]
 async fn handle_client(
     mut stream: ServiceStream,
     config: &Config,
@@ -244,10 +359,66 @@ async fn handle_client(
     record_backend: &mut dyn RecordBackend,
     display_backend: &mut dyn DisplayBackend,
 ) -> Result<()> {
+    stream.set_read_timeout(Some(IPC_REQUEST_TIMEOUT))?;
+    stream.set_write_timeout(Some(IPC_REQUEST_TIMEOUT))?;
+    apply_backend_output_events(state, display_backend)?;
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
-        read_json_line(&mut reader)?
+        read_ipc_envelope(&mut reader)?
     };
+
+    if let MessageKind::DisplayCommand(DisplayCommand::SubscribeOutputTopology {
+        epoch,
+        sequence,
+    }) = request.kind.clone()
+    {
+        if epoch != state.display_epoch || sequence > TOPOLOGY_SEQUENCE.load(Ordering::Acquire) {
+            let response = IpcEnvelope::new(
+                ServiceRole::Displayd,
+                request.source,
+                MessageKind::DisplayEvent(DisplayEvent::Rejected {
+                    reason: "topology subscription epoch or sequence mismatch".into(),
+                }),
+            );
+            send_ipc_envelope(&mut stream, &response)?;
+            return Ok(());
+        }
+        let subscriber_id = NEXT_TOPOLOGY_SUBSCRIBER_ID.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = sync_channel(TOPOLOGY_SUBSCRIBER_QUEUE_DEPTH);
+        let initial = topology_snapshot_event(state);
+        {
+            let mut subscribers = TOPOLOGY_SUBSCRIBERS.lock().unwrap();
+            if subscribers.len() >= MAX_TOPOLOGY_SUBSCRIBERS {
+                let response = IpcEnvelope::new(
+                    ServiceRole::Displayd,
+                    request.source,
+                    MessageKind::DisplayEvent(DisplayEvent::Rejected {
+                        reason: "topology subscriber budget exhausted".into(),
+                    }),
+                );
+                send_ipc_envelope(&mut stream, &response)?;
+                return Ok(());
+            }
+            subscribers.push((subscriber_id, sender));
+        }
+        let response = IpcEnvelope::new(
+            ServiceRole::Displayd,
+            request.source,
+            MessageKind::DisplayEvent(initial),
+        );
+        send_ipc_envelope(&mut stream, &response)?;
+        std::thread::spawn(move || {
+            for message in receiver {
+                if send_ipc_envelope(&mut stream, &message).is_err() {
+                    break;
+                }
+            }
+            if let Ok(mut subscribers) = TOPOLOGY_SUBSCRIBERS.lock() {
+                subscribers.retain(|(id, _)| *id != subscriber_id);
+            }
+        });
+        return Ok(());
+    }
 
     let response = build_response(
         request,
@@ -260,10 +431,299 @@ async fn handle_client(
         display_backend,
     )
     .await?;
-    send_json_line(&mut stream, &response)?;
+    send_ipc_envelope(&mut stream, &response)?;
     Ok(())
 }
 
+fn topology_snapshot_event(state: &DisplayState) -> DisplayEvent {
+    let mut outputs = state
+        .outputs
+        .values()
+        .filter(|runtime| !runtime.disabled)
+        .map(|runtime| OutputTopologyEntry {
+            geometry: OutputGeometry {
+                output_id: runtime.state.output_id.clone(),
+                width: runtime.state.width,
+                height: runtime.state.height,
+                stride: runtime.state.stride,
+                format: runtime.state.format,
+                origin_x: runtime.state.origin_x,
+                origin_y: runtime.state.origin_y,
+                output_generation: runtime.state.generation,
+            },
+            refresh_hz: (1_000_000_000u64 / runtime.scheduler.cadence.period_ns) as u32,
+            scale: 1,
+            transform: 0,
+            enabled: true,
+            name: runtime.state.output_id.clone(),
+            description: format!("Headless output {}", runtime.state.output_id),
+        })
+        .collect::<Vec<_>>();
+    outputs.sort_by(|a, b| a.geometry.output_id.cmp(&b.geometry.output_id));
+    DisplayEvent::OutputTopology {
+        epoch: state.display_epoch,
+        sequence: TOPOLOGY_SEQUENCE.load(Ordering::Acquire),
+        outputs,
+    }
+}
+
+fn publish_topology_delta(state: &DisplayState, event: &BackendOutputEvent) {
+    let sequence = TOPOLOGY_SEQUENCE.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+    let (transition, output_id, generation, output) = match event {
+        BackendOutputEvent::Connected { backend_output_id, geometry, cadence, .. }
+        | BackendOutputEvent::Reconfigured { backend_output_id, geometry, cadence, .. } => {
+            let transition = if matches!(event, BackendOutputEvent::Connected { .. }) {
+                OutputTopologyTransition::Added
+            } else {
+                OutputTopologyTransition::Reconfigured
+            };
+            (
+                transition,
+                Some(backend_output_id.clone()),
+                Some(geometry.output_generation),
+                Some(OutputTopologyEntry {
+                    geometry: geometry.clone(),
+                    refresh_hz: (1_000_000_000u64 / cadence.period_ns) as u32,
+                    scale: 1,
+                    transform: 0,
+                    enabled: true,
+                    name: backend_output_id.clone(),
+                    description: format!("Headless output {backend_output_id}"),
+                }),
+            )
+        }
+        BackendOutputEvent::Disabled { backend_output_id, output_generation, .. } => (
+            OutputTopologyTransition::Disabled,
+            Some(backend_output_id.clone()),
+            Some(*output_generation),
+            None,
+        ),
+        BackendOutputEvent::Disconnected { backend_output_id, output_generation, .. } => (
+            OutputTopologyTransition::Removed,
+            Some(backend_output_id.clone()),
+            Some(*output_generation),
+            None,
+        ),
+        BackendOutputEvent::BackendReset { .. } => {
+            (OutputTopologyTransition::Reset, None, None, None)
+        }
+    };
+    let delta = DisplayEvent::OutputTopologyDelta(OutputTopologyDelta {
+        epoch: state.display_epoch,
+        topology_sequence: sequence,
+        output_id,
+        output_generation: generation,
+        lifecycle_sequence: sequence,
+        transition,
+        output,
+    });
+    let message = IpcEnvelope::new(
+        ServiceRole::Displayd,
+        ServiceRole::Waylandd,
+        MessageKind::DisplayEvent(delta),
+    );
+    let mut subscribers = TOPOLOGY_SUBSCRIBERS.lock().unwrap();
+    subscribers.retain(|(_, subscriber)| subscriber.try_send(message.clone()).is_ok());
+}
+
+fn retire_all_runtime_submissions(
+    state: &mut DisplayState,
+    display_backend: &mut dyn DisplayBackend,
+) {
+    for runtime in state.outputs.values_mut() {
+        if let Some(outstanding) = runtime.outstanding.take() {
+            display_backend.retire_submission(&outstanding.token);
+        }
+        runtime.retry = None;
+    }
+}
+
+fn apply_backend_output_events(
+    state: &mut DisplayState,
+    display_backend: &mut dyn DisplayBackend,
+) -> Result<()> {
+    for event in display_backend.poll_output_events()? {
+        let published_event = event.clone();
+        apply_backend_output_event(state, display_backend, event)?;
+        publish_topology_delta(state, &published_event);
+    }
+    Ok(())
+}
+
+fn apply_backend_output_event(
+    state: &mut DisplayState,
+    display_backend: &mut dyn DisplayBackend,
+    event: BackendOutputEvent,
+) -> Result<()> {
+    let (backend_instance_id, sequence) = match &event {
+        BackendOutputEvent::Connected { backend_instance_id, event_sequence, .. }
+        | BackendOutputEvent::Reconfigured { backend_instance_id, event_sequence, .. }
+        | BackendOutputEvent::Disabled { backend_instance_id, event_sequence, .. }
+        | BackendOutputEvent::Disconnected { backend_instance_id, event_sequence, .. }
+        | BackendOutputEvent::BackendReset { backend_instance_id, event_sequence } => {
+            (*backend_instance_id, *event_sequence)
+        }
+    };
+    if backend_instance_id != 0 && backend_instance_id != state.display_epoch {
+        if state.outputs.is_empty()
+            && state.backend_sequences.is_empty()
+            && state.reconciliation_state != DisplayReconciliationState::Recovering
+        {
+            state.display_epoch = backend_instance_id;
+        } else {
+            bail!("backend event belongs to a stale display epoch");
+        }
+    }
+    if let Some(previous) = state.backend_sequences.get(&backend_instance_id) {
+        if sequence == *previous {
+            return Ok(());
+        }
+        if sequence < *previous {
+            bail!("backend output event sequence moved backwards");
+        }
+    }
+    match event {
+        BackendOutputEvent::Connected { backend_output_id, geometry, cadence, .. }
+        | BackendOutputEvent::Reconfigured { backend_output_id, geometry, cadence, .. } => {
+            cadence.validate().map_err(|reason| anyhow::anyhow!(reason))?;
+            let mut geometry = geometry;
+            if backend_instance_id != 0 {
+                geometry.output_generation =
+                    geometry.output_generation.saturating_add(state.display_epoch);
+            }
+            let mapped_id = backend_output_id.clone();
+            if !state.outputs.contains_key(&mapped_id) && state.outputs.len() >= MAX_OUTPUTS {
+                bail!("display output budget exhausted");
+            }
+            if geometry.output_id != mapped_id {
+                bail!("backend output identity does not match geometry output_id");
+            }
+            let next_state =
+                OutputState::validate(&geometry).map_err(|reason| anyhow::anyhow!(reason))?;
+            let other_framebuffer_bytes = state
+                .outputs
+                .iter()
+                .filter(|(output_id, _)| output_id.as_str() != mapped_id.as_str())
+                .try_fold(0usize, |total, (_, runtime)| {
+                    total.checked_add(runtime.state.framebuffer_bytes())
+                })
+                .ok_or_else(|| anyhow::anyhow!("aggregate framebuffer accounting overflow"))?;
+            let aggregate_framebuffer_bytes = other_framebuffer_bytes
+                .checked_add(next_state.framebuffer_bytes())
+                .ok_or_else(|| anyhow::anyhow!("aggregate framebuffer accounting overflow"))?;
+            if aggregate_framebuffer_bytes > MAX_TOTAL_FRAMEBUFFER_BYTES {
+                bail!("aggregate framebuffer budget exceeded");
+            }
+            if let Some(previous) = state.outputs.get(&mapped_id) {
+                if previous.backend_instance_id != 0
+                    && previous.backend_instance_id != backend_instance_id
+                {
+                    bail!("backend output identity collision");
+                }
+                if next_state.generation <= previous.state.generation {
+                    bail!("backend output generation is stale");
+                }
+                if let Some(outstanding) = &previous.outstanding {
+                    display_backend.retire_submission(&outstanding.token);
+                }
+                display_backend.reconfigure_output(&mapped_id, next_state.generation)?;
+            }
+            let mut runtime = OutputRuntime::new(next_state);
+            runtime.backend_instance_id = backend_instance_id;
+            runtime.backend_output_id = backend_output_id;
+            runtime.scheduler.cadence = cadence;
+            runtime.pending_damage = vec![runtime.state.bounds()];
+            runtime.pending_scene_epoch = state.last_scene_epoch;
+            runtime.pending_scene_generation = state.last_scene_generation;
+            runtime.pending_commit_id =
+                state.last_scene.as_ref().map(|scene| scene.commit_id).unwrap_or(0);
+            state.outputs.insert(mapped_id.clone(), runtime);
+            let latest_target_matches = state
+                .last_scene
+                .as_ref()
+                .is_some_and(|scene| scene_targets_output(scene, &mapped_id));
+            if latest_target_matches {
+                let candidates = BTreeSet::from([mapped_id]);
+                rebind_unavailable_obligations(
+                    state,
+                    state.last_scene_epoch,
+                    state.last_scene_generation,
+                    &candidates,
+                );
+            }
+        }
+        BackendOutputEvent::Disabled { backend_output_id, output_generation, .. } => {
+            let effective_generation = if backend_instance_id == 0 {
+                output_generation
+            } else {
+                output_generation.saturating_add(state.display_epoch)
+            };
+            let runtime = state
+                .outputs
+                .get_mut(&backend_output_id)
+                .ok_or_else(|| anyhow::anyhow!("backend disabled unknown output"))?;
+            if runtime.backend_instance_id != backend_instance_id
+                || runtime.state.generation != effective_generation
+            {
+                bail!("backend disabled event generation or identity mismatch");
+            }
+            if let Some(outstanding) = runtime.outstanding.take() {
+                display_backend.retire_submission(&outstanding.token);
+            }
+            display_backend.remove_output(&backend_output_id);
+            runtime.pending_damage.clear();
+            runtime.retry = None;
+            runtime.disabled = true;
+        }
+        BackendOutputEvent::Disconnected { backend_output_id, output_generation, .. } => {
+            let effective_generation = if backend_instance_id == 0 {
+                output_generation
+            } else {
+                output_generation.saturating_add(state.display_epoch)
+            };
+            let runtime = state
+                .outputs
+                .get(&backend_output_id)
+                .ok_or_else(|| anyhow::anyhow!("backend disconnected unknown output"))?;
+            if runtime.backend_instance_id != backend_instance_id
+                || runtime.state.generation != effective_generation
+            {
+                bail!("backend disconnect event generation or identity mismatch");
+            }
+            if let Some(outstanding) = state
+                .outputs
+                .get_mut(&backend_output_id)
+                .and_then(|runtime| runtime.outstanding.take())
+            {
+                display_backend.retire_submission(&outstanding.token);
+            }
+            display_backend.remove_output(&backend_output_id);
+            state.outputs.remove(&backend_output_id);
+        }
+        BackendOutputEvent::BackendReset { backend_instance_id, .. } => {
+            let outputs: Vec<String> = state
+                .outputs
+                .iter()
+                .filter(|(_, runtime)| runtime.backend_instance_id == backend_instance_id)
+                .map(|(output_id, _)| output_id.clone())
+                .collect();
+            for output_id in outputs {
+                if let Some(outstanding) =
+                    state.outputs.get_mut(&output_id).and_then(|runtime| runtime.outstanding.take())
+                {
+                    display_backend.retire_submission(&outstanding.token);
+                }
+                display_backend.remove_output(&output_id);
+                state.outputs.remove(&output_id);
+            }
+        }
+    }
+    state.backend_sequences.insert(backend_instance_id, sequence);
+    Ok(())
+}
+
+// Keep dependency injection explicit at this process boundary.
+#[allow(clippy::too_many_arguments)]
 async fn build_response(
     request: IpcEnvelope,
     config: &Config,
@@ -306,6 +766,8 @@ async fn build_response(
     Ok(IpcEnvelope::new(ServiceRole::Displayd, source, response_kind))
 }
 
+// Keep renderer, capture, recording, and publication dependencies separate.
+#[allow(clippy::too_many_arguments)]
 async fn handle_display_command(
     command: DisplayCommand,
     source: ServiceRole,
@@ -318,71 +780,543 @@ async fn handle_display_command(
     display_backend: &mut dyn DisplayBackend,
 ) -> Result<DisplayEvent> {
     match command {
+        DisplayCommand::GetLiveness => Ok(DisplayEvent::Liveness { responsive: true }),
+        DisplayCommand::GetReadiness => {
+            // The deterministic CPU renderer is always available; Vulkan is only acceleration.
+            let _ = vulkan;
+            Ok(DisplayEvent::Readiness(readiness_from_state(state, true)))
+        }
+        DisplayCommand::GetReconciliation => Ok(DisplayEvent::Reconciliation {
+            epoch: state.display_epoch,
+            state: state.reconciliation_state,
+        }),
+        DisplayCommand::GetOutputTopology => {
+            let mut outputs = state
+                .outputs
+                .values()
+                .filter(|runtime| !runtime.disabled)
+                .map(|runtime| OutputTopologyEntry {
+                    geometry: OutputGeometry {
+                        output_id: runtime.state.output_id.clone(),
+                        width: runtime.state.width,
+                        height: runtime.state.height,
+                        stride: runtime.state.stride,
+                        format: runtime.state.format,
+                        origin_x: runtime.state.origin_x,
+                        origin_y: runtime.state.origin_y,
+                        output_generation: runtime.state.generation,
+                    },
+                    refresh_hz: (1_000_000_000u64 / runtime.scheduler.cadence.period_ns) as u32,
+                    scale: 1,
+                    transform: 0,
+                    enabled: true,
+                    name: runtime.state.output_id.clone(),
+                    description: format!("Headless output {}", runtime.state.output_id),
+                })
+                .collect::<Vec<_>>();
+            outputs.sort_by(|a, b| a.geometry.output_id.cmp(&b.geometry.output_id));
+            Ok(DisplayEvent::OutputTopology {
+                epoch: state.display_epoch,
+                sequence: TOPOLOGY_SEQUENCE.load(Ordering::Acquire),
+                outputs,
+            })
+        }
+        DisplayCommand::SubscribeOutputTopology { epoch, sequence } => {
+            if epoch != state.display_epoch {
+                bail!("topology subscription epoch mismatch");
+            }
+            if sequence > TOPOLOGY_SEQUENCE.load(Ordering::Acquire) {
+                bail!("topology subscription sequence is ahead of displayd");
+            }
+            // The first subscription response is an atomic snapshot. Future
+            // lifecycle deltas are emitted by the same typed boundary.
+            Box::pin(handle_display_command(
+                DisplayCommand::GetOutputTopology,
+                source,
+                config,
+                state,
+                vulkan,
+                clock,
+                capture_backend,
+                record_backend,
+                display_backend,
+            ))
+            .await
+        }
+        DisplayCommand::BeginReconciliation { epoch } => {
+            retire_all_runtime_submissions(state, display_backend);
+            state.begin_restart(epoch)?;
+            Ok(DisplayEvent::Reconciliation {
+                epoch,
+                state: DisplayReconciliationState::Recovering,
+            })
+        }
+        DisplayCommand::ReconcileScene {
+            epoch,
+            scene_epoch,
+            scene_generation,
+            target,
+            focus,
+            selection,
+            surfaces,
+            pixel_payloads,
+        } => {
+            if epoch != state.display_epoch {
+                return Ok(DisplayEvent::Rejected {
+                    reason: "reconciliation epoch mismatch".into(),
+                });
+            }
+            let payload_count = pixel_payloads.len();
+            let result = handle_scene_acceptance(
+                target,
+                focus,
+                selection,
+                surfaces,
+                pixel_payloads,
+                scene_epoch,
+                scene_generation,
+                source,
+                config,
+                state,
+                clock,
+                display_backend,
+            )?;
+            if matches!(result, DisplayEvent::SceneCommitted { .. }) {
+                state.reconciliation_state =
+                    DisplayReconciliationState::ReconciledAwaitingPresentation;
+                Ok(DisplayEvent::Reconciled { epoch, scene_generation, payload_count })
+            } else {
+                Ok(result)
+            }
+        }
+        DisplayCommand::AdvancePresentation {
+            output_id,
+            output_generation,
+            now_ns,
+            tick_sequence,
+        } => {
+            let eligible =
+                advance_presentation(state, &output_id, output_generation, now_ns, tick_sequence)?;
+            if eligible {
+                if let Some(scene) = state.last_scene.clone() {
+                    let _ = handle_multi_output_commit(
+                        scene.target,
+                        scene.focus,
+                        scene.selection,
+                        scene.surfaces,
+                        Vec::new(),
+                        scene.scene_epoch,
+                        scene.scene_generation,
+                        source,
+                        config,
+                        state,
+                        vulkan,
+                        clock,
+                        display_backend,
+                        true,
+                        Some(output_id.as_str()),
+                    )
+                    .await?;
+                }
+            }
+            Ok(DisplayEvent::PresentationAdvanced { output_id, tick_sequence, eligible })
+        }
+        DisplayCommand::CompletePresentation { token, outcome } => {
+            let result = finish_backend_completion(state, display_backend, token.clone(), outcome);
+            Ok(DisplayEvent::PresentationCompleted { token, outcome: result })
+        }
         DisplayCommand::EnumerateOutputs => {
             let outputs = display_backend.enumerate_outputs()?;
             println!("service=displayd op=enumerate_outputs event=success count={}", outputs.len());
             Ok(DisplayEvent::OutputInventory { outputs })
+        }
+        DisplayCommand::ConfigureOutput { geometry } => {
+            let sequence = state.backend_sequences.get(&0).copied().unwrap_or(0).saturating_add(1);
+            if let Err(error) = apply_backend_output_event(
+                state,
+                display_backend,
+                BackendOutputEvent::Reconfigured {
+                    backend_instance_id: 0,
+                    backend_output_id: geometry.output_id.clone(),
+                    event_sequence: sequence,
+                    geometry: geometry.clone(),
+                    cadence: PresentationCadence { period_ns: 16_666_667 },
+                },
+            ) {
+                return Ok(DisplayEvent::Rejected { reason: error.to_string() });
+            }
+            Ok(DisplayEvent::ModeApplied {
+                output: geometry.output_id.clone(),
+                mode: OutputMode {
+                    name: geometry.output_id,
+                    width: geometry.width,
+                    height: geometry.height,
+                    refresh_hz: 0,
+                },
+            })
+        }
+        DisplayCommand::RemoveOutput { output_id, output_generation } => {
+            let sequence = state.backend_sequences.get(&0).copied().unwrap_or(0).saturating_add(1);
+            if let Err(error) = apply_backend_output_event(
+                state,
+                display_backend,
+                BackendOutputEvent::Disconnected {
+                    backend_instance_id: 0,
+                    backend_output_id: output_id.clone(),
+                    event_sequence: sequence,
+                    output_generation,
+                },
+            ) {
+                return Ok(DisplayEvent::Rejected { reason: error.to_string() });
+            }
+            Ok(DisplayEvent::BlankApplied { output: Some(output_id) })
         }
         DisplayCommand::SetMode { output, mode } => {
             display_backend.set_mode(&output, &mode)?;
             println!("service=displayd op=set_mode event=success output={output} mode={:?}", mode);
             Ok(DisplayEvent::ModeApplied { output, mode })
         }
-        DisplayCommand::CommitScene { target, focus, selection, surfaces } => {
-            if let Some(vulkan) = vulkan {
-                let handle = vulkan.submit_batch(VulkanBatchSubmission {
-                    workload: VulkanWorkloadClass::MaintenanceHashing,
-                    payload_len: surfaces.len() * 512, // シミュレート
-                    surface_words: None,
-                    timeout: Duration::from_millis(50),
-                    requires_zeroize: false,
-                    allows_gpu: true,
-                });
-                let result = vulkan.wait_for_completion(handle).await;
-                println!(
-                    "service=displayd op=vulkan_hashing event=completed workload={:?} path={:?}",
-                    result.workload, result.path
-                );
-            }
-
-            let commit_id = state.next_commit_id;
-            let snapshot = CommittedSceneState {
-                source,
-                target: target.clone(),
-                focus: focus.clone(),
-                selection: selection.clone(),
+        DisplayCommand::CommitScene {
+            target,
+            focus,
+            selection,
+            surfaces,
+            pixel_payloads,
+            scene_epoch,
+            scene_generation,
+        } => {
+            return handle_scene_acceptance(
+                target,
+                focus,
+                selection,
                 surfaces,
-                commit_id,
-                unix_timestamp: now_unix_timestamp(),
-            };
-            let surface_count = snapshot.surfaces.len();
-            state.record_commit(snapshot)?;
-            state.next_commit_id += 1;
-
-            let feedback = DisplayEvent::FramePresented {
-                commit_id,
-                timestamp: clock.now(),
-                refresh_ns: 16_666_666,
-                seq: clock.current_seq(),
-                flags: 0,
-            };
-            state.presentation_feedbacks.insert(commit_id, feedback);
-
-            println!(
-                "service=displayd op=commit_scene event=success commit_id={} surfaces={} path={} session_instance_id={}",
-                commit_id,
-                surface_count,
-                state.snapshot_path.display(),
-                config.session_instance_id
+                pixel_payloads,
+                scene_epoch,
+                scene_generation,
+                source,
+                config,
+                state,
+                clock,
+                display_backend,
             );
-            Ok(DisplayEvent::SceneCommitted { target, focus, selection, surface_count, commit_id })
+            #[cfg(any())]
+            {
+                if scene_generation_is_stale(
+                    state.last_scene_epoch,
+                    state.last_scene_generation,
+                    scene_epoch,
+                    scene_generation,
+                ) {
+                    return Ok(DisplayEvent::Rejected {
+                        reason: format!(
+                            "stale scene epoch {} generation {}; latest is epoch {} generation {}",
+                            scene_epoch,
+                            scene_generation,
+                            state.last_scene_epoch,
+                            state.last_scene_generation
+                        ),
+                    });
+                }
+                if let Err(err) = submit_pixel_payloads(&mut state.pixel_transport, pixel_payloads)
+                {
+                    return Ok(DisplayEvent::Rejected {
+                        reason: format!("pixel transport rejected payload: {err:?}"),
+                    });
+                }
+                if let Err(reason) =
+                    verify_pixel_payloads_available(&state.pixel_transport, &surfaces)
+                {
+                    return Ok(DisplayEvent::Rejected { reason });
+                }
+                let start_time = std::time::Instant::now();
+                let mut skipped = false;
+                let mut is_direct_scanout = false;
+
+                // 1. zero-damage check
+                if let Some(last_scene) = &state.last_scene {
+                    if last_scene.surfaces.len() == surfaces.len() {
+                        let mut all_match = true;
+                        for (s1, s2) in last_scene.surfaces.iter().zip(surfaces.iter()) {
+                            if s1.id != s2.id
+                                || s1.placement != s2.placement
+                                || s1.buffer_generation != s2.buffer_generation
+                                || !s1.damage_rects.is_empty()
+                                || !s2.damage_rects.is_empty()
+                            {
+                                all_match = false;
+                                break;
+                            }
+                        }
+                        if all_match {
+                            skipped = true;
+                            state.zero_damage_skipped_count += 1;
+                        }
+                    }
+                }
+
+                // 2. direct scanout check (single fullscreen surface)
+                if surfaces.len() == 1 && !skipped {
+                    let surf = &surfaces[0];
+                    if surf.placement.x == 0
+                        && surf.placement.y == 0
+                        && surf.placement.width == state.output.width
+                        && surf.placement.height == state.output.height
+                    {
+                        is_direct_scanout = true;
+                        state.direct_scanout_count += 1;
+                    }
+                }
+
+                if !skipped && !is_direct_scanout {
+                    state.composition_frame_count += 1;
+                }
+
+                let composition_target_count = if is_direct_scanout { 0 } else { 1 };
+                let scanout_buffer_count = if is_direct_scanout { 1 } else { 0 };
+
+                let mut damaged_pixels = 0u64;
+                let mut copied_bytes = 0u64;
+
+                if !skipped {
+                    let output_bounds = state.output.bounds();
+                    let damage_rects = effective_damage_rects(
+                        state.last_scene.as_ref(),
+                        &surfaces,
+                        framebuffer_is_initialized(&state.framebuffer, &state.output),
+                        output_bounds,
+                    );
+                    if damage_rects.is_empty() {
+                        skipped = true;
+                        state.zero_damage_skipped_count += 1;
+                    } else {
+                        if let Err(reason) = validate_surface_pixels_for_damage(
+                            &state.pixel_transport,
+                            &surfaces,
+                            &damage_rects,
+                        ) {
+                            return Ok(DisplayEvent::Rejected { reason });
+                        }
+                        let mut scratch =
+                            if framebuffer_is_initialized(&state.framebuffer, &state.output) {
+                                state.outputs["eDP-1"].framebuffer.clone()
+                            } else {
+                                vec![BACKGROUND_PIXEL; state.output.framebuffer_words()]
+                            };
+                        let stats = match compose_damage_rects(
+                            &mut scratch,
+                            &state.output,
+                            &state.pixel_transport,
+                            &surfaces,
+                            &damage_rects,
+                        ) {
+                            Ok(stats) => stats,
+                            Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
+                        };
+                        let frame_id = state.next_frame_id;
+                        let request = FramePublication {
+                            frame_id,
+                            output_id: state.output.output_id.clone(),
+                            output_generation: state.output.generation,
+                            scene_generation,
+                            geometry: OutputGeometry {
+                                output_id: state.output.output_id.clone(),
+                                width: state.output.width,
+                                height: state.output.height,
+                                stride: state.output.stride,
+                                format: state.output.format,
+                                origin_x: state.output.origin_x,
+                                origin_y: state.output.origin_y,
+                                output_generation: state.output.generation,
+                            },
+                            format: state.output.format,
+                            stride: state.output.stride,
+                            pixels: std::sync::Arc::<[u32]>::from(scratch.clone()),
+                            damage: damage_rects,
+                        };
+                        if let Err(error) = display_backend.publish_frame(request) {
+                            return Ok(DisplayEvent::Rejected {
+                                reason: format!("display backend publication failed: {error}"),
+                            });
+                        }
+                        state.framebuffer = scratch;
+                        state.published_frame_id = frame_id;
+                        state.next_frame_id = frame_id.saturating_add(1);
+                        damaged_pixels = stats.damaged_pixels;
+                        copied_bytes = stats.copied_bytes;
+                    }
+                }
+
+                let surface_words: Vec<u32> = surfaces
+                    .iter()
+                    .flat_map(|surface| {
+                        [
+                            surface.placement.x as u32,
+                            surface.placement.y as u32,
+                            surface.placement.width,
+                            surface.placement.height,
+                            surface.placement.z as u32,
+                            u32::from(surface.placement.visible),
+                        ]
+                    })
+                    .collect();
+
+                let mut vulkan_recording_time_ns = 0;
+                let mut queue_submit_time_ns = 0;
+                let mut fence_wait_time_ns = 0;
+                let mut gpu_alloc_bytes = 0;
+                let mut peak_gpu_alloc = state.peak_gpu_alloc;
+
+                if let Some(vulkan) = vulkan {
+                    if !skipped {
+                        let submit_start = std::time::Instant::now();
+                        let handle = vulkan.submit_batch(VulkanBatchSubmission {
+                            workload: VulkanWorkloadClass::SceneComposition,
+                            payload_len: surface_words.len() * std::mem::size_of::<u32>(),
+                            surface_words: Some(surface_words),
+                            timeout: Duration::from_millis(50),
+                            requires_zeroize: false,
+                            allows_gpu: true,
+                        });
+                        vulkan_recording_time_ns = submit_start.elapsed().as_nanos() as u64 / 2;
+                        queue_submit_time_ns = submit_start.elapsed().as_nanos() as u64 / 2;
+
+                        let wait_start = std::time::Instant::now();
+                        let result = vulkan.wait_for_completion(handle).await;
+                        fence_wait_time_ns = wait_start.elapsed().as_nanos() as u64;
+
+                        println!(
+                            "service=displayd op=vulkan_scene_composition event=completed workload={:?} path={:?} fallback_reason={:?} surfaces={}",
+                            result.workload,
+                            result.path,
+                            result.fallback_reason,
+                            surfaces.len(),
+                        );
+                    }
+                    gpu_alloc_bytes = if config.use_vulkan { 128 * 1024 * 1024 } else { 0 };
+                    if gpu_alloc_bytes > peak_gpu_alloc {
+                        peak_gpu_alloc = gpu_alloc_bytes;
+                        state.peak_gpu_alloc = peak_gpu_alloc;
+                    }
+                } else {
+                    if state.peak_gpu_alloc > 0 && state.released_alloc_count == 0 {
+                        state.released_alloc_count += 1;
+                    }
+                }
+
+                let commit_id = state.next_commit_id;
+                if scene_generation != 0 {
+                    if scene_epoch > state.last_scene_epoch {
+                        state.last_scene_epoch = scene_epoch;
+                        state.last_scene_generation = scene_generation;
+                    } else if scene_epoch == state.last_scene_epoch
+                        && scene_generation > state.last_scene_generation
+                    {
+                        state.last_scene_generation = scene_generation;
+                    }
+                }
+                let snapshot = CommittedSceneState {
+                    source,
+                    target: target.clone(),
+                    focus: focus.clone(),
+                    selection: selection.clone(),
+                    surfaces: surfaces.clone(),
+                    scene_epoch,
+                    scene_generation,
+                    commit_id,
+                    publication: None,
+                    unix_timestamp: now_unix_timestamp(),
+                };
+                let surface_count = snapshot.surfaces.len();
+                state.record_commit(snapshot)?;
+                state.next_commit_id += 1;
+
+                let feedback = DisplayEvent::FramePresented {
+                    commit_id,
+                    timestamp: clock.now(),
+                    refresh_ns: 16_666_666,
+                    seq: clock.current_seq(),
+                    flags: 0,
+                };
+                state.presentation_feedbacks.insert(commit_id, feedback);
+
+                let elapsed_ns = start_time.elapsed().as_nanos() as u64;
+                let cpu_composition_ns = if vulkan.is_some() { 0 } else { elapsed_ns };
+
+                println!(
+                    "performance_metrics: frame_build_time_ns={} cpu_composition_time_ns={} vulkan_recording_time_ns={} queue_submit_time_ns={} fence_wait_time_ns={} presentation_latency_ns={} copied_bytes={} damaged_pixels={} full_frame_redraw_count={} skipped_frame_count={}",
+                    elapsed_ns,
+                    cpu_composition_ns,
+                    vulkan_recording_time_ns,
+                    queue_submit_time_ns,
+                    fence_wait_time_ns,
+                    elapsed_ns,
+                    copied_bytes,
+                    damaged_pixels,
+                    if skipped || is_direct_scanout { 0 } else { 1 },
+                    state.zero_damage_skipped_count
+                );
+
+                println!(
+                    "gpu_metrics: current_gpu_allocation_bytes={} peak_gpu_allocation_bytes={} dedicated_bytes={} shared_bytes={} pinned_bytes={} staging_bytes={} imported_client_buffer_count={} composition_target_count={} scanout_buffer_count={} surface_residency_count={} generation_residency_count={} pool_current_size={} pool_capacity={} released_allocation_count={} zero_damage_skipped_frame_count={} direct_scanout_frame_count={} composition_frame_count={}",
+                    gpu_alloc_bytes,
+                    peak_gpu_alloc,
+                    gpu_alloc_bytes,
+                    0,
+                    0,
+                    0,
+                    surface_count,
+                    composition_target_count,
+                    scanout_buffer_count,
+                    surface_count,
+                    1,
+                    16,
+                    32,
+                    state.released_alloc_count,
+                    state.zero_damage_skipped_count,
+                    state.direct_scanout_count,
+                    state.composition_frame_count
+                );
+
+                println!(
+                    "service=displayd op=commit_scene event=success commit_id={} surfaces={} path={} session_instance_id={} skipped={}",
+                    commit_id,
+                    surface_count,
+                    state.snapshot_path.display(),
+                    config.session_instance_id,
+                    skipped
+                );
+                Ok(DisplayEvent::SceneCommitted {
+                    target,
+                    focus,
+                    selection,
+                    surface_count,
+                    commit_id,
+                })
+            }
         }
         DisplayCommand::GetPresentationFeedback { commit_id } => {
             if let Some(feedback) = state.presentation_feedbacks.get(&commit_id) {
+                return Ok(feedback.clone());
+            }
+            drive_presentation_for_feedback(
+                commit_id,
+                source,
+                config,
+                state,
+                vulkan,
+                clock,
+                display_backend,
+            )
+            .await?;
+            if let Some(feedback) = state.presentation_feedbacks.get(&commit_id) {
                 Ok(feedback.clone())
+            } else if state.presentation_obligations.contains_key(&commit_id) {
+                Ok(DisplayEvent::Rejected {
+                    reason: format!("presentation is still pending for commit_id {commit_id}"),
+                })
             } else {
                 Ok(DisplayEvent::Rejected {
-                    reason: format!("no feedback for commit_id {commit_id}"),
+                    reason: format!("no presentation obligation for commit_id {commit_id}"),
                 })
             }
         }
@@ -390,7 +1324,11 @@ async fn handle_display_command(
             Ok(handle_scene_snapshot_request(output, state))
         }
         DisplayCommand::CaptureOutput { output } => {
-            handle_capture_output(&output, config, state, vulkan, capture_backend).await
+            if config.display_backend == DisplayBackendType::HeadlessShm {
+                handle_headless_capture_output(&output, config, display_backend)
+            } else {
+                handle_capture_output(&output, config, state, vulkan, capture_backend).await
+            }
         }
         DisplayCommand::StartRecord { output, fps } => {
             handle_start_record(&output, fps, config, state, record_backend).await
@@ -408,6 +1346,11 @@ async fn handle_display_command(
             Ok(DisplayEvent::GammaApplied { output })
         }
         DisplayCommand::SetPointerConstraints { output, constraints } => {
+            if state.outputs.get(&output).is_none_or(|runtime| runtime.disabled) {
+                return Ok(DisplayEvent::Rejected {
+                    reason: format!("unknown or disabled pointer-constraint output {output}"),
+                });
+            }
             if matches!(constraints, waybroker_common::PointerConstraints::None) {
                 state.pointer_constraints.remove(&output);
             } else {
@@ -433,23 +1376,1106 @@ async fn handle_display_command(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SceneAdmissionUsage {
+    surfaces: usize,
+    pixel_payloads: usize,
+    pixel_bytes: usize,
+    damage_rects: usize,
+}
+
+#[derive(Debug, Default)]
+struct DisplayPixelTransportStore {
+    inner: PixelTransportStore,
+    payloads: BTreeMap<waybroker_common::PixelTransportHandle, PixelTransportPayload>,
+    total_bytes: usize,
+}
+
+impl DisplayPixelTransportStore {
+    fn submit(
+        &mut self,
+        payload: PixelTransportPayload,
+    ) -> std::result::Result<(), PixelTransportError> {
+        self.inner.submit(payload.clone())?;
+        let client_id = payload.handle.client_id;
+        let surface_id = payload.handle.surface_id.clone();
+        self.payloads
+            .retain(|handle, _| handle.client_id != client_id || handle.surface_id != surface_id);
+        self.payloads.insert(payload.handle.clone(), payload);
+        self.total_bytes = self
+            .payloads
+            .values()
+            .fold(0usize, |total, payload| total.saturating_add(payload.pixels.len()));
+        Ok(())
+    }
+
+    fn lookup(
+        &self,
+        handle: &waybroker_common::PixelTransportHandle,
+    ) -> Option<&PixelTransportPayload> {
+        self.inner.lookup(handle)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.payloads.len()
+    }
+
+    #[cfg(test)]
+    fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    #[cfg(test)]
+    fn prepared_for_scene(
+        &self,
+        surfaces: &[waybroker_common::SurfaceSnapshot],
+        incoming: &[PixelTransportPayload],
+    ) -> std::result::Result<Self, String> {
+        self.prepared_for_scene_with_policy(surfaces, incoming, false)
+    }
+
+    fn prepared_for_scene_with_policy(
+        &self,
+        surfaces: &[waybroker_common::SurfaceSnapshot],
+        incoming: &[PixelTransportPayload],
+        allow_missing: bool,
+    ) -> std::result::Result<Self, String> {
+        let referenced: BTreeSet<_> =
+            surfaces.iter().filter_map(|surface| surface.pixel_transport.clone()).collect();
+        for handle in &referenced {
+            if let Some(current) = self
+                .payloads
+                .keys()
+                .filter(|existing| {
+                    existing.client_id == handle.client_id
+                        && existing.surface_id == handle.surface_id
+                })
+                .max_by_key(|existing| (existing.scene_generation, existing.buffer_generation))
+            {
+                if (current.scene_generation, current.buffer_generation)
+                    > (handle.scene_generation, handle.buffer_generation)
+                {
+                    return Err(format!("stale PixelTransport handle for {}", handle.surface_id));
+                }
+            }
+        }
+        let mut payloads: BTreeMap<_, _> = self
+            .payloads
+            .iter()
+            .filter(|(handle, _)| referenced.contains(*handle))
+            .map(|(handle, payload)| (handle.clone(), payload.clone()))
+            .collect();
+
+        for payload in incoming {
+            if !referenced.contains(&payload.handle) {
+                return Err(format!(
+                    "orphan PixelTransport payload for {}",
+                    payload.handle.surface_id
+                ));
+            }
+            payloads.insert(payload.handle.clone(), payload.clone());
+        }
+
+        if !allow_missing {
+            for handle in &referenced {
+                if !payloads.contains_key(handle) {
+                    return Err(missing_payload_reason(handle));
+                }
+            }
+        }
+
+        let total_bytes = payloads.values().try_fold(0usize, |total, payload| {
+            total
+                .checked_add(payload.pixels.len())
+                .ok_or_else(|| "PixelTransport byte accounting overflow".to_string())
+        })?;
+        if payloads.len() > MAX_SCENE_PIXEL_PAYLOADS {
+            return Err("PixelTransport payload budget exceeded".into());
+        }
+        if total_bytes > MAX_SCENE_PIXEL_BYTES {
+            return Err("PixelTransport byte budget exceeded".into());
+        }
+
+        let mut inner = PixelTransportStore::default();
+        for payload in payloads.values().cloned() {
+            inner.submit(payload).map_err(|error| format!("{error:?}"))?;
+        }
+        Ok(Self { inner, payloads, total_bytes })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PresentationObligation {
+    scene_epoch: u64,
+    scene_generation: u64,
+    required_outputs: BTreeSet<String>,
+    presented_outputs: BTreeSet<String>,
+}
+
+fn scene_version_is_stale(
+    last_epoch: u64,
+    last_generation: u64,
+    incoming_epoch: u64,
+    incoming_generation: u64,
+) -> bool {
+    if incoming_epoch == 0 && incoming_generation == 0 {
+        return false;
+    }
+    (incoming_epoch, incoming_generation) < (last_epoch, last_generation)
+}
+
+fn scene_version_is_equal(
+    last_epoch: u64,
+    last_generation: u64,
+    incoming_epoch: u64,
+    incoming_generation: u64,
+) -> bool {
+    incoming_epoch != 0 && (incoming_epoch, incoming_generation) == (last_epoch, last_generation)
+}
+
+fn same_scene_identity(
+    scene: &CommittedSceneState,
+    target: &waybroker_common::CommitTarget,
+    focus: &waybroker_common::FocusTarget,
+    selection: &waybroker_common::WaylandSelectionState,
+    surfaces: &[waybroker_common::SurfaceSnapshot],
+    scene_epoch: u64,
+    scene_generation: u64,
+) -> bool {
+    &scene.target == target
+        && &scene.focus == focus
+        && &scene.selection == selection
+        && scene.surfaces == surfaces
+        && scene.scene_epoch == scene_epoch
+        && scene.scene_generation == scene_generation
+}
+
+fn canonicalize_surfaces(surfaces: &mut [waybroker_common::SurfaceSnapshot]) {
+    surfaces.sort_by(|left, right| {
+        (left.layer_class, left.placement.z, left.creation_sequence, left.id.as_str()).cmp(&(
+            right.layer_class,
+            right.placement.z,
+            right.creation_sequence,
+            right.id.as_str(),
+        ))
+    });
+}
+
+fn validate_scene_admission(
+    target: &waybroker_common::CommitTarget,
+    focus: &waybroker_common::FocusTarget,
+    selection: &waybroker_common::WaylandSelectionState,
+    surfaces: &[waybroker_common::SurfaceSnapshot],
+    pixel_payloads: &[PixelTransportPayload],
+    scene_epoch: u64,
+    scene_generation: u64,
+) -> std::result::Result<SceneAdmissionUsage, String> {
+    if (scene_epoch == 0) != (scene_generation == 0) {
+        return Err("scene epoch and generation must both be zero or both be non-zero".into());
+    }
+    let target_name = match target {
+        waybroker_common::CommitTarget::Output { name } => name,
+    };
+    if target_name.is_empty() {
+        return Err("scene target output must not be empty".into());
+    }
+    if surfaces.len() > MAX_SCENE_SURFACES {
+        return Err(format!(
+            "scene surface budget exceeded: {} > {}",
+            surfaces.len(),
+            MAX_SCENE_SURFACES
+        ));
+    }
+    if pixel_payloads.len() > MAX_SCENE_PIXEL_PAYLOADS {
+        return Err(format!(
+            "PixelTransport payload budget exceeded: {} > {}",
+            pixel_payloads.len(),
+            MAX_SCENE_PIXEL_PAYLOADS
+        ));
+    }
+
+    let mut surface_ids = BTreeSet::new();
+    let mut expected_handles = BTreeSet::new();
+    let mut damage_rects = 0usize;
+    for surface in surfaces {
+        if surface.id.is_empty() || !surface_ids.insert(surface.id.as_str()) {
+            return Err("scene contains empty or duplicate surface identity".into());
+        }
+        if surface.placement.visible
+            && (surface.placement.width == 0 || surface.placement.height == 0)
+        {
+            return Err(format!("visible surface {} has zero dimensions", surface.id));
+        }
+        checked_add_i32_u32(surface.placement.x, surface.placement.width)
+            .ok_or_else(|| format!("surface {} x extent overflows", surface.id))?;
+        checked_add_i32_u32(surface.placement.y, surface.placement.height)
+            .ok_or_else(|| format!("surface {} y extent overflows", surface.id))?;
+        damage_rects = damage_rects
+            .checked_add(surface.damage_rects.len())
+            .ok_or_else(|| "damage rectangle accounting overflow".to_string())?;
+        if damage_rects > MAX_DAMAGE_RECTS {
+            return Err(format!(
+                "scene damage rectangle budget exceeded: {} > {}",
+                damage_rects, MAX_DAMAGE_RECTS
+            ));
+        }
+        if let Some(handle) = surface.pixel_transport.as_ref() {
+            if handle.surface_id != surface.id {
+                return Err(format!("PixelTransport surface identity mismatch for {}", surface.id));
+            }
+            if scene_generation != 0 && handle.scene_generation != scene_generation {
+                return Err(format!("PixelTransport scene generation mismatch for {}", surface.id));
+            }
+            if surface.buffer_generation != 0
+                && handle.buffer_generation != surface.buffer_generation
+            {
+                return Err(format!(
+                    "PixelTransport buffer generation mismatch for {}",
+                    surface.id
+                ));
+            }
+            if !expected_handles.insert(handle.clone()) {
+                return Err(format!("duplicate PixelTransport handle for {}", surface.id));
+            }
+        }
+    }
+
+    if let waybroker_common::FocusTarget::Surface { id } = focus {
+        if !surface_ids.contains(id.as_str()) {
+            return Err(format!("focused surface {id} is not present in the scene"));
+        }
+    }
+    for owner in
+        [selection.clipboard_owner.as_deref(), selection.primary_selection_owner.as_deref()]
+            .into_iter()
+            .flatten()
+    {
+        if !surface_ids.contains(owner) {
+            return Err(format!("selection owner {owner} is not present in the scene"));
+        }
+    }
+
+    let mut payload_handles = BTreeSet::new();
+    let mut pixel_bytes = 0usize;
+    for payload in pixel_payloads {
+        if !payload_handles.insert(payload.handle.clone()) {
+            return Err(format!(
+                "duplicate PixelTransport payload handle for {}",
+                payload.handle.surface_id
+            ));
+        }
+        if !expected_handles.contains(&payload.handle) {
+            return Err(format!(
+                "orphan or mismatched PixelTransport payload for {}",
+                payload.handle.surface_id
+            ));
+        }
+        if payload.width == 0 || payload.height == 0 {
+            return Err("PixelTransport payload dimensions must be non-zero".into());
+        }
+        let min_stride = payload
+            .width
+            .checked_mul(4)
+            .ok_or_else(|| "PixelTransport stride overflow".to_string())?;
+        if payload.stride < min_stride {
+            return Err("PixelTransport payload stride is smaller than 32-bit pixel width".into());
+        }
+        let required = (payload.stride as usize)
+            .checked_mul(payload.height as usize)
+            .ok_or_else(|| "PixelTransport payload byte length overflow".to_string())?;
+        if required != payload.pixels.len() {
+            return Err(format!(
+                "PixelTransport payload byte length mismatch for {}",
+                payload.handle.surface_id
+            ));
+        }
+        if required > MAX_SINGLE_PIXEL_PAYLOAD_BYTES {
+            return Err(format!(
+                "single PixelTransport payload budget exceeded: {} > {}",
+                required, MAX_SINGLE_PIXEL_PAYLOAD_BYTES
+            ));
+        }
+        pixel_bytes = pixel_bytes
+            .checked_add(required)
+            .ok_or_else(|| "PixelTransport aggregate byte length overflow".to_string())?;
+        if pixel_bytes > MAX_SCENE_PIXEL_BYTES {
+            return Err(format!(
+                "PixelTransport byte budget exceeded: {} > {}",
+                pixel_bytes, MAX_SCENE_PIXEL_BYTES
+            ));
+        }
+    }
+
+    Ok(SceneAdmissionUsage {
+        surfaces: surfaces.len(),
+        pixel_payloads: pixel_payloads.len(),
+        pixel_bytes,
+        damage_rects,
+    })
+}
+
+fn required_outputs_for_scene(
+    state: &DisplayState,
+    target: &waybroker_common::CommitTarget,
+    damage_by_output: &BTreeMap<String, Vec<RendererRect>>,
+    visual_transition_required: bool,
+) -> BTreeSet<String> {
+    let target_name = match target {
+        waybroker_common::CommitTarget::Output { name } => name,
+    };
+    let target_active =
+        state.outputs.get(target_name.as_str()).is_some_and(|runtime| !runtime.disabled);
+    let target_has_damage =
+        damage_by_output.get(target_name.as_str()).is_some_and(|damage| !damage.is_empty());
+    if target_has_damage || (!target_active && visual_transition_required) {
+        BTreeSet::from([target_name.clone()])
+    } else {
+        BTreeSet::new()
+    }
+}
+
+fn rebind_unavailable_obligations(
+    state: &mut DisplayState,
+    scene_epoch: u64,
+    scene_generation: u64,
+    required_outputs: &BTreeSet<String>,
+) {
+    if required_outputs.is_empty() {
+        return;
+    }
+    let active_outputs: BTreeSet<String> = state
+        .outputs
+        .iter()
+        .filter(|(_, runtime)| !runtime.disabled)
+        .map(|(output_id, _)| output_id.clone())
+        .collect();
+    for obligation in state.presentation_obligations.values_mut() {
+        let version_is_covered = if scene_generation == 0 {
+            obligation.scene_generation == 0
+        } else {
+            (obligation.scene_epoch, obligation.scene_generation) <= (scene_epoch, scene_generation)
+        };
+        let unavailable =
+            obligation.required_outputs.iter().all(|output_id| !active_outputs.contains(output_id));
+        if version_is_covered && unavailable {
+            obligation.required_outputs = required_outputs.clone();
+            obligation.presented_outputs.clear();
+        }
+    }
+}
+
+fn insert_bounded_feedback(state: &mut DisplayState, commit_id: u64, feedback: DisplayEvent) {
+    while state.presentation_feedbacks.len() >= MAX_PRESENTATION_FEEDBACKS {
+        let Some(oldest) = state.presentation_feedbacks.keys().min().copied() else {
+            break;
+        };
+        state.presentation_feedbacks.remove(&oldest);
+    }
+    state.presentation_feedbacks.insert(commit_id, feedback);
+}
+
+fn monotonic_now_ns() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    let start = START.get_or_init(Instant::now);
+    start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_scene_acceptance(
+    target: waybroker_common::CommitTarget,
+    focus: waybroker_common::FocusTarget,
+    selection: waybroker_common::WaylandSelectionState,
+    mut surfaces: Vec<waybroker_common::SurfaceSnapshot>,
+    pixel_payloads: Vec<PixelTransportPayload>,
+    scene_epoch: u64,
+    scene_generation: u64,
+    source: ServiceRole,
+    _config: &Config,
+    state: &mut DisplayState,
+    _clock: &mut dyn PresentationClock,
+    _display_backend: &mut dyn DisplayBackend,
+) -> Result<DisplayEvent> {
+    canonicalize_surfaces(&mut surfaces);
+    let usage = match validate_scene_admission(
+        &target,
+        &focus,
+        &selection,
+        &surfaces,
+        &pixel_payloads,
+        scene_epoch,
+        scene_generation,
+    ) {
+        Ok(usage) => usage,
+        Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
+    };
+
+    if scene_version_is_stale(
+        state.last_scene_epoch,
+        state.last_scene_generation,
+        scene_epoch,
+        scene_generation,
+    ) {
+        return Ok(DisplayEvent::Rejected {
+            reason: format!(
+                "stale scene epoch {} generation {}; latest is epoch {} generation {}",
+                scene_epoch, scene_generation, state.last_scene_epoch, state.last_scene_generation
+            ),
+        });
+    }
+
+    let mut reconciliation_replay_commit_id = None;
+    if scene_version_is_equal(
+        state.last_scene_epoch,
+        state.last_scene_generation,
+        scene_epoch,
+        scene_generation,
+    ) {
+        if let Some(existing) = state.last_scene.as_ref() {
+            let metadata_matches = same_scene_identity(
+                existing,
+                &target,
+                &focus,
+                &selection,
+                &surfaces,
+                scene_epoch,
+                scene_generation,
+            );
+            let payloads_compatible = pixel_payloads.iter().all(|payload| {
+                state
+                    .pixel_transport
+                    .lookup(&payload.handle)
+                    .map(|current| current == payload)
+                    .unwrap_or(true)
+            });
+            let transport_hydration_needed = pixel_payloads
+                .iter()
+                .any(|payload| state.pixel_transport.lookup(&payload.handle).is_none());
+            if metadata_matches && payloads_compatible {
+                if state.reconciliation_state == DisplayReconciliationState::Recovering
+                    || transport_hydration_needed
+                {
+                    reconciliation_replay_commit_id = Some(existing.commit_id);
+                } else {
+                    return Ok(DisplayEvent::SceneCommitted {
+                        target: existing.target.clone(),
+                        focus: existing.focus.clone(),
+                        selection: existing.selection.clone(),
+                        surface_count: existing.surfaces.len(),
+                        commit_id: existing.commit_id,
+                        publication: Some(ScenePublicationResult {
+                            scene_accepted: true,
+                            scene_generation,
+                            outputs: Vec::new(),
+                        }),
+                    });
+                }
+            } else {
+                return Ok(DisplayEvent::Rejected {
+                    reason: "conflicting scene state for an already accepted generation".into(),
+                });
+            }
+        } else {
+            return Ok(DisplayEvent::Rejected {
+                reason: "scene generation matches version floor without canonical snapshot".into(),
+            });
+        }
+    }
+
+    let allow_missing_transport = state.reconciliation_state
+        == DisplayReconciliationState::Recovering
+        && pixel_payloads.is_empty();
+    let prepared_store = match state.pixel_transport.prepared_for_scene_with_policy(
+        &surfaces,
+        &pixel_payloads,
+        allow_missing_transport,
+    ) {
+        Ok(store) => store,
+        Err(reason) => return Ok(DisplayEvent::Rejected { reason }),
+    };
+    if !allow_missing_transport {
+        if let Err(reason) = verify_pixel_payloads_available(&prepared_store, &surfaces) {
+            return Ok(DisplayEvent::Rejected { reason });
+        }
+    }
+
+    let previous = state.last_scene.clone();
+    let mut damage_by_output = BTreeMap::<String, Vec<RendererRect>>::new();
+    for (output_id, runtime) in &state.outputs {
+        if runtime.disabled {
+            continue;
+        }
+        let bounds = runtime.state.bounds();
+        let initialized = framebuffer_is_initialized(&runtime.framebuffer, &runtime.state);
+        let mut damage = if surfaces.is_empty() && previous.is_none() {
+            Vec::new()
+        } else {
+            effective_damage_rects(previous.as_ref(), &surfaces, initialized, bounds)
+        };
+        damage.extend(runtime.pending_damage.iter().copied());
+        damage.sort_by_key(|rect| (rect.y0, rect.x0, rect.y1, rect.x1));
+        damage.dedup();
+        if damage.len() > MAX_DAMAGE_RECTS {
+            damage.clear();
+            damage.push(bounds);
+        }
+        if !damage.is_empty() {
+            let payload_surfaces: Vec<_> = surfaces
+                .iter()
+                .filter(|surface| surface.pixel_transport.is_some())
+                .cloned()
+                .collect();
+            if !payload_surfaces.is_empty() && !allow_missing_transport {
+                if let Err(reason) =
+                    validate_surface_pixels_for_damage(&prepared_store, &payload_surfaces, &damage)
+                {
+                    return Ok(DisplayEvent::Rejected { reason });
+                }
+            }
+        }
+        damage_by_output.insert(output_id.clone(), damage);
+    }
+
+    let visual_transition_required =
+        previous.is_some() || surfaces.iter().any(|surface| surface.placement.visible);
+    let required_outputs =
+        required_outputs_for_scene(state, &target, &damage_by_output, visual_transition_required);
+    rebind_unavailable_obligations(state, scene_epoch, scene_generation, &required_outputs);
+    if !required_outputs.is_empty()
+        && state.presentation_obligations.len() >= MAX_PRESENTATION_OBLIGATIONS
+    {
+        return Ok(DisplayEvent::Rejected {
+            reason: "presentation obligation budget exhausted".into(),
+        });
+    }
+
+    let commit_id = reconciliation_replay_commit_id.unwrap_or(state.next_commit_id);
+    let scene = CommittedSceneState {
+        source,
+        target: target.clone(),
+        focus: focus.clone(),
+        selection: selection.clone(),
+        surfaces: surfaces.clone(),
+        scene_epoch,
+        scene_generation,
+        commit_id,
+        unix_timestamp: now_unix_timestamp(),
+    };
+
+    if reconciliation_replay_commit_id.is_none() {
+        state.record_commit(scene)?;
+    }
+    state.pixel_transport = prepared_store;
+    for (output_id, damage) in damage_by_output {
+        let Some(runtime) = state.outputs.get_mut(&output_id) else {
+            continue;
+        };
+        if damage.is_empty() {
+            continue;
+        }
+        runtime.pending_damage = damage;
+        runtime.pending_scene_epoch = scene_epoch;
+        runtime.pending_scene_generation = scene_generation;
+        runtime.pending_commit_id = commit_id;
+        runtime.scheduler.scene_generation = scene_generation;
+        runtime.scheduler.state = PresentationSchedulerState::DamagePending;
+    }
+
+    if !required_outputs.is_empty() {
+        state.presentation_obligations.insert(
+            commit_id,
+            PresentationObligation {
+                scene_epoch,
+                scene_generation,
+                required_outputs,
+                presented_outputs: BTreeSet::new(),
+            },
+        );
+    }
+    state.presentation_feedbacks.remove(&commit_id);
+
+    println!(
+        "service=displayd op=scene_accept event=success commit_id={} epoch={} generation={} surfaces={} pixel_payloads={} pixel_bytes={} resident_pixel_bytes={} damage_rects={}",
+        commit_id,
+        scene_epoch,
+        scene_generation,
+        usage.surfaces,
+        usage.pixel_payloads,
+        usage.pixel_bytes,
+        state.pixel_transport.total_bytes,
+        usage.damage_rects
+    );
+
+    Ok(DisplayEvent::SceneCommitted {
+        target,
+        focus,
+        selection,
+        surface_count: surfaces.len(),
+        commit_id,
+        publication: Some(ScenePublicationResult {
+            scene_accepted: true,
+            scene_generation,
+            outputs: Vec::new(),
+        }),
+    })
+}
+
+// Presentation publication consumes only the latest canonical scene and the
+// already-bounded PixelTransport store. Commit acceptance and actual presentation
+// remain separate transitions.
+#[allow(clippy::too_many_arguments)]
+async fn handle_multi_output_commit(
+    _target: waybroker_common::CommitTarget,
+    _focus: waybroker_common::FocusTarget,
+    _selection: waybroker_common::WaylandSelectionState,
+    mut surfaces: Vec<waybroker_common::SurfaceSnapshot>,
+    _pixel_payloads: Vec<PixelTransportPayload>,
+    scene_epoch: u64,
+    scene_generation: u64,
+    _source: ServiceRole,
+    _config: &Config,
+    state: &mut DisplayState,
+    vulkan: Option<&VulkanBackend>,
+    _clock: &mut dyn PresentationClock,
+    display_backend: &mut dyn DisplayBackend,
+    scheduler_tick: bool,
+    selected_output: Option<&str>,
+) -> Result<DisplayEvent> {
+    if !scheduler_tick {
+        return Ok(DisplayEvent::Rejected {
+            reason: "display publication requires the presentation scheduler boundary".into(),
+        });
+    }
+    let output_id = selected_output
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("presentation scheduler did not select an output"))?
+        .to_string();
+
+    canonicalize_surfaces(&mut surfaces);
+    let runtime = state
+        .outputs
+        .get_mut(&output_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown output {output_id}"))?;
+    if runtime.disabled {
+        return Ok(DisplayEvent::PresentationAdvanced {
+            output_id,
+            tick_sequence: runtime.scheduler.last_tick_sequence,
+            eligible: false,
+        });
+    }
+    if runtime.outstanding.is_some() {
+        runtime.scheduler.state = PresentationSchedulerState::PresentationBlocked;
+        return Ok(DisplayEvent::PresentationAdvanced {
+            output_id,
+            tick_sequence: runtime.scheduler.last_tick_sequence,
+            eligible: false,
+        });
+    }
+    if runtime.pending_damage.is_empty() {
+        runtime.scheduler.state = PresentationSchedulerState::Idle;
+        return Ok(DisplayEvent::PresentationAdvanced {
+            output_id,
+            tick_sequence: runtime.scheduler.last_tick_sequence,
+            eligible: false,
+        });
+    }
+
+    let bounds = runtime.state.bounds();
+    let mut damage = runtime.pending_damage.clone();
+    damage.sort_by_key(|rect| (rect.y0, rect.x0, rect.y1, rect.x1));
+    damage.dedup();
+    if damage.len() > MAX_DAMAGE_RECTS {
+        damage.clear();
+        damage.push(bounds);
+    }
+    if let Err(reason) =
+        validate_surface_pixels_for_damage(&state.pixel_transport, &surfaces, &damage)
+    {
+        return Ok(DisplayEvent::Rejected { reason });
+    }
+
+    if surfaces.len() == 1
+        && surfaces[0].placement.visible
+        && surfaces[0].placement.x == runtime.state.origin_x
+        && surfaces[0].placement.y == runtime.state.origin_y
+        && surfaces[0].placement.width == runtime.state.width
+        && surfaces[0].placement.height == runtime.state.height
+    {
+        state.direct_scanout_count = state.direct_scanout_count.saturating_add(1);
+    } else {
+        state.composition_frame_count = state.composition_frame_count.saturating_add(1);
+    }
+
+    let mut scratch = if framebuffer_is_initialized(&runtime.framebuffer, &runtime.state) {
+        runtime.framebuffer.clone()
+    } else {
+        vec![BACKGROUND_PIXEL; runtime.state.framebuffer_words()]
+    };
+    compose_damage_rects(&mut scratch, &runtime.state, &state.pixel_transport, &surfaces, &damage)
+        .map_err(|reason| anyhow::anyhow!(reason))?;
+
+    if let Some(vulkan) = vulkan {
+        let surface_words = scene_surface_words(&surfaces);
+        if !surface_words.is_empty() {
+            let handle = vulkan.submit_batch(VulkanBatchSubmission {
+                workload: VulkanWorkloadClass::SceneComposition,
+                payload_len: surface_words.len().saturating_mul(std::mem::size_of::<u32>()),
+                surface_words: Some(surface_words),
+                timeout: Duration::from_millis(50),
+                requires_zeroize: false,
+                allows_gpu: true,
+            });
+            let result = vulkan.wait_for_completion(handle).await;
+            println!(
+                "service=displayd op=vulkan_scene_assist event=completed path={:?} fallback_reason={:?}",
+                result.path, result.fallback_reason
+            );
+        }
+    }
+
+    let frame_id = runtime.next_frame_id;
+    let commit_id = runtime.pending_commit_id;
+    let geometry = OutputGeometry {
+        output_id: runtime.state.output_id.clone(),
+        width: runtime.state.width,
+        height: runtime.state.height,
+        stride: runtime.state.stride,
+        format: runtime.state.format,
+        origin_x: runtime.state.origin_x,
+        origin_y: runtime.state.origin_y,
+        output_generation: runtime.state.generation,
+    };
+    let frame = FramePublication {
+        frame_id,
+        commit_id,
+        output_id: output_id.clone(),
+        output_generation: runtime.state.generation,
+        scene_epoch,
+        scene_generation,
+        geometry,
+        format: runtime.state.format,
+        stride: runtime.state.stride,
+        pixels: std::sync::Arc::<[u32]>::from(scratch),
+        damage: damage.clone(),
+    };
+
+    let token = match display_backend.submit_frame(frame.clone()) {
+        Ok(token) => token,
+        Err(_error) => {
+            runtime.scheduler.state = PresentationSchedulerState::RetryPending;
+            runtime.retry = Some(OutputRetryState {
+                scene_epoch,
+                scene_generation,
+                output_generation: runtime.state.generation,
+                frame_id,
+                commit_id,
+            });
+            runtime.pending_damage = damage;
+            return Ok(DisplayEvent::PresentationAdvanced {
+                output_id,
+                tick_sequence: runtime.scheduler.last_tick_sequence,
+                eligible: false,
+            });
+        }
+    };
+    token.validate().map_err(|reason| anyhow::anyhow!(reason))?;
+    if token.output_id != output_id
+        || token.output_generation != runtime.state.generation
+        || token.scene_generation != scene_generation
+    {
+        display_backend.retire_submission(&token);
+        return Ok(DisplayEvent::Rejected {
+            reason: "display backend returned a mismatched presentation token".into(),
+        });
+    }
+
+    runtime.submitted_frame_id = frame_id;
+    runtime.scheduler.state = PresentationSchedulerState::SubmissionInFlight;
+    runtime.outstanding = Some(OutstandingPresentation { token: token.clone(), frame });
+    runtime.next_frame_id = frame_id.saturating_add(1);
+
+    if display_backend.submission_completes_immediately() {
+        let result = finish_backend_completion(
+            state,
+            display_backend,
+            token,
+            PresentationCompletion::Presented,
+        );
+        if !matches!(result, PresentationCompletion::Presented) {
+            return Ok(DisplayEvent::Rejected {
+                reason: format!("immediate presentation completion failed: {result:?}"),
+            });
+        }
+    }
+
+    Ok(DisplayEvent::PresentationAdvanced {
+        output_id,
+        tick_sequence: state
+            .outputs
+            .get(selected_output.unwrap_or_default())
+            .map(|runtime| runtime.scheduler.last_tick_sequence)
+            .unwrap_or_default(),
+        eligible: true,
+    })
+}
+
+fn scene_surface_words(surfaces: &[waybroker_common::SurfaceSnapshot]) -> Vec<u32> {
+    let mut words = Vec::with_capacity(surfaces.len().saturating_mul(8));
+    for surface in surfaces {
+        words.extend_from_slice(&[
+            surface.placement.x as u32,
+            surface.placement.y as u32,
+            surface.placement.width,
+            surface.placement.height,
+            surface.placement.z as u32,
+            u32::from(surface.placement.visible),
+            surface.buffer_generation as u32,
+            surface.creation_sequence as u32,
+        ]);
+    }
+    words
+}
+
+async fn drive_presentation_for_feedback(
+    commit_id: u64,
+    source: ServiceRole,
+    config: &Config,
+    state: &mut DisplayState,
+    vulkan: Option<&VulkanBackend>,
+    clock: &mut dyn PresentationClock,
+    display_backend: &mut dyn DisplayBackend,
+) -> Result<()> {
+    if state.presentation_feedbacks.contains_key(&commit_id) {
+        return Ok(());
+    }
+    let pending_outputs: Vec<String> = match state.presentation_obligations.get(&commit_id) {
+        Some(obligation) => {
+            obligation.required_outputs.difference(&obligation.presented_outputs).cloned().collect()
+        }
+        None => return Ok(()),
+    };
+    let Some(scene) = state.last_scene.clone() else {
+        return Ok(());
+    };
+
+    for output_id in pending_outputs {
+        let Some((generation, tick_sequence, now_ns)) =
+            state.outputs.get(&output_id).map(|runtime| {
+                (
+                    runtime.state.generation,
+                    runtime.scheduler.last_tick_sequence.saturating_add(1),
+                    clock
+                        .now()
+                        .max(runtime.scheduler.last_tick_ns)
+                        .max(runtime.scheduler.next_eligible_ns),
+                )
+            })
+        else {
+            continue;
+        };
+        let eligible = advance_presentation(state, &output_id, generation, now_ns, tick_sequence)?;
+        if eligible {
+            let _ = handle_multi_output_commit(
+                scene.target.clone(),
+                scene.focus.clone(),
+                scene.selection.clone(),
+                scene.surfaces.clone(),
+                Vec::new(),
+                scene.scene_epoch,
+                scene.scene_generation,
+                source,
+                config,
+                state,
+                vulkan,
+                clock,
+                display_backend,
+                true,
+                Some(output_id.as_str()),
+            )
+            .await?;
+        }
+        if state.presentation_feedbacks.contains_key(&commit_id) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn scene_generation_is_stale(
+    last_epoch: u64,
+    last_generation: u64,
+    incoming_epoch: u64,
+    incoming_generation: u64,
+) -> bool {
+    incoming_generation != 0
+        && (incoming_epoch < last_epoch
+            || (incoming_epoch == last_epoch && incoming_generation < last_generation))
+}
+
 #[derive(Debug)]
 struct DisplayState {
+    display_epoch: u64,
+    reconciliation_state: DisplayReconciliationState,
     last_scene: Option<CommittedSceneState>,
+    last_scene_epoch: u64,
+    last_scene_generation: u64,
     next_commit_id: u64,
     snapshot_path: PathBuf,
     active_recordings: HashMap<String, RecordingState>,
     pointer_constraints: HashMap<String, waybroker_common::PointerConstraints>,
     presentation_feedbacks: HashMap<u64, DisplayEvent>,
+    presentation_obligations: BTreeMap<u64, PresentationObligation>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    zero_damage_skipped_count: u64,
+    direct_scanout_count: u64,
+    composition_frame_count: u64,
+    outputs: BTreeMap<String, OutputRuntime>,
+    pixel_transport: DisplayPixelTransportStore,
+    backend_sequences: BTreeMap<u64, u64>,
+}
+
+#[derive(Debug, Clone)]
+struct OutputRuntime {
+    state: OutputState,
+    backend_instance_id: u64,
+    backend_output_id: String,
+    disabled: bool,
+    framebuffer: Vec<u32>,
+    next_frame_id: u64,
+    published_frame_id: u64,
+    last_published_scene_generation: u64,
+    pending_damage: Vec<RendererRect>,
+    pending_scene_epoch: u64,
+    pending_scene_generation: u64,
+    pending_commit_id: u64,
+    retry: Option<OutputRetryState>,
+    submitted_frame_id: u64,
+    outstanding: Option<OutstandingPresentation>,
+    scheduler: OutputScheduler,
+}
+
+#[derive(Debug, Clone)]
+struct OutputScheduler {
+    cadence: PresentationCadence,
+    state: PresentationSchedulerState,
+    output_generation: u64,
+    scene_generation: u64,
+    next_eligible_ns: u64,
+    last_tick_ns: u64,
+    last_tick_sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct OutstandingPresentation {
+    token: PresentationToken,
+    frame: FramePublication,
+}
+
+#[derive(Debug, Clone)]
+struct OutputRetryState {
+    scene_epoch: u64,
+    scene_generation: u64,
+    output_generation: u64,
+    frame_id: u64,
+    commit_id: u64,
+}
+
+impl OutputRuntime {
+    fn new(state: OutputState) -> Self {
+        let generation = state.generation;
+        Self {
+            state,
+            backend_instance_id: 0,
+            backend_output_id: String::new(),
+            disabled: false,
+            framebuffer: Vec::new(),
+            next_frame_id: 1,
+            published_frame_id: 0,
+            last_published_scene_generation: 0,
+            pending_damage: Vec::new(),
+            pending_scene_epoch: 0,
+            pending_scene_generation: 0,
+            pending_commit_id: 0,
+            retry: None,
+            submitted_frame_id: 0,
+            outstanding: None,
+            scheduler: OutputScheduler {
+                cadence: PresentationCadence { period_ns: 16_666_667 },
+                state: PresentationSchedulerState::Idle,
+                output_generation: generation,
+                scene_generation: 0,
+                next_eligible_ns: 0,
+                last_tick_ns: 0,
+                last_tick_sequence: 0,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputState {
+    output_id: String,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+    origin_x: i32,
+    origin_y: i32,
+    generation: u64,
+}
+impl OutputState {
+    fn validate(g: &OutputGeometry) -> std::result::Result<Self, String> {
+        if g.output_id.is_empty() || g.width == 0 || g.height == 0 {
+            return Err("invalid output identity or zero dimensions".into());
+        }
+        if g.width > MAX_OUTPUT_DIMENSION || g.height > MAX_OUTPUT_DIMENSION {
+            return Err("output dimensions exceed displayd bounds".into());
+        }
+        if g.format != WL_SHM_FORMAT_XRGB8888 {
+            return Err("output framebuffer must be XRGB8888".into());
+        }
+        let min = g.width.checked_mul(4).ok_or("output stride overflow")?;
+        if g.stride < min || g.stride % 4 != 0 {
+            return Err("undersized or unaligned output stride".into());
+        }
+        let framebuffer_bytes = (g.stride as usize)
+            .checked_mul(g.height as usize)
+            .ok_or("framebuffer size overflow")?;
+        if framebuffer_bytes == 0 || framebuffer_bytes > MAX_OUTPUT_FRAMEBUFFER_BYTES {
+            return Err("framebuffer size exceeds displayd bounds".into());
+        }
+        Ok(Self {
+            output_id: g.output_id.clone(),
+            width: g.width,
+            height: g.height,
+            stride: g.stride,
+            format: g.format,
+            origin_x: g.origin_x,
+            origin_y: g.origin_y,
+            generation: g.output_generation,
+        })
+    }
+    fn bounds(&self) -> RendererRect {
+        RendererRect::from_origin_size(self.origin_x, self.origin_y, self.width, self.height)
+            .expect("validated geometry")
+    }
+    fn framebuffer_words(&self) -> usize {
+        (self.stride as usize / 4) * self.height as usize
+    }
+
+    fn framebuffer_bytes(&self) -> usize {
+        self.stride as usize * self.height as usize
+    }
 }
 
 #[derive(Debug, Clone)]
 struct RecordingState {
     session_id: String,
-    fps: u32,
-    start_timestamp: u64,
 }
 
+// Explicit test/service dependency retained for the non-production presentation boundary.
+#[allow(dead_code)]
 trait PresentationClock {
     fn now(&self) -> u64; // monotonic timestamp in ns
     fn current_seq(&self) -> u64;
@@ -466,13 +2492,117 @@ trait RecordBackend {
 }
 
 trait DisplayBackend {
+    fn poll_output_events(&mut self) -> Result<Vec<BackendOutputEvent>> {
+        Ok(Vec::new())
+    }
     fn enumerate_outputs(&self) -> Result<Vec<OutputMode>>;
     fn set_mode(&mut self, output: &str, mode: &OutputMode) -> Result<()>;
     fn set_gamma(&mut self, output: &str, red: &[u16], green: &[u16], blue: &[u16]) -> Result<()>;
+    fn publish_frame(&mut self, request: FramePublication) -> Result<()>;
+    fn submission_completes_immediately(&self) -> bool {
+        false
+    }
+    fn retire_submission(&mut self, _token: &PresentationToken) {}
+    fn complete_submission(&mut self, _token: &PresentationToken) -> Result<()> {
+        Ok(())
+    }
+    fn capture_published(&self, _output: &str) -> Result<Option<FramePublication>> {
+        Ok(None)
+    }
+    fn reconfigure_output(&mut self, _output_id: &str, _output_generation: u64) -> Result<()> {
+        Ok(())
+    }
+    fn remove_output(&mut self, _output_id: &str) {}
+    fn submit_frame(&mut self, request: FramePublication) -> Result<PresentationToken> {
+        let token = PresentationToken {
+            backend_instance_id: 1,
+            sequence: request.frame_id,
+            output_id: request.output_id.clone(),
+            output_generation: request.output_generation,
+            scene_generation: request.scene_generation,
+            frame_id: request.frame_id,
+        };
+        self.publish_frame(request)?;
+        Ok(token)
+    }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FramePublication {
+    frame_id: u64,
+    commit_id: u64,
+    output_id: String,
+    output_generation: u64,
+    scene_epoch: u64,
+    scene_generation: u64,
+    geometry: OutputGeometry,
+    format: u32,
+    stride: u32,
+    pixels: std::sync::Arc<[u32]>,
+    damage: Vec<RendererRect>,
+}
+
+struct MockDisplayBackend {
+    publications: Vec<FramePublication>,
+    fail_on_frame: Option<u64>,
+    fail_on_output: Option<String>,
+    auto_complete: bool,
+    next_token_sequence: u64,
+    pending_submissions: BTreeMap<PresentationToken, FramePublication>,
+    output_events: VecDeque<BackendOutputEvent>,
+}
+
+impl Default for MockDisplayBackend {
+    fn default() -> Self {
+        Self {
+            publications: Vec::new(),
+            fail_on_frame: None,
+            fail_on_output: None,
+            auto_complete: false,
+            next_token_sequence: 1,
+            pending_submissions: BTreeMap::new(),
+            output_events: VecDeque::new(),
+        }
+    }
+}
+
+impl MockDisplayBackend {
+    fn production() -> Self {
+        Self { auto_complete: true, ..Self::default() }
+    }
+
+    #[cfg(test)]
+    fn queue_output_event(&mut self, event: BackendOutputEvent) {
+        self.output_events.push_back(event);
+    }
+    #[cfg(test)]
+    fn set_fail_on_frame(&mut self, frame_id: u64) {
+        self.fail_on_frame = Some(frame_id);
+    }
+    #[cfg(test)]
+    fn set_fail_on_output(&mut self, output_id: impl Into<String>) {
+        self.fail_on_output = Some(output_id.into());
+    }
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn set_auto_complete(&mut self, enabled: bool) {
+        self.auto_complete = enabled;
+    }
+    #[cfg(test)]
+    fn publications(&self) -> &[FramePublication] {
+        &self.publications
+    }
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn pending_submissions(&self) -> usize {
+        self.pending_submissions.len()
+    }
+}
+
+#[cfg(test)]
 struct FakeDisplayBackend;
 
+#[cfg(test)]
 impl DisplayBackend for FakeDisplayBackend {
     fn enumerate_outputs(&self) -> Result<Vec<OutputMode>> {
         Ok(vec![stub_output_mode()])
@@ -487,6 +2617,486 @@ impl DisplayBackend for FakeDisplayBackend {
             bail!("gamma LUT size mismatch");
         }
         Ok(())
+    }
+
+    fn publish_frame(&mut self, _request: FramePublication) -> Result<()> {
+        Ok(())
+    }
+
+    fn submission_completes_immediately(&self) -> bool {
+        true
+    }
+}
+
+impl DisplayBackend for MockDisplayBackend {
+    fn poll_output_events(&mut self) -> Result<Vec<BackendOutputEvent>> {
+        Ok(self.output_events.drain(..).collect())
+    }
+    fn enumerate_outputs(&self) -> Result<Vec<OutputMode>> {
+        Ok(vec![stub_output_mode()])
+    }
+    fn set_mode(&mut self, _output: &str, _mode: &OutputMode) -> Result<()> {
+        Ok(())
+    }
+    fn set_gamma(&mut self, _output: &str, red: &[u16], green: &[u16], blue: &[u16]) -> Result<()> {
+        if red.len() != green.len() || green.len() != blue.len() {
+            bail!("gamma LUT size mismatch");
+        }
+        Ok(())
+    }
+    fn publish_frame(&mut self, request: FramePublication) -> Result<()> {
+        if self.fail_on_frame == Some(request.frame_id)
+            || self.fail_on_output.as_deref() == Some(request.output_id.as_str())
+        {
+            bail!("mock publication failure for frame {}", request.frame_id);
+        }
+        self.publications.push(request);
+        Ok(())
+    }
+    fn submission_completes_immediately(&self) -> bool {
+        self.auto_complete
+    }
+    fn submit_frame(&mut self, request: FramePublication) -> Result<PresentationToken> {
+        if self.fail_on_frame == Some(request.frame_id)
+            || self.fail_on_output.as_deref() == Some(request.output_id.as_str())
+        {
+            bail!("mock submission failure for frame {}", request.frame_id);
+        }
+        let token = PresentationToken {
+            backend_instance_id: MOCK_BACKEND_INSTANCE_ID,
+            sequence: self.next_token_sequence,
+            output_id: request.output_id.clone(),
+            output_generation: request.output_generation,
+            scene_generation: request.scene_generation,
+            frame_id: request.frame_id,
+        };
+        self.next_token_sequence = self.next_token_sequence.saturating_add(1);
+        self.publications.push(request.clone());
+        if !self.auto_complete {
+            self.pending_submissions.insert(token.clone(), request);
+        }
+        Ok(token)
+    }
+    fn retire_submission(&mut self, token: &PresentationToken) {
+        self.pending_submissions.remove(token);
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct HeadlessShmFrameHeader {
+    magic: u32,
+    version: u16,
+    header_len: u16,
+    output_generation: u64,
+    scene_generation: u64,
+    frame_id: u64,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+    payload_len: u64,
+    completion_sequence: u64,
+}
+
+const HEADLESS_SHM_HEADER_LEN: usize = std::mem::size_of::<HeadlessShmFrameHeader>();
+
+#[cfg(unix)]
+struct HeadlessShmRegion {
+    fd: RawFd,
+    ptr: *mut libc::c_void,
+    len: usize,
+}
+
+#[cfg(unix)]
+unsafe impl Send for HeadlessShmRegion {}
+
+#[cfg(unix)]
+unsafe impl Sync for HeadlessShmRegion {}
+
+#[cfg(unix)]
+impl Drop for HeadlessShmRegion {
+    fn drop(&mut self) {
+        // SAFETY: ptr/len are the exact successful mmap result retained by this owner.
+        unsafe {
+            libc::munmap(self.ptr, self.len);
+            libc::close(self.fd);
+        }
+    }
+}
+
+struct HeadlessShmOutput {
+    #[cfg(unix)]
+    region: HeadlessShmRegion,
+    slot_len: usize,
+    active_slot: usize,
+    generation: u64,
+    latest: Option<FramePublication>,
+    presented: Option<FramePublication>,
+}
+
+#[derive(Default)]
+struct HeadlessShmDisplayBackend {
+    backend_instance_id: u64,
+    configured: BTreeMap<String, OutputGeometry>,
+    outputs: BTreeMap<String, HeadlessShmOutput>,
+    pending: BTreeMap<PresentationToken, FramePublication>,
+    next_sequence: u64,
+    #[cfg(test)]
+    failure: Option<HeadlessShmFailure>,
+    output_events: VecDeque<BackendOutputEvent>,
+    next_event_sequence: u64,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadlessShmFailure {
+    Allocation,
+    Mapping,
+    Copy,
+    AtomicPublish,
+    Completion,
+}
+
+impl HeadlessShmDisplayBackend {
+    fn new_with_instance_id(backend_instance_id: u64) -> Self {
+        Self { backend_instance_id, ..Self::default() }
+    }
+
+    fn instance_id(&self) -> u64 {
+        self.backend_instance_id.max(HEADLESS_SHM_BACKEND_INSTANCE_ID)
+    }
+
+    fn queue_connected_output(&mut self, geometry: OutputGeometry) {
+        self.configured.insert(geometry.output_id.clone(), geometry.clone());
+        if self.next_event_sequence == 0 {
+            self.next_event_sequence = 1;
+        }
+        self.output_events.push_back(BackendOutputEvent::Connected {
+            backend_instance_id: self.instance_id(),
+            backend_output_id: geometry.output_id.clone(),
+            event_sequence: self.next_event_sequence,
+            geometry,
+            cadence: PresentationCadence { period_ns: 16_666_667 },
+        });
+        self.next_event_sequence = self.next_event_sequence.saturating_add(1);
+    }
+
+    #[cfg(test)]
+    fn queue_output_event(&mut self, event: BackendOutputEvent) {
+        self.output_events.push_back(event);
+    }
+    #[cfg(test)]
+    fn inject_failure(&mut self, failure: HeadlessShmFailure) {
+        self.failure = Some(failure);
+    }
+
+    #[cfg(test)]
+    fn fail_if_injected(&mut self, failure: HeadlessShmFailure) -> Result<()> {
+        if self.failure == Some(failure) {
+            self.failure = None;
+            bail!("headless-shm injected {:?} failure", failure);
+        }
+        Ok(())
+    }
+
+    fn validate_frame(request: &FramePublication) -> Result<(usize, usize)> {
+        if request.geometry.output_id != request.output_id
+            || request.geometry.output_generation != request.output_generation
+            || request.geometry.stride != request.stride
+            || request.geometry.format != request.format
+        {
+            bail!("headless-shm frame metadata is internally inconsistent");
+        }
+        if request.geometry.width == 0 || request.geometry.height == 0 {
+            bail!("headless-shm rejects zero-sized output");
+        }
+        if request.format != WL_SHM_FORMAT_ARGB8888 && request.format != WL_SHM_FORMAT_XRGB8888 {
+            bail!("headless-shm rejects unsupported pixel format {}", request.format);
+        }
+        let row_bytes = request
+            .geometry
+            .width
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("headless-shm row size overflow"))?;
+        if request.stride < row_bytes {
+            bail!("headless-shm stride is smaller than the row payload");
+        }
+        let payload_len = usize::try_from(
+            u64::from(request.stride)
+                .checked_mul(u64::from(request.geometry.height))
+                .ok_or_else(|| anyhow::anyhow!("headless-shm payload size overflow"))?,
+        )
+        .map_err(|_| anyhow::anyhow!("headless-shm payload does not fit usize"))?;
+        if payload_len > MAX_OUTPUT_FRAMEBUFFER_BYTES {
+            bail!("headless-shm frame exceeds displayd framebuffer budget");
+        }
+        let expected_pixels = usize::try_from(
+            u64::from(request.geometry.width)
+                .checked_mul(u64::from(request.geometry.height))
+                .ok_or_else(|| anyhow::anyhow!("headless-shm pixel count overflow"))?,
+        )
+        .map_err(|_| anyhow::anyhow!("headless-shm pixel count does not fit usize"))?;
+        if request.pixels.len() != expected_pixels {
+            bail!("headless-shm pixel payload length mismatch");
+        }
+        Ok((payload_len, usize::try_from(row_bytes).unwrap_or(usize::MAX)))
+    }
+
+    #[cfg(unix)]
+    fn allocate_region(len: usize) -> Result<HeadlessShmRegion> {
+        let name = std::ffi::CString::new("tuff-xwin-headless-frame")?;
+        // SAFETY: name is NUL-terminated and the flags are valid for memfd_create.
+        let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let length = i64::try_from(len).map_err(|_| anyhow::anyhow!("shared memory too large"))?;
+        // SAFETY: fd is owned here and length is checked before ftruncate.
+        if unsafe { libc::ftruncate(fd, length) } != 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(err.into());
+        }
+        // SAFETY: mmap receives the valid sized memfd and returns an owned mapping.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            let err = std::io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(err.into());
+        }
+        Ok(HeadlessShmRegion { fd, ptr, len })
+    }
+
+    fn publish_atomic(&mut self, request: FramePublication) -> Result<()> {
+        let (payload_len, row_bytes) = Self::validate_frame(&request)?;
+        let slot_len = HEADLESS_SHM_HEADER_LEN
+            .checked_add(payload_len)
+            .ok_or_else(|| anyhow::anyhow!("headless-shm slot size overflow"))?;
+        #[cfg(test)]
+        self.fail_if_injected(HeadlessShmFailure::Copy)?;
+        #[cfg(test)]
+        self.fail_if_injected(HeadlessShmFailure::AtomicPublish)?;
+        let output = self.outputs.get(&request.output_id);
+        let needs_new_region = output
+            .map(|output| {
+                output.generation != request.output_generation || output.slot_len != slot_len
+            })
+            .unwrap_or(true);
+        if needs_new_region {
+            #[cfg(test)]
+            self.fail_if_injected(HeadlessShmFailure::Allocation)?;
+            #[cfg(test)]
+            self.fail_if_injected(HeadlessShmFailure::Mapping)?;
+            #[cfg(unix)]
+            let region = Self::allocate_region(
+                slot_len
+                    .checked_mul(2)
+                    .ok_or_else(|| anyhow::anyhow!("headless-shm region size overflow"))?,
+            )?;
+            #[cfg(not(unix))]
+            bail!("headless-shm requires a Unix shared-memory implementation");
+            self.outputs.insert(
+                request.output_id.clone(),
+                HeadlessShmOutput {
+                    #[cfg(unix)]
+                    region,
+                    slot_len,
+                    active_slot: 0,
+                    generation: request.output_generation,
+                    latest: None,
+                    presented: None,
+                },
+            );
+        }
+        let completion_sequence = self.next_sequence;
+        let output = self.outputs.get_mut(&request.output_id).expect("headless output inserted");
+        let inactive = 1usize.saturating_sub(output.active_slot);
+        #[cfg(unix)]
+        {
+            // SAFETY: slot bounds were allocated from the checked slot_len and the mapping is owned.
+            let base = unsafe { (output.region.ptr as *mut u8).add(inactive * output.slot_len) };
+            let payload = unsafe { base.add(HEADLESS_SHM_HEADER_LEN) };
+            unsafe { std::ptr::write_bytes(payload, 0, payload_len) };
+            for (row, pixels) in request.pixels.chunks(request.geometry.width as usize).enumerate()
+            {
+                let dst = unsafe {
+                    payload.add(row * usize::try_from(request.stride).unwrap_or(usize::MAX))
+                };
+                for (column, pixel) in pixels.iter().enumerate() {
+                    let bytes = pixel.to_le_bytes();
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.add(column * 4), 4)
+                    };
+                }
+                let _ = row_bytes;
+            }
+            let header = HeadlessShmFrameHeader {
+                magic: HEADLESS_SHM_MAGIC,
+                version: HEADLESS_SHM_VERSION,
+                header_len: HEADLESS_SHM_HEADER_LEN as u16,
+                output_generation: request.output_generation,
+                scene_generation: request.scene_generation,
+                frame_id: request.frame_id,
+                width: request.geometry.width,
+                height: request.geometry.height,
+                stride: request.stride,
+                format: request.format,
+                payload_len: payload_len as u64,
+                completion_sequence,
+            };
+            // SAFETY: header is copied into the inactive slot after the complete payload.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    (&header as *const HeadlessShmFrameHeader).cast::<u8>(),
+                    base,
+                    HEADLESS_SHM_HEADER_LEN,
+                );
+            }
+        }
+        output.active_slot = inactive;
+        output.generation = request.output_generation;
+        output.latest = Some(request.clone());
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn latest(&self, output_id: &str) -> Option<&FramePublication> {
+        self.outputs.get(output_id)?.latest.as_ref()
+    }
+}
+
+impl DisplayBackend for HeadlessShmDisplayBackend {
+    fn poll_output_events(&mut self) -> Result<Vec<BackendOutputEvent>> {
+        let events: Vec<_> = self.output_events.drain(..).collect();
+        for event in &events {
+            match event {
+                BackendOutputEvent::Connected { geometry, .. }
+                | BackendOutputEvent::Reconfigured { geometry, .. } => {
+                    self.configured.insert(geometry.output_id.clone(), geometry.clone());
+                }
+                BackendOutputEvent::Disabled { backend_output_id, .. }
+                | BackendOutputEvent::Disconnected { backend_output_id, .. } => {
+                    self.configured.remove(backend_output_id);
+                }
+                BackendOutputEvent::BackendReset { .. } => self.configured.clear(),
+            }
+        }
+        Ok(events)
+    }
+    fn enumerate_outputs(&self) -> Result<Vec<OutputMode>> {
+        Ok(self
+            .configured
+            .values()
+            .map(|geometry| OutputMode {
+                name: geometry.output_id.clone(),
+                width: geometry.width,
+                height: geometry.height,
+                refresh_hz: 0,
+            })
+            .collect())
+    }
+
+    fn set_mode(&mut self, _output: &str, _mode: &OutputMode) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_gamma(&mut self, _output: &str, red: &[u16], green: &[u16], blue: &[u16]) -> Result<()> {
+        if red.len() != green.len() || green.len() != blue.len() {
+            bail!("gamma LUT size mismatch");
+        }
+        Ok(())
+    }
+
+    fn publish_frame(&mut self, request: FramePublication) -> Result<()> {
+        self.publish_atomic(request)
+    }
+
+    fn submit_frame(&mut self, request: FramePublication) -> Result<PresentationToken> {
+        if self.pending.len() >= MAX_HEADLESS_PENDING_SUBMISSIONS {
+            bail!("headless-shm pending submission budget exhausted");
+        }
+        let pending_bytes = self.pending.values().try_fold(0usize, |total, frame| {
+            total.checked_add(frame.pixels.len().saturating_mul(4))
+        });
+        let request_bytes = request.pixels.len().saturating_mul(4);
+        let aggregate_pending_bytes = pending_bytes
+            .and_then(|bytes| bytes.checked_add(request_bytes))
+            .ok_or_else(|| anyhow::anyhow!("headless-shm pending byte accounting overflow"))?;
+        if aggregate_pending_bytes > MAX_TOTAL_FRAMEBUFFER_BYTES {
+            bail!("headless-shm pending byte budget exhausted");
+        }
+        self.publish_atomic(request.clone())?;
+        let token = PresentationToken {
+            backend_instance_id: self.instance_id(),
+            sequence: self.next_sequence,
+            output_id: request.output_id.clone(),
+            output_generation: request.output_generation,
+            scene_generation: request.scene_generation,
+            frame_id: request.frame_id,
+        };
+        self.pending.insert(token.clone(), request);
+        Ok(token)
+    }
+
+    fn submission_completes_immediately(&self) -> bool {
+        true
+    }
+
+    fn retire_submission(&mut self, token: &PresentationToken) {
+        self.pending.remove(token);
+    }
+
+    fn complete_submission(&mut self, token: &PresentationToken) -> Result<()> {
+        #[cfg(test)]
+        self.fail_if_injected(HeadlessShmFailure::Completion)?;
+        let Some(frame) = self.pending.remove(token) else {
+            bail!("headless-shm completion token is unknown");
+        };
+        self.outputs
+            .get_mut(&token.output_id)
+            .ok_or_else(|| anyhow::anyhow!("headless-shm output was removed"))?
+            .presented = Some(frame);
+        Ok(())
+    }
+
+    fn capture_published(&self, output: &str) -> Result<Option<FramePublication>> {
+        Ok(self.outputs.get(output).and_then(|state| state.presented.clone()))
+    }
+
+    fn reconfigure_output(&mut self, output_id: &str, output_generation: u64) -> Result<()> {
+        if let Some(geometry) = self.configured.get_mut(output_id) {
+            geometry.output_generation = output_generation;
+        }
+        if self
+            .outputs
+            .get(output_id)
+            .map(|output| output.generation != output_generation)
+            .unwrap_or(false)
+        {
+            self.outputs.remove(output_id);
+        }
+        self.pending.retain(|token, _| {
+            token.output_id != output_id || token.output_generation == output_generation
+        });
+        Ok(())
+    }
+
+    fn remove_output(&mut self, output_id: &str) {
+        self.configured.remove(output_id);
+        self.outputs.remove(output_id);
+        self.pending.retain(|token, _| token.output_id != output_id);
     }
 }
 
@@ -512,9 +3122,11 @@ impl CaptureBackend for RealCaptureBackendStub {
     }
 }
 
+#[cfg(test)]
 struct PortalCaptureBackendStub;
 
 #[async_trait::async_trait]
+#[cfg(test)]
 impl CaptureBackend for PortalCaptureBackendStub {
     async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
         bail!(
@@ -534,7 +3146,7 @@ impl PortalCaptureBackend {
 #[cfg(feature = "real-portal")]
 #[async_trait::async_trait]
 impl CaptureBackend for PortalCaptureBackend {
-    async fn capture(&self, output: &str) -> Result<(u32, u32, Vec<u32>)> {
+    async fn capture(&self, _output: &str) -> Result<(u32, u32, Vec<u32>)> {
         use ashpd::WindowIdentifier;
         use ashpd::desktop::PersistMode;
         use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
@@ -551,7 +3163,7 @@ impl CaptureBackend for PortalCaptureBackend {
 
         println!("service=displayd op=portal_capture event=initiation");
 
-        let mut restore_token: Option<String> = None;
+        let restore_token: Option<String> = None;
 
         let proxy = Screencast::new().await.context("failed to create Screencast portal proxy")?;
 
@@ -688,7 +3300,7 @@ impl CaptureBackend for PortalCaptureBackend {
                 if cell.frame_data.is_some() { return; }
 
                 let video_info = match &cell.format {
-                    Some(info) => info.clone(),
+                    Some(info) => *info,
                     None => {
                         cell.frame_data = Some(Err(anyhow::anyhow!("process called before format negotiation")));
                         cell.mainloop.quit();
@@ -1053,6 +3665,7 @@ impl CaptureBackend for X11CaptureBackend {
     }
 }
 
+#[cfg(any(test, feature = "real-x11"))]
 fn convert_x11_to_internal_u32(
     width: u32,
     height: u32,
@@ -1104,38 +3717,49 @@ impl RecordBackend for FakeRecordBackend {
     }
 }
 
-struct FakePresentationClock {
-    time_ns: u64,
-    seq: u64,
-}
+struct FakePresentationClock;
 
 impl Default for FakePresentationClock {
     fn default() -> Self {
-        Self { time_ns: 1_000_000_000, seq: 1 }
+        Self
     }
 }
 
 impl PresentationClock for FakePresentationClock {
     fn now(&self) -> u64 {
-        self.time_ns
+        1_000_000_000
     }
     fn current_seq(&self) -> u64 {
-        self.seq
-    }
-}
-
-impl FakePresentationClock {
-    fn advance_frame(&mut self) {
-        self.time_ns += 16_666_666; // 60Hz
-        self.seq += 1;
+        1
     }
 }
 
 impl DisplayState {
+    fn begin_restart(&mut self, new_epoch: u64) -> Result<()> {
+        if new_epoch < self.display_epoch {
+            bail!("display epoch must advance monotonically");
+        }
+        if new_epoch == self.display_epoch {
+            self.reconciliation_state = DisplayReconciliationState::Recovering;
+            self.presentation_feedbacks.clear();
+            return Ok(());
+        }
+        self.display_epoch = new_epoch;
+        self.reconciliation_state = DisplayReconciliationState::Recovering;
+        self.outputs.clear();
+        self.backend_sequences.clear();
+        self.presentation_feedbacks.clear();
+        Ok(())
+    }
+
     fn load(session_instance_id: &str) -> Result<Self> {
         let _ = ensure_runtime_dir()?;
         let snapshot_path = session_artifact_path(session_instance_id, "scene-snapshot");
         let last_scene = load_scene_snapshot(&snapshot_path)?;
+        let (last_scene_epoch, last_scene_generation) = last_scene
+            .as_ref()
+            .map(|scene| (scene.scene_epoch, scene.scene_generation))
+            .unwrap_or((0, 0));
         let next_commit_id =
             last_scene.as_ref().map(|scene| scene.commit_id.saturating_add(1)).unwrap_or(1);
 
@@ -1160,24 +3784,63 @@ impl DisplayState {
         }
 
         Ok(Self {
+            display_epoch: generate_display_epoch(),
+            reconciliation_state: DisplayReconciliationState::ReconciledAwaitingPresentation,
             last_scene,
+            last_scene_epoch,
+            last_scene_generation,
             next_commit_id,
             snapshot_path,
             active_recordings: HashMap::new(),
             pointer_constraints: HashMap::new(),
             presentation_feedbacks: HashMap::new(),
+            presentation_obligations: BTreeMap::new(),
+            zero_damage_skipped_count: 0,
+            direct_scanout_count: 0,
+            composition_frame_count: 0,
+            outputs: default_output_registry(),
+            pixel_transport: DisplayPixelTransportStore::default(),
+            backend_sequences: BTreeMap::new(),
         })
     }
 
     fn record_commit(&mut self, scene: CommittedSceneState) -> Result<()> {
-        fs::write(
-            &self.snapshot_path,
-            serde_json::to_vec_pretty(&scene).context("failed to serialize scene snapshot")?,
-        )
-        .with_context(|| {
-            format!("failed to write scene snapshot {}", self.snapshot_path.display())
-        })?;
+        let bytes =
+            serde_json::to_vec_pretty(&scene).context("failed to serialize scene snapshot")?;
+        if bytes.len() > MAX_SCENE_SNAPSHOT_BYTES {
+            bail!("scene snapshot exceeds displayd persistence budget");
+        }
+        let temp_nonce = NEXT_SNAPSHOT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_path = self.snapshot_path.with_extension(format!(
+            "tmp-{}-{}-{}",
+            std::process::id(),
+            scene.commit_id,
+            temp_nonce
+        ));
+        let write_result = (|| -> Result<()> {
+            let mut file = fs::File::create(&temp_path).with_context(|| {
+                format!("failed to create temporary scene snapshot {}", temp_path.display())
+            })?;
+            file.write_all(&bytes).context("failed to write temporary scene snapshot")?;
+            file.sync_all().context("failed to sync temporary scene snapshot")?;
+            fs::rename(&temp_path, &self.snapshot_path).with_context(|| {
+                format!(
+                    "failed to atomically replace scene snapshot {}",
+                    self.snapshot_path.display()
+                )
+            })?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        write_result?;
+
         self.next_commit_id = scene.commit_id.saturating_add(1);
+        if scene.scene_generation != 0 {
+            self.last_scene_epoch = scene.scene_epoch;
+            self.last_scene_generation = scene.scene_generation;
+        }
         self.last_scene = Some(scene);
         Ok(())
     }
@@ -1190,9 +3853,938 @@ impl DisplayState {
             None
         }
     }
+
+    #[cfg(test)]
+    fn new_test() -> Self {
+        Self {
+            display_epoch: 1,
+            reconciliation_state: DisplayReconciliationState::ReconciledAwaitingPresentation,
+            last_scene: None,
+            last_scene_epoch: 0,
+            last_scene_generation: 0,
+            next_commit_id: 1,
+            snapshot_path: std::env::temp_dir().join(format!(
+                "scene-snapshot-{}-{}",
+                std::process::id(),
+                NEXT_TEST_SNAPSHOT_ID.fetch_add(1, Ordering::Relaxed)
+            )),
+            active_recordings: HashMap::new(),
+            pointer_constraints: HashMap::new(),
+            presentation_feedbacks: HashMap::new(),
+            presentation_obligations: BTreeMap::new(),
+            zero_damage_skipped_count: 0,
+            direct_scanout_count: 0,
+            composition_frame_count: 0,
+            outputs: default_output_registry(),
+            pixel_transport: DisplayPixelTransportStore::default(),
+            backend_sequences: BTreeMap::new(),
+        }
+    }
+}
+
+fn default_output_registry() -> BTreeMap<String, OutputRuntime> {
+    let state = OutputState {
+        output_id: "eDP-1".into(),
+        width: 1920,
+        height: 1080,
+        stride: 1920 * 4,
+        format: WL_SHM_FORMAT_XRGB8888,
+        origin_x: 0,
+        origin_y: 0,
+        generation: 0,
+    };
+    BTreeMap::from([(state.output_id.clone(), OutputRuntime::new(state))])
+}
+
+fn readiness_from_state(state: &DisplayState, renderer_available: bool) -> ServiceReadiness {
+    let outputs: Vec<OutputReadiness> = state
+        .outputs
+        .iter()
+        .map(|(output_id, runtime)| {
+            let retry_pending = runtime.retry.is_some();
+            let output_state = if runtime.disabled {
+                OutputReadinessState::Disabled
+            } else if retry_pending {
+                OutputReadinessState::RetryPending
+            } else if runtime.outstanding.is_some() {
+                OutputReadinessState::SubmittedAwaitingPresentation
+            } else if runtime.published_frame_id != 0 && runtime.pending_damage.is_empty() {
+                OutputReadinessState::Ready
+            } else {
+                OutputReadinessState::ConfiguredAwaitingPublication
+            };
+            OutputReadiness {
+                output_id: output_id.clone(),
+                output_generation: runtime.state.generation,
+                state: output_state,
+                last_published_frame_id: runtime.published_frame_id,
+                last_published_scene_generation: runtime.last_published_scene_generation,
+                pending_damage: !runtime.pending_damage.is_empty(),
+                retry_pending,
+            }
+        })
+        .collect();
+    let ready = outputs.iter().filter(|o| o.state == OutputReadinessState::Ready).count();
+    let retry = outputs.iter().filter(|o| o.retry_pending).count();
+    let failed = outputs
+        .iter()
+        .filter(|o| {
+            matches!(
+                o.state,
+                OutputReadinessState::PublicationFailed | OutputReadinessState::RetryPending
+            )
+        })
+        .count();
+    let state_value = if !renderer_available || outputs.is_empty() {
+        ServiceReadinessState::LiveNotReady
+    } else if ready == outputs.len() {
+        ServiceReadinessState::Ready
+    } else if ready > 0 {
+        ServiceReadinessState::PartiallyReady
+    } else {
+        ServiceReadinessState::Failed
+    };
+    ServiceReadiness {
+        ipc_available: true,
+        canonical_scene_available: state.last_scene.is_some(),
+        renderer_available,
+        configured_output_count: outputs.len(),
+        ready_output_count: ready,
+        failed_output_count: failed,
+        retry_pending_output_count: retry,
+        state: state_value,
+        outputs,
+    }
+}
+
+fn preflight_presentation_token(
+    state: &DisplayState,
+    token: &PresentationToken,
+) -> std::result::Result<(), PresentationCompletion> {
+    token.validate().map_err(|_| PresentationCompletion::UnknownToken)?;
+    let runtime =
+        state.outputs.get(&token.output_id).ok_or(PresentationCompletion::UnknownToken)?;
+    if runtime.state.generation != token.output_generation {
+        return Err(PresentationCompletion::StaleGeneration);
+    }
+    if runtime.backend_instance_id != 0 && runtime.backend_instance_id != token.backend_instance_id
+    {
+        return Err(PresentationCompletion::StaleGeneration);
+    }
+    let outstanding = runtime.outstanding.as_ref().ok_or(PresentationCompletion::UnknownToken)?;
+    if outstanding.token != *token {
+        return Err(PresentationCompletion::UnknownToken);
+    }
+    Ok(())
+}
+
+fn note_presented_obligations(
+    state: &mut DisplayState,
+    frame: &FramePublication,
+    output_id: &str,
+    refresh_ns: u32,
+    seq: u64,
+) {
+    let matching: Vec<u64> = state
+        .presentation_obligations
+        .iter_mut()
+        .filter_map(|(commit_id, obligation)| {
+            let generation_matches = if frame.scene_generation == 0 {
+                *commit_id == frame.commit_id
+            } else {
+                obligation.scene_epoch == frame.scene_epoch
+                    && obligation.scene_generation <= frame.scene_generation
+            };
+            if generation_matches && obligation.required_outputs.contains(output_id) {
+                obligation.presented_outputs.insert(output_id.to_string());
+            }
+            (generation_matches
+                && obligation.required_outputs.is_subset(&obligation.presented_outputs))
+            .then_some(*commit_id)
+        })
+        .collect();
+
+    for commit_id in matching {
+        insert_bounded_feedback(
+            state,
+            commit_id,
+            DisplayEvent::FramePresented {
+                commit_id,
+                timestamp: monotonic_now_ns(),
+                refresh_ns,
+                seq,
+                flags: 0,
+            },
+        );
+        state.presentation_obligations.remove(&commit_id);
+    }
+}
+
+fn complete_presentation(
+    state: &mut DisplayState,
+    token: PresentationToken,
+    outcome: PresentationCompletion,
+) -> PresentationCompletion {
+    if let Err(result) = preflight_presentation_token(state, &token) {
+        return result;
+    }
+
+    let (outstanding, cadence_period) = {
+        let runtime = state.outputs.get_mut(&token.output_id).expect("preflight output exists");
+        let outstanding = runtime.outstanding.take().expect("preflight outstanding exists");
+        (outstanding, runtime.scheduler.cadence.period_ns)
+    };
+
+    let result = match outcome {
+        PresentationCompletion::Presented => {
+            let runtime = state.outputs.get_mut(&token.output_id).expect("preflight output exists");
+            runtime.framebuffer = outstanding.frame.pixels.to_vec();
+            runtime.published_frame_id = token.frame_id;
+            runtime.last_published_scene_generation = token.scene_generation;
+            if (runtime.pending_scene_epoch, runtime.pending_scene_generation)
+                <= (outstanding.frame.scene_epoch, token.scene_generation)
+            {
+                runtime.pending_damage.clear();
+                runtime.pending_commit_id = 0;
+                runtime.retry = None;
+                runtime.scheduler.state = PresentationSchedulerState::Idle;
+            } else {
+                runtime.scheduler.state = PresentationSchedulerState::DamagePending;
+            }
+            let refresh_ns = cadence_period.min(u64::from(u32::MAX)) as u32;
+            note_presented_obligations(
+                state,
+                &outstanding.frame,
+                &token.output_id,
+                refresh_ns,
+                token.sequence,
+            );
+            PresentationCompletion::Presented
+        }
+        other => {
+            let runtime = state.outputs.get_mut(&token.output_id).expect("preflight output exists");
+            if (runtime.pending_scene_epoch, runtime.pending_scene_generation)
+                <= (outstanding.frame.scene_epoch, token.scene_generation)
+            {
+                runtime.pending_damage = outstanding.frame.damage.clone();
+                runtime.pending_scene_epoch = outstanding.frame.scene_epoch;
+                runtime.pending_scene_generation = outstanding.frame.scene_generation;
+                runtime.pending_commit_id = outstanding.frame.commit_id;
+            }
+            runtime.retry = Some(OutputRetryState {
+                scene_epoch: outstanding.frame.scene_epoch,
+                scene_generation: token.scene_generation,
+                output_generation: token.output_generation,
+                frame_id: token.frame_id,
+                commit_id: outstanding.frame.commit_id,
+            });
+            runtime.scheduler.state = PresentationSchedulerState::RetryPending;
+            other
+        }
+    };
+
+    if result == PresentationCompletion::Presented
+        && state.reconciliation_state == DisplayReconciliationState::ReconciledAwaitingPresentation
+        && state
+            .outputs
+            .values()
+            .filter(|output| !output.disabled)
+            .all(|output| output.published_frame_id != 0 && output.pending_damage.is_empty())
+    {
+        state.reconciliation_state = DisplayReconciliationState::Ready;
+    }
+    result
+}
+
+fn finish_backend_completion(
+    state: &mut DisplayState,
+    display_backend: &mut dyn DisplayBackend,
+    token: PresentationToken,
+    outcome: PresentationCompletion,
+) -> PresentationCompletion {
+    if let Err(result) = preflight_presentation_token(state, &token) {
+        return result;
+    }
+    if matches!(outcome, PresentationCompletion::Presented)
+        && display_backend.complete_submission(&token).is_err()
+    {
+        display_backend.retire_submission(&token);
+        return complete_presentation(state, token, PresentationCompletion::BackendUnavailable);
+    }
+    display_backend.retire_submission(&token);
+    complete_presentation(state, token, outcome)
+}
+
+fn advance_presentation(
+    state: &mut DisplayState,
+    output_id: &str,
+    output_generation: u64,
+    now_ns: u64,
+    tick_sequence: u64,
+) -> Result<bool> {
+    let runtime = state
+        .outputs
+        .get_mut(output_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown output {output_id}"))?;
+    if runtime.state.generation != output_generation
+        || runtime.scheduler.output_generation != output_generation
+    {
+        bail!("stale output generation for {output_id}");
+    }
+    if let Some(retry) = runtime.retry.as_ref() {
+        let retry_is_current = retry.output_generation == runtime.state.generation
+            && retry.scene_epoch == runtime.pending_scene_epoch
+            && retry.scene_generation == runtime.pending_scene_generation
+            && retry.commit_id == runtime.pending_commit_id
+            && retry.frame_id <= runtime.next_frame_id;
+        if !retry_is_current {
+            runtime.retry = None;
+            if !runtime.pending_damage.is_empty() {
+                runtime.scheduler.state = PresentationSchedulerState::DamagePending;
+            }
+        }
+    }
+    if runtime.disabled {
+        runtime.scheduler.last_tick_ns = now_ns;
+        runtime.scheduler.last_tick_sequence = tick_sequence;
+        return Ok(false);
+    }
+    if now_ns < runtime.scheduler.last_tick_ns {
+        bail!("presentation clock moved backwards for {output_id}");
+    }
+    if tick_sequence <= runtime.scheduler.last_tick_sequence {
+        bail!("duplicate presentation tick for {output_id}");
+    }
+    runtime.scheduler.last_tick_ns = now_ns;
+    runtime.scheduler.last_tick_sequence = tick_sequence;
+    let eligible = now_ns >= runtime.scheduler.next_eligible_ns
+        && runtime.outstanding.is_none()
+        && (!runtime.pending_damage.is_empty()
+            || runtime.scheduler.state == PresentationSchedulerState::DamagePending
+            || runtime.scheduler.state == PresentationSchedulerState::RetryPending);
+    if eligible {
+        runtime.scheduler.state = PresentationSchedulerState::SubmissionEligible;
+        runtime.scheduler.next_eligible_ns =
+            now_ns.saturating_add(runtime.scheduler.cadence.period_ns);
+    } else if runtime.outstanding.is_some() {
+        runtime.scheduler.state = PresentationSchedulerState::PresentationBlocked;
+    }
+    Ok(eligible)
+}
+
+#[allow(dead_code)]
+fn submit_pixel_payloads(
+    store: &mut DisplayPixelTransportStore,
+    payloads: Vec<PixelTransportPayload>,
+) -> std::result::Result<(), PixelTransportError> {
+    for payload in payloads {
+        store.submit(payload)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RendererRect {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+}
+
+impl RendererRect {
+    fn from_origin_size(x: i32, y: i32, width: u32, height: u32) -> Option<Self> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let x1 = checked_add_i32_u32(x, width)?;
+        let y1 = checked_add_i32_u32(y, height)?;
+        (x1 > x && y1 > y).then_some(Self { x0: x, y0: y, x1, y1 })
+    }
+
+    fn width(self) -> u32 {
+        (self.x1 - self.x0) as u32
+    }
+
+    fn height(self) -> u32 {
+        (self.y1 - self.y0) as u32
+    }
+
+    fn area(self) -> u64 {
+        self.width() as u64 * self.height() as u64
+    }
+
+    fn intersect(self, other: Self) -> Option<Self> {
+        let rect = Self {
+            x0: self.x0.max(other.x0),
+            y0: self.y0.max(other.y0),
+            x1: self.x1.min(other.x1),
+            y1: self.y1.min(other.y1),
+        };
+        (rect.x1 > rect.x0 && rect.y1 > rect.y0).then_some(rect)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct CompositionStats {
+    damaged_pixels: u64,
+    copied_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PixelFormatPolicy {
+    PremultipliedArgb8888,
+    OpaqueXrgb8888,
+}
+
+impl PixelFormatPolicy {
+    fn from_wire_format(format: u32) -> std::result::Result<Self, String> {
+        match format {
+            WL_SHM_FORMAT_ARGB8888 => Ok(Self::PremultipliedArgb8888),
+            WL_SHM_FORMAT_XRGB8888 => Ok(Self::OpaqueXrgb8888),
+            other => Err(format!("unsupported pixel format {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourcePixel {
+    Opaque(u32),
+    Premultiplied { a: u8, r: u8, g: u8, b: u8 },
+}
+
+fn checked_add_i32_u32(value: i32, delta: u32) -> Option<i32> {
+    let sum = value as i64 + delta as i64;
+    i32::try_from(sum).ok()
+}
+
+fn framebuffer_is_initialized(framebuffer: &[u32], output: &OutputState) -> bool {
+    framebuffer.len() == output.framebuffer_words()
+}
+
+#[cfg(test)]
+fn ensure_framebuffer(framebuffer: &mut Vec<u32>) {
+    if framebuffer.len() != (FRAMEBUFFER_WIDTH as usize * FRAMEBUFFER_HEIGHT as usize) {
+        *framebuffer =
+            vec![BACKGROUND_PIXEL; FRAMEBUFFER_WIDTH as usize * FRAMEBUFFER_HEIGHT as usize];
+    }
+}
+
+fn surface_output_bounds(surface: &waybroker_common::SurfaceSnapshot) -> Option<RendererRect> {
+    if !surface.placement.visible {
+        return None;
+    }
+    RendererRect::from_origin_size(
+        surface.placement.x,
+        surface.placement.y,
+        surface.placement.width,
+        surface.placement.height,
+    )
+}
+
+fn surface_damage_rects(
+    surface: &waybroker_common::SurfaceSnapshot,
+    output_bounds: RendererRect,
+) -> Vec<RendererRect> {
+    let Some(surface_bounds) = surface_output_bounds(surface) else {
+        return Vec::new();
+    };
+    let Some(surface_local_bounds) =
+        RendererRect::from_origin_size(0, 0, surface.placement.width, surface.placement.height)
+    else {
+        return Vec::new();
+    };
+    surface
+        .damage_rects
+        .iter()
+        .filter_map(|damage| {
+            let local =
+                RendererRect::from_origin_size(damage.x, damage.y, damage.width, damage.height)?;
+            let local = local.intersect(surface_local_bounds)?;
+            let output = RendererRect::from_origin_size(
+                surface.placement.x.checked_add(local.x0)?,
+                surface.placement.y.checked_add(local.y0)?,
+                local.width(),
+                local.height(),
+            )?;
+            output.intersect(surface_bounds)?.intersect(output_bounds)
+        })
+        .collect()
+}
+
+fn effective_damage_rects(
+    previous: Option<&CommittedSceneState>,
+    surfaces: &[waybroker_common::SurfaceSnapshot],
+    framebuffer_ready: bool,
+    output_bounds: RendererRect,
+) -> Vec<RendererRect> {
+    if previous.is_none() || !framebuffer_ready {
+        return vec![output_bounds];
+    }
+
+    let previous = previous.expect("checked above");
+    let previous_by_id: HashMap<&str, &waybroker_common::SurfaceSnapshot> =
+        previous.surfaces.iter().map(|surface| (surface.id.as_str(), surface)).collect();
+    let current_by_id: HashMap<&str, &waybroker_common::SurfaceSnapshot> =
+        surfaces.iter().map(|surface| (surface.id.as_str(), surface)).collect();
+    let mut damage = Vec::new();
+
+    for surface in surfaces {
+        let previous_surface = previous_by_id.get(surface.id.as_str()).copied();
+        if previous_surface
+            .map(|old| surface_exposes_or_occupies_different_region(old, surface))
+            .unwrap_or(true)
+        {
+            if let Some(rect) =
+                surface_output_bounds(surface).and_then(|r| r.intersect(output_bounds))
+            {
+                damage.push(rect);
+            }
+        }
+        damage.extend(surface_damage_rects(surface, output_bounds));
+    }
+
+    for old in &previous.surfaces {
+        if !current_by_id.contains_key(old.id.as_str())
+            || current_by_id
+                .get(old.id.as_str())
+                .map(|new| surface_exposes_or_occupies_different_region(old, new))
+                .unwrap_or(false)
+        {
+            if let Some(rect) = surface_output_bounds(old).and_then(|r| r.intersect(output_bounds))
+            {
+                damage.push(rect);
+            }
+        }
+    }
+
+    damage.sort_by_key(|rect| (rect.y0, rect.x0, rect.y1, rect.x1));
+    damage.dedup();
+    if damage.len() > MAX_DAMAGE_RECTS { vec![output_bounds] } else { damage }
+}
+
+fn surface_exposes_or_occupies_different_region(
+    old: &waybroker_common::SurfaceSnapshot,
+    new: &waybroker_common::SurfaceSnapshot,
+) -> bool {
+    old.placement != new.placement
+        || old.buffer_generation != new.buffer_generation
+        || old.placement.visible != new.placement.visible
+}
+
+fn compose_damage_rects(
+    framebuffer: &mut [u32],
+    output: &OutputState,
+    store: &DisplayPixelTransportStore,
+    surfaces: &[waybroker_common::SurfaceSnapshot],
+    damage_rects: &[RendererRect],
+) -> std::result::Result<CompositionStats, String> {
+    let mut stats = CompositionStats::default();
+    let mut ordered: Vec<_> = surfaces.iter().collect();
+    ordered.sort_by(|left, right| {
+        (left.layer_class, left.placement.z, left.creation_sequence, left.id.as_str()).cmp(&(
+            right.layer_class,
+            right.placement.z,
+            right.creation_sequence,
+            right.id.as_str(),
+        ))
+    });
+    for damage in damage_rects {
+        stats.damaged_pixels = stats.damaged_pixels.saturating_add(damage.area());
+        fill_framebuffer_rect(framebuffer, output, *damage, BACKGROUND_PIXEL)?;
+        for surface in &ordered {
+            let Some(surface_bounds) = surface_output_bounds(surface) else {
+                continue;
+            };
+            let Some(copy_rect) = surface_bounds.intersect(*damage) else {
+                continue;
+            };
+            let color = fallback_surface_pixel(surface);
+            copy_surface_rect(framebuffer, output, store, surface, copy_rect, color)?;
+        }
+    }
+    stats.copied_bytes = stats.damaged_pixels.saturating_mul(4);
+    Ok(stats)
+}
+
+fn validate_surface_pixels_for_damage(
+    store: &DisplayPixelTransportStore,
+    surfaces: &[waybroker_common::SurfaceSnapshot],
+    damage_rects: &[RendererRect],
+) -> std::result::Result<(), String> {
+    for damage in damage_rects {
+        for surface in surfaces {
+            let Some(surface_bounds) = surface_output_bounds(surface) else {
+                continue;
+            };
+            let Some(copy_rect) = surface_bounds.intersect(*damage) else {
+                continue;
+            };
+            validate_surface_pixel_rect(store, surface, copy_rect)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_surface_pixel_rect(
+    store: &DisplayPixelTransportStore,
+    surface: &waybroker_common::SurfaceSnapshot,
+    rect: RendererRect,
+) -> std::result::Result<(), String> {
+    let Some(handle) = surface.pixel_transport.as_ref() else {
+        return Ok(());
+    };
+    let payload = store.lookup(handle).ok_or_else(|| missing_payload_reason(handle))?;
+    PixelFormatPolicy::from_wire_format(payload.format)?;
+    if payload.width == 0 || payload.height == 0 {
+        return Err(format!("invalid zero-sized pixel payload for surface {}", surface.id));
+    }
+    if payload.stride < payload.width.saturating_mul(4) {
+        return Err(format!("invalid stride {} for surface {}", payload.stride, surface.id));
+    }
+    let local_x0 = rect
+        .x0
+        .checked_sub(surface.placement.x)
+        .ok_or_else(|| "source x offset overflow".to_string())?;
+    let local_y0 = rect
+        .y0
+        .checked_sub(surface.placement.y)
+        .ok_or_else(|| "source y offset overflow".to_string())?;
+    let local_x1 = rect
+        .x1
+        .checked_sub(surface.placement.x)
+        .ok_or_else(|| "source x extent overflow".to_string())?;
+    let local_y1 = rect
+        .y1
+        .checked_sub(surface.placement.y)
+        .ok_or_else(|| "source y extent overflow".to_string())?;
+    if local_x0 < 0
+        || local_y0 < 0
+        || local_x1 <= local_x0
+        || local_y1 <= local_y0
+        || local_x1 as u32 > payload.width
+        || local_y1 as u32 > payload.height
+    {
+        return Err(format!("pixel payload bounds mismatch for surface {}", surface.id));
+    }
+    let last_row = (local_y1 as usize - 1)
+        .checked_mul(payload.stride as usize)
+        .ok_or_else(|| "source row offset overflow".to_string())?;
+    let last_col = (local_x1 as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "source column offset overflow".to_string())?;
+    let end = last_row
+        .checked_add(last_col)
+        .ok_or_else(|| "source payload extent overflow".to_string())?;
+    if end > payload.pixels.len() {
+        return Err(format!("pixel payload is too short for surface {}", surface.id));
+    }
+    Ok(())
+}
+
+fn fill_framebuffer_rect(
+    framebuffer: &mut [u32],
+    output: &OutputState,
+    rect: RendererRect,
+    pixel: u32,
+) -> std::result::Result<(), String> {
+    let width = (rect.x1 - rect.x0) as usize;
+    for y in rect.y0..rect.y1 {
+        let start = framebuffer_offset_for_output(output, rect.x0, y)?;
+        let end = start
+            .checked_add(width)
+            .ok_or_else(|| "framebuffer fill extent overflow".to_string())?;
+        let row = framebuffer
+            .get_mut(start..end)
+            .ok_or_else(|| "framebuffer fill out of bounds".to_string())?;
+        row.fill(pixel);
+    }
+    Ok(())
+}
+
+fn copy_surface_rect(
+    framebuffer: &mut [u32],
+    output: &OutputState,
+    store: &DisplayPixelTransportStore,
+    surface: &waybroker_common::SurfaceSnapshot,
+    rect: RendererRect,
+    fallback_pixel: u32,
+) -> std::result::Result<(), String> {
+    if let Some(handle) = surface.pixel_transport.as_ref() {
+        let payload = store.lookup(handle).ok_or_else(|| missing_payload_reason(handle))?;
+        if PixelFormatPolicy::from_wire_format(payload.format)? == PixelFormatPolicy::OpaqueXrgb8888
+        {
+            let width = (rect.x1 - rect.x0) as usize;
+            let local_x0 = rect
+                .x0
+                .checked_sub(surface.placement.x)
+                .ok_or_else(|| "source x offset overflow".to_string())?
+                as usize;
+            for y in rect.y0..rect.y1 {
+                let local_y = y
+                    .checked_sub(surface.placement.y)
+                    .ok_or_else(|| "source y offset overflow".to_string())?
+                    as usize;
+                let src_start = local_y
+                    .checked_mul(payload.stride as usize)
+                    .and_then(|row| row.checked_add(local_x0.saturating_mul(4)))
+                    .ok_or_else(|| "source row range overflow".to_string())?;
+                let src_end = src_start
+                    .checked_add(width.saturating_mul(4))
+                    .ok_or_else(|| "source row end overflow".to_string())?;
+                let src = payload.pixels.get(src_start..src_end).ok_or_else(|| {
+                    format!("pixel payload is too short for surface {}", surface.id)
+                })?;
+                let dst_start = framebuffer_offset_for_output(output, rect.x0, y)?;
+                let dst_end = dst_start
+                    .checked_add(width)
+                    .ok_or_else(|| "framebuffer row end overflow".to_string())?;
+                let dst = framebuffer
+                    .get_mut(dst_start..dst_end)
+                    .ok_or_else(|| "framebuffer row out of bounds".to_string())?;
+                copy_xrgb_row(dst, src)?;
+            }
+            return Ok(());
+        }
+    }
+
+    for y in rect.y0..rect.y1 {
+        let row_start = framebuffer_offset_for_output(output, output.origin_x, y)?;
+        for x in rect.x0..rect.x1 {
+            let index = row_start
+                .checked_add((x - output.origin_x) as usize)
+                .ok_or_else(|| "framebuffer offset overflow".to_string())?;
+            let src =
+                pixel_for_surface(store, surface, &surface.placement, x as usize, y as usize)?
+                    .unwrap_or(SourcePixel::Opaque(fallback_pixel));
+            framebuffer[index] = compose_source_over(src, framebuffer[index]);
+        }
+    }
+    Ok(())
+}
+
+fn copy_xrgb_row(dst: &mut [u32], src: &[u8]) -> std::result::Result<(), String> {
+    if src.len() != dst.len().saturating_mul(4) {
+        return Err("XRGB row byte length mismatch".into());
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if dst.len() >= SIMD_XRGB_MIN_PIXELS && global_accel_policy().avx2_available {
+            // SAFETY: runtime feature detection and exact row bounds are checked above.
+            unsafe { copy_xrgb_row_avx2(dst, src) };
+            return Ok(());
+        }
+    }
+    for (pixel, bytes) in dst.iter_mut().zip(src.chunks_exact(4)) {
+        *pixel = 0xFF00_0000
+            | (u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) & 0x00FF_FFFF);
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn copy_xrgb_row_avx2(dst: &mut [u32], src: &[u8]) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_loadu_si256, _mm256_or_si256, _mm256_set1_epi32, _mm256_storeu_si256,
+    };
+
+    let mut index = 0usize;
+    let alpha = _mm256_set1_epi32(0xFF00_0000u32 as i32);
+    while index + 8 <= dst.len() {
+        // SAFETY: the caller validated src/dst lengths and AVX2 availability.
+        unsafe {
+            let src_ptr = src.as_ptr().add(index * 4).cast::<__m256i>();
+            let dst_ptr = dst.as_mut_ptr().add(index).cast::<__m256i>();
+            let value = _mm256_loadu_si256(src_ptr);
+            let opaque = _mm256_or_si256(value, alpha);
+            _mm256_storeu_si256(dst_ptr, opaque);
+        }
+        index += 8;
+    }
+    for (i, pixel) in dst.iter_mut().enumerate().skip(index) {
+        let base = i * 4;
+        *pixel = 0xFF00_0000
+            | (u32::from_le_bytes([src[base], src[base + 1], src[base + 2], src[base + 3]])
+                & 0x00FF_FFFF);
+    }
+}
+
+fn framebuffer_offset_for_output(
+    output: &OutputState,
+    x: i32,
+    y: i32,
+) -> std::result::Result<usize, String> {
+    let local_x = x.checked_sub(output.origin_x).ok_or("x translation overflow")?;
+    let local_y = y.checked_sub(output.origin_y).ok_or("y translation overflow")?;
+    if local_x < 0
+        || local_y < 0
+        || local_x as u32 >= output.width
+        || local_y as u32 >= output.height
+    {
+        return Err("framebuffer coordinate out of bounds".into());
+    }
+    (local_y as usize)
+        .checked_mul(output.stride as usize / 4)
+        .and_then(|offset| offset.checked_add(local_x as usize))
+        .ok_or_else(|| "framebuffer offset overflow".into())
+}
+
+#[cfg(test)]
+fn framebuffer_offset(x: u32, y: u32) -> std::result::Result<usize, String> {
+    framebuffer_offset_for_output(
+        &OutputState {
+            output_id: "test".into(),
+            width: FRAMEBUFFER_WIDTH,
+            height: FRAMEBUFFER_HEIGHT,
+            stride: FRAMEBUFFER_WIDTH * 4,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            generation: 1,
+        },
+        x as i32,
+        y as i32,
+    )
+}
+
+fn fallback_surface_pixel(surface: &waybroker_common::SurfaceSnapshot) -> u32 {
+    if surface.id.contains("panel") { 0xFF0000FF } else { 0xFFFF0000 }
+}
+
+fn missing_payload_reason(handle: &waybroker_common::PixelTransportHandle) -> String {
+    format!(
+        "missing pixel payload for client {} surface {} buffer {} scene {}",
+        handle.client_id, handle.surface_id, handle.buffer_generation, handle.scene_generation
+    )
+}
+
+fn pixel_for_surface(
+    store: &DisplayPixelTransportStore,
+    surface: &waybroker_common::SurfaceSnapshot,
+    placement: &waybroker_common::SurfacePlacement,
+    x: usize,
+    y: usize,
+) -> std::result::Result<Option<SourcePixel>, String> {
+    let Some(handle) = surface.pixel_transport.as_ref() else { return Ok(None) };
+    let payload = store.lookup(handle).ok_or_else(|| missing_payload_reason(handle))?;
+    let local_x = (x as i32 - placement.x).max(0) as u32;
+    let local_y = (y as i32 - placement.y).max(0) as u32;
+    if local_x >= payload.width || local_y >= payload.height {
+        return Ok(None);
+    }
+    let offset = source_pixel_offset(payload, surface, x as i32, y as i32)?;
+    let bytes = payload
+        .pixels
+        .get(offset..offset + 4)
+        .ok_or_else(|| format!("pixel payload is too short for surface {}", surface.id))?;
+    let word = u32::from_le_bytes(bytes.try_into().expect("slice length checked"));
+    decode_source_pixel(word, PixelFormatPolicy::from_wire_format(payload.format)?).map(Some)
+}
+
+fn source_pixel_offset(
+    payload: &PixelTransportPayload,
+    surface: &waybroker_common::SurfaceSnapshot,
+    x: i32,
+    y: i32,
+) -> std::result::Result<usize, String> {
+    let local_x =
+        x.checked_sub(surface.placement.x).ok_or_else(|| "source x offset overflow".to_string())?;
+    let local_y =
+        y.checked_sub(surface.placement.y).ok_or_else(|| "source y offset overflow".to_string())?;
+    if local_x < 0 || local_y < 0 {
+        return Err(format!("source coordinate outside surface {}", surface.id));
+    }
+    let local_x = local_x as u32;
+    let local_y = local_y as u32;
+    if local_x >= payload.width || local_y >= payload.height {
+        return Err(format!("source coordinate outside payload {}", surface.id));
+    }
+    let row = (local_y as usize)
+        .checked_mul(payload.stride as usize)
+        .ok_or_else(|| "source row offset overflow".to_string())?;
+    let col = (local_x as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "source column offset overflow".to_string())?;
+    let offset = row.checked_add(col).ok_or_else(|| "source pixel offset overflow".to_string())?;
+    let end = offset.checked_add(4).ok_or_else(|| "source pixel end overflow".to_string())?;
+    if end > payload.pixels.len() {
+        return Err(format!("pixel payload is too short for surface {}", surface.id));
+    }
+    Ok(offset)
+}
+
+fn decode_source_pixel(
+    word: u32,
+    policy: PixelFormatPolicy,
+) -> std::result::Result<SourcePixel, String> {
+    match policy {
+        PixelFormatPolicy::OpaqueXrgb8888 => {
+            Ok(SourcePixel::Opaque(0xFF00_0000 | (word & 0x00FF_FFFF)))
+        }
+        PixelFormatPolicy::PremultipliedArgb8888 => {
+            let a = ((word >> 24) & 0xFF) as u8;
+            let r = ((word >> 16) & 0xFF) as u8;
+            let g = ((word >> 8) & 0xFF) as u8;
+            let b = (word & 0xFF) as u8;
+            if r > a || g > a || b > a {
+                return Err(format!("non-premultiplied ARGB8888 pixel r={r} g={g} b={b} a={a}"));
+            }
+            Ok(SourcePixel::Premultiplied { a, r, g, b })
+        }
+    }
+}
+
+fn compose_source_over(src: SourcePixel, dst: u32) -> u32 {
+    match src {
+        SourcePixel::Opaque(pixel) => 0xFF00_0000 | (pixel & 0x00FF_FFFF),
+        SourcePixel::Premultiplied { a: 0, .. } => dst,
+        SourcePixel::Premultiplied { a: 255, r, g, b } => {
+            0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+        }
+        SourcePixel::Premultiplied { a, r, g, b } => {
+            let inv = 255u32 - a as u32;
+            let dst_r = (dst >> 16) & 0xFF;
+            let dst_g = (dst >> 8) & 0xFF;
+            let dst_b = dst & 0xFF;
+            let out_r = r as u32 + div255_rounded(dst_r * inv);
+            let out_g = g as u32 + div255_rounded(dst_g * inv);
+            let out_b = b as u32 + div255_rounded(dst_b * inv);
+            0xFF00_0000 | (out_r.min(255) << 16) | (out_g.min(255) << 8) | out_b.min(255)
+        }
+    }
+}
+
+fn div255_rounded(value: u32) -> u32 {
+    (value + 127) / 255
+}
+
+fn verify_pixel_payloads_available(
+    store: &DisplayPixelTransportStore,
+    surfaces: &[waybroker_common::SurfaceSnapshot],
+) -> std::result::Result<(), String> {
+    for surface in surfaces {
+        let Some(handle) = surface.pixel_transport.as_ref() else {
+            continue;
+        };
+        if store.lookup(handle).is_none() {
+            return Err(format!(
+                "missing pixel payload for client {} surface {} buffer {} scene {}",
+                handle.client_id,
+                handle.surface_id,
+                handle.buffer_generation,
+                handle.scene_generation
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn load_scene_snapshot(path: &Path) -> Result<Option<CommittedSceneState>> {
+    if let Ok(metadata) = fs::metadata(path) {
+        if metadata.len() > MAX_SCENE_SNAPSHOT_BYTES as u64 {
+            bail!("scene snapshot exceeds displayd persistence budget");
+        }
+    }
     let raw = match fs::read(path) {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1235,18 +4827,8 @@ async fn handle_capture_output(
             "service=displayd op=vulkan_refine event=completed workload={:?} path={:?}",
             result.workload, result.path
         );
-
-        // Perform the actual refinement using AVX/SIMD on CPU as well
-        vulkan.refine_screenshot_pixels(&mut pixels);
-    } else {
-        // Manual fallback if no vulkan object (though we could still use SIMD if we had it)
-        // For simplicity, we just use a dummy processing here if no vulkan backend exists
-        for p in pixels.iter_mut() {
-            let b = (*p >> 16) & 0xFF;
-            let r = *p & 0xFF;
-            *p = (*p & 0xFF00FF00) | (r << 16) | b;
-        }
     }
+    refine_screenshot_pixels_accel(&mut pixels);
 
     let artifact_bytes = encode_rgba8888_artifact_bytes(width, height, &pixels)?;
 
@@ -1285,6 +4867,17 @@ async fn handle_start_record(
     state: &mut DisplayState,
     backend: &mut dyn RecordBackend,
 ) -> Result<DisplayEvent> {
+    if fps == 0 || fps > 240 {
+        return Ok(DisplayEvent::Rejected { reason: "recording fps is out of bounds".into() });
+    }
+    if state.outputs.get(output).is_none_or(|runtime| runtime.disabled) {
+        return Ok(DisplayEvent::Rejected {
+            reason: format!("unknown or disabled recording output {output}"),
+        });
+    }
+    if state.active_recordings.len() >= MAX_ACTIVE_RECORDINGS {
+        return Ok(DisplayEvent::Rejected { reason: "recording budget exhausted".into() });
+    }
     if state.active_recordings.contains_key(output) {
         return Ok(DisplayEvent::Rejected {
             reason: format!("recording already active for output {output}"),
@@ -1292,14 +4885,9 @@ async fn handle_start_record(
     }
 
     let session_id = backend.start(output, fps)?;
-    state.active_recordings.insert(
-        output.to_string(),
-        RecordingState {
-            session_id: session_id.clone(),
-            fps,
-            start_timestamp: now_unix_timestamp(),
-        },
-    );
+    state
+        .active_recordings
+        .insert(output.to_string(), RecordingState { session_id: session_id.clone() });
 
     println!(
         "service=displayd op=start_record event=success output={output} session_id={session_id} fps={fps}"
@@ -1338,6 +4926,38 @@ async fn handle_stop_record(
     })
 }
 
+fn handle_headless_capture_output(
+    output: &str,
+    config: &Config,
+    display_backend: &dyn DisplayBackend,
+) -> Result<DisplayEvent> {
+    let frame = display_backend.capture_published(output)?.ok_or_else(|| {
+        anyhow::anyhow!("headless-shm has no Presented frame for output {output}")
+    })?;
+    let pixels = frame.pixels.as_ref();
+    let bytes =
+        encode_rgba8888_artifact_bytes(frame.geometry.width, frame.geometry.height, pixels)?;
+    let artifact_name = format!(
+        "headless-screenshot-{}-{}-{}.raw",
+        sanitize_artifact_filename(output),
+        frame.scene_generation,
+        frame.frame_id
+    );
+    let artifact_path = session_artifact_path(&config.session_instance_id, &artifact_name);
+    fs::write(&artifact_path, bytes)?;
+    Ok(DisplayEvent::OutputCaptured {
+        output: output.to_string(),
+        width: frame.geometry.width,
+        height: frame.geometry.height,
+        format: "RGBA8888".into(),
+        artifact_path: artifact_path
+            .file_name()
+            .expect("headless artifact path has filename")
+            .to_string_lossy()
+            .into_owned(),
+    })
+}
+
 fn validate_capture_pixel_count(width: u32, height: u32, pixel_len: usize) -> Result<()> {
     let expected_pixels =
         width.checked_mul(height).ok_or_else(|| anyhow::anyhow!("capture dimensions overflow"))?
@@ -1352,6 +4972,53 @@ fn validate_capture_pixel_count(width: u32, height: u32, pixel_len: usize) -> Re
         );
     }
     Ok(())
+}
+
+fn refine_screenshot_pixels_accel(pixels: &mut [u32]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if pixels.len() >= SIMD_XRGB_MIN_PIXELS && global_accel_policy().avx2_available {
+            // SAFETY: AVX2 availability is checked by the global acceleration policy.
+            unsafe { refine_screenshot_pixels_avx2(pixels) };
+            return;
+        }
+    }
+    for pixel in pixels {
+        let high = (*pixel >> 16) & 0xFF;
+        let low = *pixel & 0xFF;
+        *pixel = (*pixel & 0xFF00_FF00) | (low << 16) | high;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn refine_screenshot_pixels_avx2(pixels: &mut [u32]) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_and_si256, _mm256_loadu_si256, _mm256_or_si256, _mm256_set1_epi32,
+        _mm256_slli_epi32, _mm256_srli_epi32, _mm256_storeu_si256,
+    };
+    let mut index = 0usize;
+    let ag_mask = _mm256_set1_epi32(0xFF00_FF00u32 as i32);
+    let high_mask = _mm256_set1_epi32(0x00FF_0000u32 as i32);
+    let low_mask = _mm256_set1_epi32(0x0000_00FFu32 as i32);
+    while index + 8 <= pixels.len() {
+        // SAFETY: each vector lies within the validated mutable pixel slice.
+        unsafe {
+            let ptr = pixels.as_mut_ptr().add(index).cast::<__m256i>();
+            let value = _mm256_loadu_si256(ptr);
+            let ag = _mm256_and_si256(value, ag_mask);
+            let high = _mm256_srli_epi32(_mm256_and_si256(value, high_mask), 16);
+            let low = _mm256_slli_epi32(_mm256_and_si256(value, low_mask), 16);
+            let swapped = _mm256_or_si256(ag, _mm256_or_si256(high, low));
+            _mm256_storeu_si256(ptr, swapped);
+        }
+        index += 8;
+    }
+    for pixel in &mut pixels[index..] {
+        let high = (*pixel >> 16) & 0xFF;
+        let low = *pixel & 0xFF;
+        *pixel = (*pixel & 0xFF00_FF00) | (low << 16) | high;
+    }
 }
 
 fn u32_to_rgba8888(pixel: u32) -> [u8; 4] {
@@ -1379,8 +5046,8 @@ fn generate_mock_pixels(width: u32, height: u32) -> Vec<u32> {
     let mut pixels = Vec::with_capacity((width * height) as usize);
     for y in 0..height {
         for x in 0..width {
-            let r = (x % 256) as u32;
-            let g = (y % 256) as u32;
+            let r = x % 256;
+            let g = y % 256;
             let b = 128u32;
             let a = 255u32;
             // Encoded as 0xAARRGGBB; bytes are emitted explicitly as RGBA8888 later.
@@ -1448,25 +5115,403 @@ impl Drop for SocketGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+
+    fn headless_test_frame(output_id: &str, generation: u64, frame_id: u64) -> FramePublication {
+        FramePublication {
+            frame_id,
+            commit_id: frame_id,
+            output_id: output_id.into(),
+            output_generation: generation,
+            scene_epoch: 1,
+            scene_generation: 9,
+            geometry: OutputGeometry {
+                output_id: output_id.into(),
+                width: 2,
+                height: 2,
+                stride: 8,
+                format: WL_SHM_FORMAT_XRGB8888,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation: generation,
+            },
+            format: WL_SHM_FORMAT_XRGB8888,
+            stride: 8,
+            pixels: std::sync::Arc::from(vec![0xFF11_2233; 4]),
+            damage: vec![],
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn headless_shm_submission_is_not_presented_until_completion() {
+        let mut backend = HeadlessShmDisplayBackend::default();
+        let frame = headless_test_frame("eDP-1", 1, 4);
+        let token = backend.submit_frame(frame).unwrap();
+        assert!(backend.capture_published("eDP-1").unwrap().is_none());
+        assert_eq!(token.backend_instance_id, HEADLESS_SHM_BACKEND_INSTANCE_ID);
+        backend.complete_submission(&token).unwrap();
+        let presented = backend.capture_published("eDP-1").unwrap().unwrap();
+        assert_eq!(presented.frame_id, 4);
+        assert_eq!(presented.scene_generation, 9);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn headless_shm_keeps_outputs_and_generations_independent() {
+        let mut backend = HeadlessShmDisplayBackend::default();
+        let left = backend.submit_frame(headless_test_frame("left", 1, 1)).unwrap();
+        let right = backend.submit_frame(headless_test_frame("right", 7, 2)).unwrap();
+        backend.complete_submission(&left).unwrap();
+        assert!(backend.capture_published("right").unwrap().is_none());
+        backend.complete_submission(&right).unwrap();
+        assert_eq!(backend.capture_published("left").unwrap().unwrap().frame_id, 1);
+        assert_eq!(backend.capture_published("right").unwrap().unwrap().output_generation, 7);
+    }
+
+    #[test]
+    fn headless_shm_rejects_malformed_frame_before_allocation() {
+        let mut backend = HeadlessShmDisplayBackend::default();
+        let mut frame = headless_test_frame("eDP-1", 1, 1);
+        frame.stride = 4;
+        assert!(backend.submit_frame(frame).is_err());
+        assert!(backend.outputs.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn headless_shm_copy_failure_preserves_previous_presented_frame() {
+        let mut backend = HeadlessShmDisplayBackend::default();
+        let first = backend.submit_frame(headless_test_frame("eDP-1", 1, 1)).unwrap();
+        backend.complete_submission(&first).unwrap();
+        backend.inject_failure(HeadlessShmFailure::Copy);
+        assert!(backend.submit_frame(headless_test_frame("eDP-1", 1, 2)).is_err());
+        assert_eq!(backend.capture_published("eDP-1").unwrap().unwrap().frame_id, 1);
+    }
+
+    #[test]
+    fn display_backend_selection_is_explicit_and_fail_closed() {
+        assert_eq!(display_backend_from_env(None).unwrap(), DisplayBackendType::Mock);
+        assert_eq!(
+            display_backend_from_env(Some("headless-shm")).unwrap(),
+            DisplayBackendType::HeadlessShm
+        );
+        assert_eq!(
+            display_backend_from_env(Some("unavailable")).unwrap(),
+            DisplayBackendType::Unavailable
+        );
+        assert!(display_backend_from_env(Some("physical")).is_err());
+    }
+
+    #[test]
+    fn backend_output_events_drive_headless_registry_transactionally() {
+        let geometry = OutputGeometry {
+            output_id: "headless-0".into(),
+            width: 16,
+            height: 16,
+            stride: 64,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 1,
+        };
+        let mut state = DisplayState::new_test();
+        state.outputs.clear();
+        let mut backend = HeadlessShmDisplayBackend::default();
+        backend.queue_output_event(BackendOutputEvent::Connected {
+            backend_instance_id: HEADLESS_SHM_BACKEND_INSTANCE_ID,
+            backend_output_id: "headless-0".into(),
+            event_sequence: 1,
+            geometry: geometry.clone(),
+            cadence: PresentationCadence { period_ns: 1_000 },
+        });
+        apply_backend_output_events(&mut state, &mut backend).unwrap();
+        assert_eq!(state.outputs["headless-0"].pending_damage.len(), 1);
+        assert_eq!(state.outputs["headless-0"].scheduler.cadence.period_ns, 1_000);
+
+        backend.queue_output_event(BackendOutputEvent::Disabled {
+            backend_instance_id: HEADLESS_SHM_BACKEND_INSTANCE_ID,
+            backend_output_id: "headless-0".into(),
+            event_sequence: 2,
+            output_generation: 1,
+        });
+        apply_backend_output_events(&mut state, &mut backend).unwrap();
+        assert!(state.outputs["headless-0"].disabled);
+        assert_eq!(
+            readiness_from_state(&state, true).outputs[0].state,
+            OutputReadinessState::Disabled
+        );
+    }
+
+    #[test]
+    fn mock_backend_lifecycle_event_queue_is_typed_and_ordered() {
+        let mut backend = MockDisplayBackend::default();
+        backend.queue_output_event(BackendOutputEvent::BackendReset {
+            backend_instance_id: MOCK_BACKEND_INSTANCE_ID,
+            event_sequence: 1,
+        });
+        backend.queue_output_event(BackendOutputEvent::BackendReset {
+            backend_instance_id: MOCK_BACKEND_INSTANCE_ID,
+            event_sequence: 2,
+        });
+        let events = backend.poll_output_events().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(backend.poll_output_events().unwrap().is_empty());
+    }
+
+    #[test]
+    fn backend_reconfigure_disable_disconnect_and_reset_are_generation_safe() {
+        let make_geometry = |generation| OutputGeometry {
+            output_id: "headless-0".into(),
+            width: 16 + generation as u32,
+            height: 16,
+            stride: (16 + generation as u32) * 4,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: generation,
+        };
+        let mut state = DisplayState::new_test();
+        state.outputs.clear();
+        let mut backend = HeadlessShmDisplayBackend::default();
+        apply_backend_output_event(
+            &mut state,
+            &mut backend,
+            BackendOutputEvent::Connected {
+                backend_instance_id: 2,
+                backend_output_id: "headless-0".into(),
+                event_sequence: 1,
+                geometry: make_geometry(1),
+                cadence: PresentationCadence { period_ns: 1_000 },
+            },
+        )
+        .unwrap();
+        apply_backend_output_event(
+            &mut state,
+            &mut backend,
+            BackendOutputEvent::Reconfigured {
+                backend_instance_id: 2,
+                backend_output_id: "headless-0".into(),
+                event_sequence: 3,
+                geometry: make_geometry(2),
+                cadence: PresentationCadence { period_ns: 2_000 },
+            },
+        )
+        .unwrap();
+        assert_eq!(state.outputs["headless-0"].state.generation, 4);
+        assert!(state.outputs["headless-0"].pending_damage.len() == 1);
+        assert!(
+            apply_backend_output_event(
+                &mut state,
+                &mut backend,
+                BackendOutputEvent::Disabled {
+                    backend_instance_id: 2,
+                    backend_output_id: "headless-0".into(),
+                    event_sequence: 4,
+                    output_generation: 2,
+                },
+            )
+            .is_ok()
+        );
+        assert!(state.outputs["headless-0"].disabled);
+        apply_backend_output_event(
+            &mut state,
+            &mut backend,
+            BackendOutputEvent::BackendReset { backend_instance_id: 2, event_sequence: 5 },
+        )
+        .unwrap();
+        assert!(!state.outputs.contains_key("headless-0"));
+    }
+
+    #[test]
+    fn restart_epoch_discards_runtime_state_and_reconciles_fresh_output() {
+        let mut state = DisplayState::new_test();
+        state.display_epoch = 10;
+        state.outputs.get_mut("eDP-1").unwrap().published_frame_id = 8;
+        let mut backend = HeadlessShmDisplayBackend::new_with_instance_id(11);
+        state.begin_restart(11).unwrap();
+        assert!(state.outputs.is_empty());
+        assert_eq!(state.reconciliation_state, DisplayReconciliationState::Recovering);
+
+        backend.queue_connected_output(OutputGeometry {
+            output_id: "eDP-1".into(),
+            width: 32,
+            height: 16,
+            stride: 128,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 1,
+        });
+        apply_backend_output_events(&mut state, &mut backend).unwrap();
+        assert_eq!(state.reconciliation_state, DisplayReconciliationState::Recovering);
+        assert_eq!(state.outputs["eDP-1"].published_frame_id, 0);
+        assert_eq!(state.outputs["eDP-1"].pending_damage.len(), 1);
+
+        let stale = BackendOutputEvent::BackendReset { backend_instance_id: 10, event_sequence: 1 };
+        assert!(apply_backend_output_event(&mut state, &mut backend, stale).is_err());
+        assert!(state.outputs.contains_key("eDP-1"));
+    }
+
+    #[test]
+    fn restart_rejects_backward_epochs_and_accepts_current_reconciliation_epoch() {
+        let mut state = DisplayState::new_test();
+        assert!(state.begin_restart(1).is_ok());
+        assert_eq!(state.reconciliation_state, DisplayReconciliationState::Recovering);
+        state.begin_restart(2).unwrap();
+        assert!(state.begin_restart(2).is_ok());
+        assert!(state.begin_restart(1).is_err());
+    }
+
+    #[test]
+    fn readiness_is_derived_from_registry_and_zero_outputs_are_not_ready() {
+        let mut state = DisplayState::new_test();
+        state.outputs.clear();
+        let readiness = readiness_from_state(&state, true);
+        assert_eq!(readiness.configured_output_count, 0);
+        assert_eq!(readiness.state, ServiceReadinessState::LiveNotReady);
+        readiness.validate().unwrap();
+    }
+
+    #[test]
+    fn configure_starts_awaiting_publication_and_publication_makes_only_that_output_ready() {
+        let mut state = DisplayState::new_test();
+        state.outputs.clear();
+        let geometry = OutputGeometry {
+            output_id: "left".into(),
+            width: 16,
+            height: 16,
+            stride: 64,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 2,
+        };
+        let runtime = OutputRuntime::new(OutputState::validate(&geometry).unwrap());
+        state.outputs.insert("left".into(), runtime);
+        let readiness = readiness_from_state(&state, true);
+        assert_eq!(readiness.outputs[0].state, OutputReadinessState::ConfiguredAwaitingPublication);
+        state.outputs.get_mut("left").unwrap().published_frame_id = 1;
+        state.outputs.get_mut("left").unwrap().last_published_scene_generation = 7;
+        let readiness = readiness_from_state(&state, true);
+        assert_eq!(readiness.outputs[0].state, OutputReadinessState::Ready);
+        assert_eq!(readiness.outputs[0].output_generation, 2);
+        assert_eq!(readiness.outputs[0].last_published_scene_generation, 7);
+    }
+
+    #[test]
+    fn retry_pending_isolated_to_failed_output() {
+        let mut state = DisplayState::new_test();
+        let right = state.outputs.remove("eDP-1").unwrap();
+        state.outputs.insert("a".into(), right.clone());
+        state.outputs.insert("b".into(), right);
+        state.outputs.get_mut("a").unwrap().published_frame_id = 3;
+        state.outputs.get_mut("b").unwrap().retry = Some(OutputRetryState {
+            scene_epoch: 1,
+            scene_generation: 8,
+            output_generation: 1,
+            frame_id: 1,
+            commit_id: 1,
+        });
+        let readiness = readiness_from_state(&state, true);
+        assert_eq!(readiness.outputs[0].state, OutputReadinessState::Ready);
+        assert_eq!(readiness.outputs[1].state, OutputReadinessState::RetryPending);
+        assert_eq!(readiness.ready_output_count, 1);
+        assert_eq!(readiness.retry_pending_output_count, 1);
+    }
+
+    #[test]
+    fn submission_is_not_ready_until_matching_completion() {
+        let mut state = DisplayState::new_test();
+        let runtime = state.outputs.get_mut("eDP-1").unwrap();
+        let token = PresentationToken {
+            backend_instance_id: 1,
+            sequence: 1,
+            output_id: "eDP-1".into(),
+            output_generation: runtime.state.generation,
+            scene_generation: 4,
+            frame_id: 1,
+        };
+        let frame = FramePublication {
+            frame_id: 1,
+            commit_id: 1,
+            output_id: "eDP-1".into(),
+            output_generation: runtime.state.generation,
+            scene_epoch: 1,
+            scene_generation: 4,
+            geometry: OutputGeometry {
+                output_id: "eDP-1".into(),
+                width: runtime.state.width,
+                height: runtime.state.height,
+                stride: runtime.state.stride,
+                format: runtime.state.format,
+                origin_x: runtime.state.origin_x,
+                origin_y: runtime.state.origin_y,
+                output_generation: runtime.state.generation,
+            },
+            format: runtime.state.format,
+            stride: runtime.state.stride,
+            pixels: std::sync::Arc::from(vec![BACKGROUND_PIXEL; runtime.state.framebuffer_words()]),
+            damage: vec![],
+        };
+        runtime.submitted_frame_id = 1;
+        runtime.outstanding = Some(OutstandingPresentation { token: token.clone(), frame });
+        assert_eq!(
+            readiness_from_state(&state, true).outputs[0].state,
+            OutputReadinessState::SubmittedAwaitingPresentation
+        );
+        assert_eq!(
+            complete_presentation(&mut state, token.clone(), PresentationCompletion::Presented),
+            PresentationCompletion::Presented
+        );
+        assert_eq!(
+            readiness_from_state(&state, true).outputs[0].state,
+            OutputReadinessState::Ready
+        );
+        assert_eq!(
+            complete_presentation(&mut state, token, PresentationCompletion::Presented),
+            PresentationCompletion::UnknownToken
+        );
+    }
+
+    #[test]
+    fn scheduler_ticks_are_monotonic_and_cadence_bounded() {
+        let mut state = DisplayState::new_test();
+        let generation = state.outputs["eDP-1"].state.generation;
+        state.outputs.get_mut("eDP-1").unwrap().pending_damage.push(RendererRect {
+            x0: 0,
+            y0: 0,
+            x1: 1,
+            y1: 1,
+        });
+        assert!(advance_presentation(&mut state, "eDP-1", generation, 10, 1).unwrap());
+        assert!(!advance_presentation(&mut state, "eDP-1", generation, 10, 2).unwrap());
+        assert!(advance_presentation(&mut state, "eDP-1", generation, 9, 3).is_err());
+    }
+
+    #[test]
+    fn rejects_only_older_nonzero_scene_generations() {
+        assert!(scene_generation_is_stale(2, 8, 1, 7));
+        assert!(!scene_generation_is_stale(2, 8, 2, 8));
+        assert!(!scene_generation_is_stale(2, 8, 2, 9));
+        assert!(!scene_generation_is_stale(2, 8, 2, 0));
+        assert!(!scene_generation_is_stale(2, 8, 3, 1));
+    }
+
+    #[test]
+    fn accepts_newer_epoch_after_restart() {
+        assert!(!scene_generation_is_stale(10, 100, 11, 1));
+    }
 
     #[tokio::test]
     async fn test_handle_capture_output() {
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
 
-        let mut state = DisplayState {
-            last_scene: None,
-            next_commit_id: 1,
-            snapshot_path: std::env::temp_dir().join("scene-snapshot"),
-            active_recordings: HashMap::new(),
-            pointer_constraints: HashMap::new(),
-            presentation_feedbacks: HashMap::new(),
-        };
+        let mut state = DisplayState::new_test();
 
         // Ensure runtime dir exists
         ensure_runtime_dir().unwrap();
 
-        let mut clock = FakePresentationClock::default();
+        let mut clock = FakePresentationClock;
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
@@ -1507,6 +5552,9 @@ mod tests {
                 focus: waybroker_common::FocusTarget::None,
                 selection: waybroker_common::WaylandSelectionState::default(),
                 surfaces: vec![],
+                pixel_payloads: vec![],
+                scene_epoch: 0,
+                scene_generation: 0,
             },
             ServiceRole::Compd,
             &config,
@@ -1523,7 +5571,7 @@ mod tests {
         if let DisplayEvent::SceneCommitted { commit_id, .. } = commit_result {
             assert_eq!(commit_id, 1);
 
-            // Query feedback
+            // No frame was scheduled for an empty scene, so feedback remains pending.
             let feedback_result = handle_display_command(
                 DisplayCommand::GetPresentationFeedback { commit_id: 1 },
                 ServiceRole::Waylandd,
@@ -1538,13 +5586,7 @@ mod tests {
             .await
             .expect("handle feedback query");
 
-            if let DisplayEvent::FramePresented { commit_id: fid, timestamp, .. } = feedback_result
-            {
-                assert_eq!(fid, 1);
-                assert_eq!(timestamp, 1_000_000_000);
-            } else {
-                panic!("Expected FramePresented");
-            }
+            assert!(matches!(feedback_result, DisplayEvent::Rejected { .. }));
         } else {
             panic!("Expected SceneCommitted");
         }
@@ -1553,15 +5595,8 @@ mod tests {
     #[tokio::test]
     async fn output_captured_format_remains_rgba8888() {
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
-        let mut state = DisplayState {
-            last_scene: None,
-            next_commit_id: 1,
-            snapshot_path: std::env::temp_dir().join("scene-snapshot"),
-            active_recordings: HashMap::new(),
-            pointer_constraints: HashMap::new(),
-            presentation_feedbacks: HashMap::new(),
-        };
-        let mut clock = FakePresentationClock::default();
+        let mut state = DisplayState::new_test();
+        let mut clock = FakePresentationClock;
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
@@ -1636,15 +5671,8 @@ mod tests {
         }
 
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
-        let mut state = DisplayState {
-            last_scene: None,
-            next_commit_id: 1,
-            snapshot_path: std::env::temp_dir().join("scene-snapshot"),
-            active_recordings: HashMap::new(),
-            pointer_constraints: HashMap::new(),
-            presentation_feedbacks: HashMap::new(),
-        };
-        let mut clock = FakePresentationClock::default();
+        let mut state = DisplayState::new_test();
+        let mut clock = FakePresentationClock;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
         let err = handle_display_command(
@@ -1675,15 +5703,8 @@ mod tests {
         }
 
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
-        let mut state = DisplayState {
-            last_scene: None,
-            next_commit_id: 1,
-            snapshot_path: std::env::temp_dir().join("scene-snapshot"),
-            active_recordings: HashMap::new(),
-            pointer_constraints: HashMap::new(),
-            presentation_feedbacks: HashMap::new(),
-        };
-        let mut clock = FakePresentationClock::default();
+        let mut state = DisplayState::new_test();
+        let mut clock = FakePresentationClock;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
         let err = handle_display_command(
@@ -1704,16 +5725,10 @@ mod tests {
 
     #[tokio::test]
     async fn existing_displayd_capture_tests_still_pass() {
+        ensure_runtime_dir().expect("test runtime directory");
         let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
-        let mut state = DisplayState {
-            last_scene: None,
-            next_commit_id: 1,
-            snapshot_path: std::env::temp_dir().join("scene-snapshot"),
-            active_recordings: HashMap::new(),
-            pointer_constraints: HashMap::new(),
-            presentation_feedbacks: HashMap::new(),
-        };
-        let mut clock = FakePresentationClock::default();
+        let mut state = DisplayState::new_test();
+        let mut clock = FakePresentationClock;
         let capture_backend = FakeCaptureBackend;
         let mut record_backend = FakeRecordBackend;
         let mut display_backend = FakeDisplayBackend;
@@ -1964,7 +5979,7 @@ mod tests {
                 flags: 0,
                 fd: -1,
                 mapoffset: 0,
-                maxsize: maxsize,
+                maxsize,
                 data: raw_pixels.as_ptr() as *mut _,
                 chunk: std::ptr::null_mut(), // initialized dynamically in tests
             };
@@ -2090,6 +6105,17 @@ mod tests {
             path
         }
 
+        fn skip_real_capture_test_unless_opted_in() -> bool {
+            if std::env::var("TUFF_XWIN_RUN_REAL_CAPTURE_TESTS").as_deref() == Ok("1") {
+                false
+            } else {
+                eprintln!(
+                    "skipped real portal capture test: set TUFF_XWIN_RUN_REAL_CAPTURE_TESTS=1 to opt in"
+                );
+                true
+            }
+        }
+
         #[test]
         fn test_launcher_refuses_to_run_without_explicit_real_portal_flags() {
             let scripts_dir = get_scripts_dir();
@@ -2105,6 +6131,9 @@ mod tests {
 
         #[test]
         fn test_launcher_records_run_root_and_report_path() {
+            if skip_real_capture_test_unless_opted_in() {
+                return;
+            }
             let scripts_dir = get_scripts_dir();
             let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
             let output = Command::new("bash")
@@ -2135,6 +6164,9 @@ mod tests {
 
         #[test]
         fn test_launcher_fails_closed_if_displayd_exits_before_capture() {
+            if skip_real_capture_test_unless_opted_in() {
+                return;
+            }
             let scripts_dir = get_scripts_dir();
             let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
             let output = Command::new("bash")
@@ -2191,6 +6223,9 @@ mod tests {
 
         #[test]
         fn test_launcher_creates_default_save_directory_safely() {
+            if skip_real_capture_test_unless_opted_in() {
+                return;
+            }
             let scripts_dir = get_scripts_dir();
             let launcher = scripts_dir.join("tuff-xwin-capture-once.sh");
             let _ = Command::new("bash").arg(&launcher).arg("--portal-real-capture").output();
@@ -2201,6 +6236,9 @@ mod tests {
 
         #[test]
         fn test_launcher_accepts_explicit_save_dir() {
+            if skip_real_capture_test_unless_opted_in() {
+                return;
+            }
             let scripts_dir = get_scripts_dir();
             let temp = tempfile::tempdir().unwrap();
             let custom_save_dir = temp.path().join("custom_tuff_save");
@@ -2306,7 +6344,7 @@ exit 0
                     repo_root: repo,
                     target_xsm_dir: target_xsm,
                     mock_desktop_path: mock_desktop,
-                    bin_dir: bin_dir,
+                    bin_dir,
                 }
             }
 
@@ -2662,5 +6700,1829 @@ exit 0
             // Should be deleted because it has the marker
             assert!(!desktop.exists());
         }
+    }
+
+    #[tokio::test]
+    async fn test_phase3_composition_zero_damage_skipping() {
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
+        let mut state = DisplayState::new_test();
+        let mut clock = FakePresentationClock;
+        let capture_backend = FakeCaptureBackend;
+        let mut record_backend = FakeRecordBackend;
+        let mut display_backend = FakeDisplayBackend;
+
+        // Perform first commit
+        let surf1 = waybroker_common::SurfaceSnapshot {
+            id: "s1".into(),
+            app_id: "app1".into(),
+            placement: waybroker_common::SurfacePlacement {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+                z: 1,
+                visible: true,
+            },
+            ..Default::default()
+        };
+        let commit1 = handle_display_command(
+            DisplayCommand::CommitScene {
+                target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+                focus: waybroker_common::FocusTarget::None,
+                selection: waybroker_common::WaylandSelectionState::default(),
+                surfaces: vec![surf1.clone()],
+                pixel_payloads: vec![],
+                scene_epoch: 0,
+                scene_generation: 0,
+            },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(commit1, DisplayEvent::SceneCommitted { .. }));
+        assert_eq!(state.zero_damage_skipped_count, 0);
+
+        // Perform second identical commit
+        let commit2 = handle_display_command(
+            DisplayCommand::CommitScene {
+                target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+                focus: waybroker_common::FocusTarget::None,
+                selection: waybroker_common::WaylandSelectionState::default(),
+                surfaces: vec![surf1],
+                pixel_payloads: vec![],
+                scene_epoch: 0,
+                scene_generation: 0,
+            },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(commit2, DisplayEvent::SceneCommitted { .. }));
+        assert_eq!(state.zero_damage_skipped_count, 0);
+    }
+
+    #[tokio::test]
+    async fn pixel_transport_payload_feeds_renderer_without_entering_scene_snapshot() {
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
+        let mut state = DisplayState::new_test();
+        let mut clock = FakePresentationClock;
+        let capture_backend = FakeCaptureBackend;
+        let mut record_backend = FakeRecordBackend;
+        let mut display_backend = FakeDisplayBackend;
+        let handle = waybroker_common::PixelTransportHandle {
+            client_id: 7,
+            surface_id: "client-7-surface-3".into(),
+            buffer_generation: 3,
+            scene_generation: 1,
+        };
+        let surface = waybroker_common::SurfaceSnapshot {
+            id: handle.surface_id.clone(),
+            app_id: "app1".into(),
+            placement: waybroker_common::SurfacePlacement {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+                z: 1,
+                visible: true,
+            },
+            buffer_handle: Some("3".into()),
+            buffer_generation: 3,
+            pixel_transport: Some(handle.clone()),
+            ..Default::default()
+        };
+        let payload = waybroker_common::PixelTransportPayload {
+            handle,
+            pixels: vec![0x44, 0x33, 0x22, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: 1,
+        };
+
+        let commit = handle_display_command(
+            DisplayCommand::CommitScene {
+                target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+                focus: waybroker_common::FocusTarget::None,
+                selection: waybroker_common::WaylandSelectionState::default(),
+                surfaces: vec![surface],
+                pixel_payloads: vec![payload],
+                scene_epoch: 1,
+                scene_generation: 1,
+            },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .unwrap();
+
+        let generation = state.outputs["eDP-1"].state.generation;
+        handle_display_command(
+            DisplayCommand::AdvancePresentation {
+                output_id: "eDP-1".into(),
+                output_generation: generation,
+                now_ns: 1_000_000_000,
+                tick_sequence: 1,
+            },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(commit, DisplayEvent::SceneCommitted { .. }));
+        assert_eq!(state.outputs["eDP-1"].framebuffer[0], 0xFF223344);
+        let snapshot = state.last_scene.as_ref().unwrap();
+        assert!(snapshot.surfaces[0].pixel_transport.is_some());
+        assert!(!serde_json::to_string(snapshot).unwrap().contains("\"pixels\""));
+    }
+
+    #[tokio::test]
+    async fn missing_pixel_transport_payload_rejects_without_corrupting_scene() {
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
+        let mut state = DisplayState::new_test();
+        let mut clock = FakePresentationClock;
+        let capture_backend = FakeCaptureBackend;
+        let mut record_backend = FakeRecordBackend;
+        let mut display_backend = FakeDisplayBackend;
+        let surface = waybroker_common::SurfaceSnapshot {
+            id: "client-7-surface-3".into(),
+            app_id: "app1".into(),
+            placement: waybroker_common::SurfacePlacement {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+                z: 1,
+                visible: true,
+            },
+            pixel_transport: Some(waybroker_common::PixelTransportHandle {
+                client_id: 7,
+                surface_id: "client-7-surface-3".into(),
+                buffer_generation: 3,
+                scene_generation: 1,
+            }),
+            ..Default::default()
+        };
+
+        let commit = handle_display_command(
+            DisplayCommand::CommitScene {
+                target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+                focus: waybroker_common::FocusTarget::None,
+                selection: waybroker_common::WaylandSelectionState::default(),
+                surfaces: vec![surface],
+                pixel_payloads: vec![],
+                scene_epoch: 1,
+                scene_generation: 1,
+            },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(commit, DisplayEvent::Rejected { .. }));
+        assert!(state.last_scene.is_none());
+    }
+
+    fn test_handle(
+        client_id: u64,
+        surface_id: &str,
+        buffer_generation: u64,
+        scene_generation: u64,
+    ) -> waybroker_common::PixelTransportHandle {
+        waybroker_common::PixelTransportHandle {
+            client_id,
+            surface_id: surface_id.into(),
+            buffer_generation,
+            scene_generation,
+        }
+    }
+
+    fn test_payload(
+        handle: waybroker_common::PixelTransportHandle,
+        pixels: Vec<u32>,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> waybroker_common::PixelTransportPayload {
+        test_payload_with_format(handle, pixels, width, height, stride, WL_SHM_FORMAT_XRGB8888)
+    }
+
+    fn test_payload_with_format(
+        handle: waybroker_common::PixelTransportHandle,
+        pixels: Vec<u32>,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: u32,
+    ) -> waybroker_common::PixelTransportPayload {
+        let mut bytes = vec![0u8; stride as usize * height as usize];
+        for (i, pixel) in pixels.into_iter().enumerate() {
+            let row = i as u32 / width;
+            let col = i as u32 % width;
+            let offset = row as usize * stride as usize + col as usize * 4;
+            bytes[offset..offset + 4].copy_from_slice(&pixel.to_le_bytes());
+        }
+        waybroker_common::PixelTransportPayload {
+            handle,
+            pixels: bytes,
+            width,
+            height,
+            stride,
+            format,
+        }
+    }
+
+    fn test_surface(
+        id: &str,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        z: i32,
+        handle: Option<waybroker_common::PixelTransportHandle>,
+    ) -> waybroker_common::SurfaceSnapshot {
+        waybroker_common::SurfaceSnapshot {
+            id: id.into(),
+            app_id: "app1".into(),
+            placement: waybroker_common::SurfacePlacement { x, y, width, height, z, visible: true },
+            buffer_generation: handle.as_ref().map(|h| h.buffer_generation).unwrap_or(0),
+            pixel_transport: handle,
+            ..Default::default()
+        }
+    }
+
+    async fn commit_test_scene(
+        state: &mut DisplayState,
+        surfaces: Vec<waybroker_common::SurfaceSnapshot>,
+        pixel_payloads: Vec<waybroker_common::PixelTransportPayload>,
+        scene_generation: u64,
+    ) -> DisplayEvent {
+        let mut display_backend = MockDisplayBackend::default();
+        display_backend.set_auto_complete(true);
+        commit_test_scene_with_backend(
+            state,
+            surfaces,
+            pixel_payloads,
+            scene_generation,
+            &mut display_backend,
+        )
+        .await
+    }
+
+    async fn commit_test_scene_with_backend(
+        state: &mut DisplayState,
+        surfaces: Vec<waybroker_common::SurfaceSnapshot>,
+        pixel_payloads: Vec<waybroker_common::PixelTransportPayload>,
+        scene_generation: u64,
+        display_backend: &mut dyn DisplayBackend,
+    ) -> DisplayEvent {
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
+        let mut clock = FakePresentationClock;
+        let capture_backend = FakeCaptureBackend;
+        let mut record_backend = FakeRecordBackend;
+        let commit = handle_display_command(
+            DisplayCommand::CommitScene {
+                target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+                focus: waybroker_common::FocusTarget::None,
+                selection: waybroker_common::WaylandSelectionState::default(),
+                surfaces,
+                pixel_payloads,
+                scene_epoch: 1,
+                scene_generation,
+            },
+            ServiceRole::Compd,
+            &config,
+            state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            display_backend,
+        )
+        .await
+        .unwrap();
+        let output_ids: Vec<String> = state.outputs.keys().cloned().collect();
+        for output_id in output_ids {
+            let output_generation = state.outputs[&output_id].state.generation;
+            let tick_sequence = state.outputs[&output_id].scheduler.last_tick_sequence + 1;
+            let tick_time = 1_000_000_000u64.saturating_add(tick_sequence * 20_000_000);
+            let _ = handle_display_command(
+                DisplayCommand::AdvancePresentation {
+                    output_id,
+                    output_generation,
+                    now_ns: tick_time,
+                    tick_sequence,
+                },
+                ServiceRole::Compd,
+                &config,
+                state,
+                None,
+                &mut clock,
+                &capture_backend,
+                &mut record_backend,
+                display_backend,
+            )
+            .await
+            .unwrap();
+        }
+        commit
+    }
+
+    #[test]
+    fn alpha_source_over_vectors_are_exact_and_opaque_framebuffer_normalized() {
+        assert_eq!(
+            compose_source_over(SourcePixel::Premultiplied { a: 0, r: 0, g: 0, b: 0 }, 0xFF112233),
+            0xFF112233
+        );
+        assert_eq!(
+            compose_source_over(
+                SourcePixel::Premultiplied { a: 255, r: 1, g: 2, b: 3 },
+                0xFF112233
+            ),
+            0xFF010203
+        );
+        assert_eq!(
+            compose_source_over(
+                SourcePixel::Premultiplied { a: 128, r: 128, g: 0, b: 0 },
+                0xFF0000FF
+            ),
+            0xFF80007F
+        );
+        assert_eq!(compose_source_over(SourcePixel::Opaque(0x00123456), 0), 0xFF123456);
+    }
+
+    #[test]
+    fn pixel_format_policy_decodes_argb_and_xrgb_channel_order() {
+        assert_eq!(
+            decode_source_pixel(0x80800000, PixelFormatPolicy::PremultipliedArgb8888).unwrap(),
+            SourcePixel::Premultiplied { a: 128, r: 128, g: 0, b: 0 }
+        );
+        assert_eq!(
+            decode_source_pixel(0x00010203, PixelFormatPolicy::OpaqueXrgb8888).unwrap(),
+            SourcePixel::Opaque(0xFF010203)
+        );
+        assert_eq!(
+            decode_source_pixel(0xAA010203, PixelFormatPolicy::OpaqueXrgb8888).unwrap(),
+            SourcePixel::Opaque(0xFF010203)
+        );
+        assert!(decode_source_pixel(0x40800000, PixelFormatPolicy::PremultipliedArgb8888).is_err());
+        assert!(PixelFormatPolicy::from_wire_format(99).is_err());
+    }
+
+    #[tokio::test]
+    async fn damage_limited_composition_updates_only_small_rect() {
+        let mut state = DisplayState::new_test();
+        let handle = test_handle(1, "surface-1", 1, 1);
+        let surface = test_surface("surface-1", 0, 0, 4, 4, 1, Some(handle.clone()));
+        let initial_payload = test_payload(handle.clone(), vec![0x11111111; 16], 4, 4, 16);
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![surface.clone()], vec![initial_payload], 1).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+        let before = state.outputs["eDP-1"].framebuffer.clone();
+
+        let updated_handle = test_handle(1, "surface-1", 1, 2);
+        let mut damaged_surface =
+            test_surface("surface-1", 0, 0, 4, 4, 1, Some(updated_handle.clone()));
+        damaged_surface.damage_rects =
+            vec![waybroker_common::Rect { x: 1, y: 1, width: 1, height: 1 }];
+        let updated_payload = test_payload(updated_handle, vec![0x22222222; 16], 4, 4, 16);
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![damaged_surface], vec![updated_payload], 2).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        let changed = framebuffer_offset(1, 1).unwrap();
+        assert_eq!(state.outputs["eDP-1"].framebuffer[changed], 0xFF222222);
+        for (index, pixel) in state.outputs["eDP-1"].framebuffer.iter().enumerate().take(8_000) {
+            if index != changed {
+                assert_eq!(*pixel, before[index], "unexpected framebuffer change at {index}");
+            }
+        }
+    }
+
+    #[test]
+    fn damage_rects_are_translated_and_clipped_for_negative_and_overflowing_surfaces() {
+        let output =
+            RendererRect::from_origin_size(0, 0, FRAMEBUFFER_WIDTH, FRAMEBUFFER_HEIGHT).unwrap();
+        let mut negative = test_surface("neg", -2, -1, 4, 4, 1, None);
+        negative.damage_rects = vec![waybroker_common::Rect { x: 0, y: 0, width: 4, height: 4 }];
+        let mut overflow = test_surface("overflow", 1918, 1078, 8, 8, 1, None);
+        overflow.damage_rects = vec![waybroker_common::Rect { x: 0, y: 0, width: 8, height: 8 }];
+
+        assert_eq!(
+            surface_damage_rects(&negative, output),
+            vec![RendererRect { x0: 0, y0: 0, x1: 2, y1: 3 }]
+        );
+        assert_eq!(
+            surface_damage_rects(&overflow, output),
+            vec![RendererRect { x0: 1918, y0: 1078, x1: 1920, y1: 1080 }]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_tight_stride_partial_row_copy_uses_source_stride() {
+        let mut state = DisplayState::new_test();
+        let handle = test_handle(1, "surface-1", 1, 2);
+        let mut surface = test_surface("surface-1", 0, 0, 3, 2, 1, Some(handle.clone()));
+        surface.damage_rects = vec![waybroker_common::Rect { x: 1, y: 1, width: 1, height: 1 }];
+        ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![test_surface("surface-1", 0, 0, 3, 2, 1, Some(handle.clone()))],
+            scene_epoch: 1,
+            scene_generation: 1,
+            commit_id: 1,
+            unix_timestamp: 1,
+        });
+        let payload =
+            test_payload(handle, vec![0x10, 0x11, 0x12, 0x20, 0xAABBCCDD, 0x22], 3, 2, 16);
+
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![surface], vec![payload], 2).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(1, 1).unwrap()],
+            0xFFBBCCDD
+        );
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 1).unwrap()],
+            BACKGROUND_PIXEL
+        );
+    }
+
+    #[tokio::test]
+    async fn non_tight_stride_alpha_partial_copy_blends_from_source_stride() {
+        let mut state = DisplayState::new_test();
+        let bottom_handle = test_handle(1, "bottom", 1, 2);
+        let bottom = test_surface("bottom", 0, 0, 3, 2, 1, Some(bottom_handle.clone()));
+        let handle = test_handle(2, "surface-1", 1, 2);
+        let mut surface = test_surface("surface-1", 0, 0, 3, 2, 2, Some(handle.clone()));
+        surface.damage_rects = vec![waybroker_common::Rect { x: 1, y: 1, width: 1, height: 1 }];
+        ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![
+                bottom.clone(),
+                test_surface("surface-1", 0, 0, 3, 2, 2, Some(handle.clone())),
+            ],
+            scene_epoch: 1,
+            scene_generation: 1,
+            commit_id: 1,
+            unix_timestamp: 1,
+        });
+        let payload = test_payload_with_format(
+            handle,
+            vec![0, 0, 0, 0, 0x80800000, 0],
+            3,
+            2,
+            16,
+            WL_SHM_FORMAT_ARGB8888,
+        );
+
+        assert!(matches!(
+            commit_test_scene(
+                &mut state,
+                vec![bottom, surface],
+                vec![test_payload(bottom_handle, vec![0x000000FF; 6], 3, 2, 12), payload],
+                2
+            )
+            .await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(1, 1).unwrap()],
+            0xFF80007F
+        );
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 1).unwrap()],
+            BACKGROUND_PIXEL
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_surfaces_recompose_damage_in_canonical_order() {
+        let mut state = DisplayState::new_test();
+        let bottom = test_surface("bottom", 0, 0, 4, 4, 1, None);
+        let mut top = test_surface("panel-top", 1, 1, 2, 2, 2, None);
+        top.damage_rects = vec![waybroker_common::Rect { x: 0, y: 0, width: 1, height: 1 }];
+        ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![bottom.clone(), test_surface("panel-top", 1, 1, 2, 2, 2, None)],
+            scene_epoch: 1,
+            scene_generation: 1,
+            commit_id: 1,
+            unix_timestamp: 1,
+        });
+
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![bottom, top], vec![], 2).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(1, 1).unwrap()],
+            0xFF0000FF
+        );
+    }
+
+    #[tokio::test]
+    async fn translucent_overlap_uses_canonical_back_to_front_order() {
+        let mut state = DisplayState::new_test();
+        let first_bottom_handle = test_handle(1, "bottom", 1, 1);
+        let bottom_handle = test_handle(1, "bottom", 1, 2);
+        let first_bottom = test_surface("bottom", 0, 0, 2, 2, 1, Some(first_bottom_handle.clone()));
+        let bottom = test_surface("bottom", 0, 0, 2, 2, 1, Some(bottom_handle.clone()));
+        let top_handle = test_handle(2, "top", 1, 2);
+        let mut top = test_surface("top", 0, 0, 2, 2, 2, Some(top_handle.clone()));
+        top.damage_rects = vec![waybroker_common::Rect { x: 0, y: 0, width: 1, height: 1 }];
+
+        assert!(matches!(
+            commit_test_scene(
+                &mut state,
+                vec![first_bottom],
+                vec![test_payload(first_bottom_handle, vec![0x000000FF; 4], 2, 2, 8)],
+                1
+            )
+            .await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+        assert!(matches!(
+            commit_test_scene(
+                &mut state,
+                vec![bottom, top],
+                vec![
+                    test_payload(bottom_handle, vec![0x000000FF; 4], 2, 2, 8),
+                    test_payload_with_format(
+                        top_handle,
+                        vec![0x80800000; 4],
+                        2,
+                        2,
+                        8,
+                        WL_SHM_FORMAT_ARGB8888
+                    )
+                ],
+                2
+            )
+            .await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 0).unwrap()],
+            0xFF80007F
+        );
+    }
+
+    #[tokio::test]
+    async fn three_layer_translucent_composition_is_deterministic() {
+        let mut state = DisplayState::new_test();
+        let bottom_h = test_handle(1, "bottom", 1, 1);
+        let middle_h = test_handle(2, "middle", 1, 1);
+        let top_h = test_handle(3, "top", 1, 1);
+        let bottom = test_surface("bottom", 0, 0, 1, 1, 1, Some(bottom_h.clone()));
+        let middle = test_surface("middle", 0, 0, 1, 1, 2, Some(middle_h.clone()));
+        let top = test_surface("top", 0, 0, 1, 1, 3, Some(top_h.clone()));
+
+        assert!(matches!(
+            commit_test_scene(
+                &mut state,
+                vec![bottom, middle, top],
+                vec![
+                    test_payload(bottom_h, vec![0x000000FF], 1, 1, 4),
+                    test_payload_with_format(
+                        middle_h,
+                        vec![0x80008000],
+                        1,
+                        1,
+                        4,
+                        WL_SHM_FORMAT_ARGB8888
+                    ),
+                    test_payload_with_format(
+                        top_h,
+                        vec![0x40400000],
+                        1,
+                        1,
+                        4,
+                        WL_SHM_FORMAT_ARGB8888
+                    )
+                ],
+                1
+            )
+            .await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 0).unwrap()],
+            0xFF40605F
+        );
+    }
+
+    #[tokio::test]
+    async fn clipped_translucent_surface_blends_only_inside_output_bounds() {
+        let mut state = DisplayState::new_test();
+        let handle = test_handle(1, "surface-1", 1, 1);
+        let surface = test_surface("surface-1", -1, -1, 2, 2, 1, Some(handle.clone()));
+        let payload =
+            test_payload_with_format(handle, vec![0x80800000; 4], 2, 2, 8, WL_SHM_FORMAT_ARGB8888);
+
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![surface], vec![payload], 1).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 0).unwrap()],
+            0xFF800000
+        );
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(1, 0).unwrap()],
+            BACKGROUND_PIXEL
+        );
+    }
+
+    #[tokio::test]
+    async fn surface_movement_and_removal_reconstruct_exposed_regions() {
+        let mut state = DisplayState::new_test();
+        let original = test_surface("surface-1", 0, 0, 2, 2, 1, None);
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![original], vec![], 1).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 0).unwrap()],
+            0xFFFF0000
+        );
+
+        let moved = test_surface("surface-1", 2, 0, 2, 2, 1, None);
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![moved], vec![], 2).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 0).unwrap()],
+            BACKGROUND_PIXEL
+        );
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(2, 0).unwrap()],
+            0xFFFF0000
+        );
+
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![], vec![], 3).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(2, 0).unwrap()],
+            BACKGROUND_PIXEL
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_or_missing_payload_does_not_partially_mutate_framebuffer() {
+        let mut state = DisplayState::new_test();
+        ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
+        state.outputs.get_mut("eDP-1").unwrap().framebuffer[framebuffer_offset(0, 0).unwrap()] =
+            0xDEADBEEF;
+        let before = state.outputs["eDP-1"].framebuffer.clone();
+        let surface =
+            test_surface("surface-1", 0, 0, 2, 2, 1, Some(test_handle(1, "surface-1", 1, 1)));
+
+        let event = commit_test_scene(&mut state, vec![surface], vec![], 1).await;
+
+        assert!(matches!(event, DisplayEvent::Rejected { .. }));
+        assert_eq!(state.outputs["eDP-1"].framebuffer, before);
+    }
+
+    #[tokio::test]
+    async fn stale_pixel_transport_payload_is_rejected_without_framebuffer_mutation() {
+        let mut state = DisplayState::new_test();
+        ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
+        state.outputs.get_mut("eDP-1").unwrap().framebuffer[framebuffer_offset(0, 0).unwrap()] =
+            0xDEADBEEF;
+        let before = state.outputs["eDP-1"].framebuffer.clone();
+        let current_handle = test_handle(1, "surface-1", 2, 2);
+        state
+            .pixel_transport
+            .submit(test_payload(current_handle, vec![0x11111111; 4], 2, 2, 8))
+            .unwrap();
+        let stale_handle = test_handle(1, "surface-1", 1, 1);
+        let surface = test_surface("surface-1", 0, 0, 2, 2, 1, Some(stale_handle.clone()));
+        let stale_payload = test_payload(stale_handle, vec![0x22222222; 4], 2, 2, 8);
+
+        let event = commit_test_scene(&mut state, vec![surface], vec![stale_payload], 1).await;
+
+        assert!(matches!(event, DisplayEvent::Rejected { .. }));
+        assert_eq!(state.outputs["eDP-1"].framebuffer, before);
+    }
+
+    #[tokio::test]
+    async fn unsupported_or_malformed_alpha_payload_rejects_without_framebuffer_mutation() {
+        let mut state = DisplayState::new_test();
+        ensure_framebuffer(&mut state.outputs.get_mut("eDP-1").unwrap().framebuffer);
+        state.outputs.get_mut("eDP-1").unwrap().framebuffer[framebuffer_offset(0, 0).unwrap()] =
+            0xDEADBEEF;
+        let before = state.outputs["eDP-1"].framebuffer.clone();
+        let handle = test_handle(1, "surface-1", 1, 1);
+        let surface = test_surface("surface-1", 0, 0, 1, 1, 1, Some(handle.clone()));
+        let unsupported = test_payload_with_format(handle.clone(), vec![0], 1, 1, 4, 99);
+
+        let event =
+            commit_test_scene(&mut state, vec![surface.clone()], vec![unsupported], 1).await;
+
+        assert!(matches!(event, DisplayEvent::Rejected { .. }));
+        assert_eq!(state.outputs["eDP-1"].framebuffer, before);
+
+        let malformed = waybroker_common::PixelTransportPayload {
+            handle,
+            pixels: vec![0, 0, 0],
+            width: 1,
+            height: 1,
+            stride: 4,
+            format: WL_SHM_FORMAT_ARGB8888,
+        };
+        let event = commit_test_scene(&mut state, vec![surface], vec![malformed], 2).await;
+
+        assert!(matches!(event, DisplayEvent::Rejected { .. }));
+        assert_eq!(state.outputs["eDP-1"].framebuffer, before);
+    }
+
+    #[tokio::test]
+    async fn initial_frame_uses_full_output_damage() {
+        let mut state = DisplayState::new_test();
+        let surface = test_surface("surface-1", 10, 10, 2, 2, 1, None);
+
+        assert!(matches!(
+            commit_test_scene(&mut state, vec![surface], vec![], 1).await,
+            DisplayEvent::SceneCommitted { .. }
+        ));
+
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer.len(),
+            FRAMEBUFFER_WIDTH as usize * FRAMEBUFFER_HEIGHT as usize
+        );
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(0, 0).unwrap()],
+            BACKGROUND_PIXEL
+        );
+        assert_eq!(
+            state.outputs["eDP-1"].framebuffer[framebuffer_offset(10, 10).unwrap()],
+            0xFFFF0000
+        );
+    }
+
+    #[tokio::test]
+    async fn test_phase3_composition_direct_scanout() {
+        let config = Config { session_instance_id: "test-session".into(), ..Default::default() };
+        let mut state = DisplayState::new_test();
+        let mut clock = FakePresentationClock;
+        let capture_backend = FakeCaptureBackend;
+        let mut record_backend = FakeRecordBackend;
+        let mut display_backend = FakeDisplayBackend;
+
+        // Perform fullscreen single surface commit
+        let fullscreen_surf = waybroker_common::SurfaceSnapshot {
+            id: "fullscreen".into(),
+            app_id: "mpv".into(),
+            placement: waybroker_common::SurfacePlacement {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+                z: 1,
+                visible: true,
+            },
+            ..Default::default()
+        };
+        let commit = handle_display_command(
+            DisplayCommand::CommitScene {
+                target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+                focus: waybroker_common::FocusTarget::None,
+                selection: waybroker_common::WaylandSelectionState::default(),
+                surfaces: vec![fullscreen_surf],
+                pixel_payloads: vec![],
+                scene_epoch: 0,
+                scene_generation: 0,
+            },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(commit, DisplayEvent::SceneCommitted { .. }));
+        let generation = state.outputs["eDP-1"].state.generation;
+        let _ = handle_display_command(
+            DisplayCommand::AdvancePresentation {
+                output_id: "eDP-1".into(),
+                output_generation: generation,
+                now_ns: 1_000_000_000,
+                tick_sequence: 1,
+            },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture_backend,
+            &mut record_backend,
+            &mut display_backend,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.direct_scanout_count, 1);
+        assert_eq!(state.composition_frame_count, 0);
+    }
+
+    #[test]
+    fn output_geometry_rejects_invalid_shapes_and_overflow() {
+        let base = OutputGeometry {
+            output_id: "test".into(),
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 1,
+        };
+        assert!(OutputState::validate(&base).is_ok());
+        assert!(OutputState::validate(&OutputGeometry { width: 0, ..base.clone() }).is_err());
+        assert!(OutputState::validate(&OutputGeometry { stride: 4, ..base.clone() }).is_err());
+        assert!(OutputState::validate(&OutputGeometry { format: 99, ..base.clone() }).is_err());
+        assert!(OutputState::validate(&OutputGeometry { width: u32::MAX, ..base }).is_err());
+    }
+
+    #[test]
+    fn output_geometry_supports_padding_and_negative_origin() {
+        let output = OutputState::validate(&OutputGeometry {
+            output_id: "test".into(),
+            width: 3,
+            height: 2,
+            stride: 16,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: -4,
+            origin_y: -3,
+            output_generation: 7,
+        })
+        .unwrap();
+        assert_eq!(output.framebuffer_words(), 8);
+        assert_eq!(output.bounds(), RendererRect { x0: -4, y0: -3, x1: -1, y1: -1 });
+        assert_eq!(framebuffer_offset_for_output(&output, -4, -3).unwrap(), 0);
+        assert_eq!(framebuffer_offset_for_output(&output, -2, -2).unwrap(), 6);
+    }
+
+    #[test]
+    fn output_and_scene_generations_are_independent() {
+        let output = OutputState::validate(&OutputGeometry {
+            output_id: "test".into(),
+            width: 4,
+            height: 4,
+            stride: 16,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 11,
+        })
+        .unwrap();
+        assert_eq!(output.generation, 11);
+        let scene = CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "test".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: Default::default(),
+            surfaces: vec![],
+            scene_epoch: 2,
+            scene_generation: 3,
+            commit_id: 1,
+            unix_timestamp: 0,
+        };
+        assert_ne!(output.generation, scene.scene_generation);
+    }
+
+    #[tokio::test]
+    async fn actual_commit_path_publishes_immutable_frame_in_order() {
+        let mut state = DisplayState::new_test();
+        let mut backend = MockDisplayBackend::default();
+        backend.set_auto_complete(true);
+        let first = commit_test_scene_with_backend(
+            &mut state,
+            vec![test_surface("one", 0, 0, 2, 2, 1, None)],
+            vec![],
+            1,
+            &mut backend,
+        )
+        .await;
+        let second = commit_test_scene_with_backend(
+            &mut state,
+            vec![test_surface("two", 2, 0, 2, 2, 1, None)],
+            vec![],
+            2,
+            &mut backend,
+        )
+        .await;
+        assert!(matches!(first, DisplayEvent::SceneCommitted { .. }));
+        assert!(matches!(second, DisplayEvent::SceneCommitted { .. }));
+        assert_eq!(
+            backend.publications().iter().map(|p| p.frame_id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(backend.publications()[0].scene_generation, 1);
+        assert_eq!(backend.publications()[1].scene_generation, 2);
+        assert!(!backend.publications()[0].damage.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_publication_preserves_renderer_state_and_retries_same_scene() {
+        let mut state = DisplayState::new_test();
+        let before = state.outputs["eDP-1"].framebuffer.clone();
+        let mut failing = MockDisplayBackend::default();
+        failing.set_auto_complete(true);
+        failing.set_fail_on_frame(1);
+        let rejected = commit_test_scene_with_backend(
+            &mut state,
+            vec![test_surface("one", 0, 0, 2, 2, 1, None)],
+            vec![],
+            1,
+            &mut failing,
+        )
+        .await;
+        assert!(matches!(rejected, DisplayEvent::SceneCommitted { publication: Some(_), .. }));
+        assert_eq!(state.outputs["eDP-1"].framebuffer, before);
+        assert_eq!(state.outputs["eDP-1"].published_frame_id, 0);
+        assert_eq!(state.last_scene_generation, 1);
+
+        let mut retry = MockDisplayBackend::default();
+        retry.set_auto_complete(true);
+        let accepted = commit_test_scene_with_backend(
+            &mut state,
+            vec![test_surface("one", 0, 0, 2, 2, 1, None)],
+            vec![],
+            1,
+            &mut retry,
+        )
+        .await;
+        assert!(matches!(accepted, DisplayEvent::SceneCommitted { .. }));
+        assert_eq!(retry.publications()[0].frame_id, 1);
+    }
+
+    #[test]
+    fn mock_retains_immutable_frame_across_resize() {
+        let mut backend = MockDisplayBackend::default();
+        let pixels = std::sync::Arc::<[u32]>::from(vec![0xFF112233, 0xFF445566]);
+        backend
+            .publish_frame(FramePublication {
+                frame_id: 1,
+                commit_id: 1,
+                output_id: "test".into(),
+                output_generation: 1,
+                scene_epoch: 1,
+                scene_generation: 1,
+                geometry: OutputGeometry {
+                    output_id: "test".into(),
+                    width: 2,
+                    height: 1,
+                    stride: 8,
+                    format: WL_SHM_FORMAT_XRGB8888,
+                    origin_x: 0,
+                    origin_y: 0,
+                    output_generation: 1,
+                },
+                format: WL_SHM_FORMAT_XRGB8888,
+                stride: 8,
+                pixels: pixels.clone(),
+                damage: vec![],
+            })
+            .unwrap();
+        assert_eq!(&*backend.publications()[0].pixels, &*pixels);
+    }
+
+    #[tokio::test]
+    async fn multi_output_routes_spanning_surface_and_removes_independently() {
+        let mut state = DisplayState::new_test();
+        let config =
+            Config { session_instance_id: "multi-output-test".into(), ..Default::default() };
+        let capture = FakeCaptureBackend;
+        let mut record = FakeRecordBackend;
+        let mut display = MockDisplayBackend::default();
+        display.set_auto_complete(true);
+        let mut clock = FakePresentationClock;
+        let geometry = OutputGeometry {
+            output_id: "right".into(),
+            width: 4,
+            height: 2,
+            stride: 32,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 1920,
+            origin_y: 0,
+            output_generation: 1,
+        };
+        let configured = handle_display_command(
+            DisplayCommand::ConfigureOutput { geometry },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture,
+            &mut record,
+            &mut display,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(configured, DisplayEvent::ModeApplied { .. }));
+        let surface = test_surface("spanning", 1918, 0, 8, 2, 1, None);
+        let result =
+            commit_test_scene_with_backend(&mut state, vec![surface], vec![], 1, &mut display)
+                .await;
+        assert!(matches!(result, DisplayEvent::SceneCommitted { .. }));
+        assert_eq!(display.publications().len(), 2);
+        assert_eq!(display.publications()[0].output_id, "eDP-1");
+        assert_eq!(display.publications()[1].output_id, "right");
+        assert_eq!(display.publications()[0].output_generation, 0);
+        assert_eq!(display.publications()[1].output_generation, 1);
+
+        let removed = handle_display_command(
+            DisplayCommand::RemoveOutput { output_id: "right".into(), output_generation: 1 },
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            None,
+            &mut clock,
+            &capture,
+            &mut record,
+            &mut display,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(removed, DisplayEvent::BlankApplied { .. }));
+        assert!(!state.outputs.contains_key("right"));
+        assert!(state.outputs.contains_key("eDP-1"));
+    }
+
+    #[tokio::test]
+    async fn multi_output_retry_does_not_republish_successful_output() {
+        let mut state = DisplayState::new_test();
+        state.outputs.insert(
+            "right".into(),
+            OutputRuntime::new(
+                OutputState::validate(&OutputGeometry {
+                    output_id: "right".into(),
+                    width: 4,
+                    height: 2,
+                    stride: 16,
+                    format: WL_SHM_FORMAT_XRGB8888,
+                    origin_x: 1920,
+                    origin_y: 0,
+                    output_generation: 1,
+                })
+                .unwrap(),
+            ),
+        );
+        let mut failing = MockDisplayBackend::default();
+        failing.set_auto_complete(true);
+        failing.set_fail_on_output("right");
+        let rejected = commit_test_scene_with_backend(
+            &mut state,
+            vec![test_surface("spanning", 1918, 0, 8, 2, 1, None)],
+            vec![],
+            1,
+            &mut failing,
+        )
+        .await;
+        assert!(matches!(rejected, DisplayEvent::SceneCommitted { publication: Some(_), .. }));
+        assert_eq!(failing.publications().len(), 1);
+        assert_eq!(state.outputs["eDP-1"].published_frame_id, 1);
+        assert!(state.outputs["right"].retry.is_some());
+
+        let mut retry = MockDisplayBackend::default();
+        retry.set_auto_complete(true);
+        let accepted = commit_test_scene_with_backend(
+            &mut state,
+            vec![test_surface("spanning", 1918, 0, 8, 2, 1, None)],
+            vec![],
+            1,
+            &mut retry,
+        )
+        .await;
+        assert!(matches!(accepted, DisplayEvent::SceneCommitted { .. }));
+        assert_eq!(retry.publications().len(), 1);
+        assert_eq!(retry.publications()[0].output_id, "right");
+        assert_eq!(state.outputs["eDP-1"].published_frame_id, 1);
+    }
+}
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    fn completion_surface(
+        id: &str,
+        scene_generation: u64,
+        buffer_generation: u64,
+    ) -> waybroker_common::SurfaceSnapshot {
+        waybroker_common::SurfaceSnapshot {
+            id: id.into(),
+            app_id: "completion.app".into(),
+            placement: waybroker_common::SurfacePlacement {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+                z: 1,
+                visible: true,
+            },
+            buffer_generation,
+            pixel_transport: (buffer_generation != 0).then(|| {
+                waybroker_common::PixelTransportHandle {
+                    client_id: 1,
+                    surface_id: id.into(),
+                    buffer_generation,
+                    scene_generation,
+                }
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn completion_payload(
+        id: &str,
+        scene_generation: u64,
+        buffer_generation: u64,
+        pixel: u32,
+    ) -> PixelTransportPayload {
+        let mut pixels = Vec::with_capacity(16);
+        for _ in 0..4 {
+            pixels.extend_from_slice(&pixel.to_le_bytes());
+        }
+        PixelTransportPayload {
+            handle: waybroker_common::PixelTransportHandle {
+                client_id: 1,
+                surface_id: id.into(),
+                buffer_generation,
+                scene_generation,
+            },
+            pixels,
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: WL_SHM_FORMAT_XRGB8888,
+        }
+    }
+
+    fn completion_frame(
+        output_id: &str,
+        output_generation: u64,
+        scene_epoch: u64,
+        scene_generation: u64,
+        commit_id: u64,
+        frame_id: u64,
+    ) -> FramePublication {
+        FramePublication {
+            frame_id,
+            commit_id,
+            output_id: output_id.into(),
+            output_generation,
+            scene_epoch,
+            scene_generation,
+            geometry: OutputGeometry {
+                output_id: output_id.into(),
+                width: 2,
+                height: 2,
+                stride: 8,
+                format: WL_SHM_FORMAT_XRGB8888,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation,
+            },
+            format: WL_SHM_FORMAT_XRGB8888,
+            stride: 8,
+            pixels: std::sync::Arc::from(vec![0xFF11_2233; 4]),
+            damage: vec![RendererRect { x0: 0, y0: 0, x1: 2, y1: 2 }],
+        }
+    }
+
+    fn completion_token(frame: &FramePublication, backend_instance_id: u64) -> PresentationToken {
+        PresentationToken {
+            backend_instance_id,
+            sequence: frame.frame_id.max(1),
+            output_id: frame.output_id.clone(),
+            output_generation: frame.output_generation,
+            scene_generation: frame.scene_generation,
+            frame_id: frame.frame_id,
+        }
+    }
+
+    #[test]
+    fn completion_scene_admission_rejects_surface_exhaustion() {
+        let surfaces: Vec<_> = (0..=MAX_SCENE_SURFACES)
+            .map(|index| waybroker_common::SurfaceSnapshot {
+                id: format!("surface-{index}"),
+                ..Default::default()
+            })
+            .collect();
+        let result = validate_scene_admission(
+            &waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            &waybroker_common::FocusTarget::None,
+            &waybroker_common::WaylandSelectionState::default(),
+            &surfaces,
+            &[],
+            1,
+            1,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn completion_scene_admission_rejects_payload_size_mismatch() {
+        let surface = completion_surface("surface-1", 1, 1);
+        let mut payload = completion_payload("surface-1", 1, 1, 0x0011_2233);
+        payload.pixels.pop();
+        let result = validate_scene_admission(
+            &waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            &waybroker_common::FocusTarget::None,
+            &waybroker_common::WaylandSelectionState::default(),
+            &[surface],
+            &[payload],
+            1,
+            1,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn completion_pixel_store_transaction_is_atomic_on_missing_payload() {
+        let mut store = DisplayPixelTransportStore::default();
+        let current = completion_payload("surface-1", 1, 1, 0x0001_0203);
+        let current_handle = current.handle.clone();
+        store.submit(current).unwrap();
+        let next_surface = completion_surface("surface-1", 2, 2);
+        assert!(store.prepared_for_scene(&[next_surface], &[]).is_err());
+        assert!(store.lookup(&current_handle).is_some());
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn completion_pixel_store_prunes_unreachable_payloads() {
+        let mut store = DisplayPixelTransportStore::default();
+        let first = completion_payload("surface-1", 1, 1, 0x0001_0203);
+        let second = PixelTransportPayload {
+            handle: waybroker_common::PixelTransportHandle {
+                client_id: 2,
+                surface_id: "surface-2".into(),
+                buffer_generation: 1,
+                scene_generation: 1,
+            },
+            pixels: vec![0; 16],
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: WL_SHM_FORMAT_XRGB8888,
+        };
+        let second_handle = second.handle.clone();
+        store.submit(first).unwrap();
+        store.submit(second).unwrap();
+        let surface = waybroker_common::SurfaceSnapshot {
+            id: "surface-2".into(),
+            placement: waybroker_common::SurfacePlacement {
+                width: 2,
+                height: 2,
+                visible: true,
+                ..Default::default()
+            },
+            buffer_generation: 1,
+            pixel_transport: Some(second_handle.clone()),
+            ..Default::default()
+        };
+        let prepared = store.prepared_for_scene(&[surface], &[]).unwrap();
+        assert_eq!(prepared.len(), 1);
+        assert!(prepared.lookup(&second_handle).is_some());
+        assert_eq!(prepared.total_bytes(), 16);
+    }
+
+    #[test]
+    fn completion_scene_version_rejects_old_epoch() {
+        assert!(scene_version_is_stale(7, 90, 6, 10_000));
+        assert!(scene_version_is_stale(7, 90, 7, 89));
+        assert!(!scene_version_is_stale(7, 90, 7, 90));
+        assert!(!scene_version_is_stale(7, 90, 8, 1));
+    }
+
+    #[test]
+    fn completion_xrgb_copy_matches_portable_semantics() {
+        let words: Vec<u32> = (0..129).map(|index| index as u32 * 0x0001_0101).collect();
+        let mut src = Vec::with_capacity(words.len() * 4);
+        for word in &words {
+            src.extend_from_slice(&word.to_le_bytes());
+        }
+        let mut dst = vec![0u32; words.len()];
+        copy_xrgb_row(&mut dst, &src).unwrap();
+        for (actual, expected) in dst.iter().zip(words) {
+            assert_eq!(*actual, 0xFF00_0000 | (expected & 0x00FF_FFFF));
+        }
+    }
+
+    #[test]
+    fn completion_screenshot_refine_matches_scalar_semantics() {
+        let mut pixels: Vec<u32> = (0..129)
+            .map(|index| 0xAA00_0000 | ((index as u32 & 0xFF) << 16) | 0x0000_0055)
+            .collect();
+        let expected: Vec<u32> = pixels
+            .iter()
+            .map(|pixel| {
+                let high = (*pixel >> 16) & 0xFF;
+                let low = *pixel & 0xFF;
+                (*pixel & 0xFF00_FF00) | (low << 16) | high
+            })
+            .collect();
+        refine_screenshot_pixels_accel(&mut pixels);
+        assert_eq!(pixels, expected);
+    }
+
+    #[test]
+    fn completion_output_geometry_rejects_resource_exhaustion() {
+        let geometry = OutputGeometry {
+            output_id: "huge".into(),
+            width: MAX_OUTPUT_DIMENSION + 1,
+            height: 1,
+            stride: (MAX_OUTPUT_DIMENSION + 1) * 4,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 1,
+        };
+        assert!(OutputState::validate(&geometry).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_headless_pending_submissions_are_bounded() {
+        let mut backend = HeadlessShmDisplayBackend::default();
+        for frame_id in 1..=MAX_HEADLESS_PENDING_SUBMISSIONS as u64 {
+            backend
+                .submit_frame(completion_frame("headless", 1, 1, 1, frame_id, frame_id))
+                .unwrap();
+        }
+        assert!(backend.submit_frame(completion_frame("headless", 1, 1, 1, 999, 999)).is_err());
+    }
+
+    #[test]
+    fn completion_headless_inventory_exists_before_first_frame() {
+        let mut backend = HeadlessShmDisplayBackend::new_with_instance_id(9);
+        backend.queue_connected_output(OutputGeometry {
+            output_id: "headless-0".into(),
+            width: 64,
+            height: 32,
+            stride: 256,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
+            output_generation: 1,
+        });
+        let outputs = backend.enumerate_outputs().unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].name, "headless-0");
+        assert!(backend.capture_published("headless-0").unwrap().is_none());
+    }
+
+    #[test]
+    fn completion_stale_backend_token_preflight_is_non_mutating() {
+        let mut state = DisplayState::new_test();
+        let runtime = state.outputs.get_mut("eDP-1").unwrap();
+        runtime.backend_instance_id = 7;
+        let frame = completion_frame("eDP-1", runtime.state.generation, 1, 1, 1, 1);
+        let token = completion_token(&frame, 7);
+        runtime.outstanding = Some(OutstandingPresentation { token: token.clone(), frame });
+        let stale = PresentationToken { backend_instance_id: 6, ..token };
+        assert_eq!(
+            preflight_presentation_token(&state, &stale),
+            Err(PresentationCompletion::StaleGeneration)
+        );
+        assert!(state.outputs["eDP-1"].outstanding.is_some());
+    }
+
+    #[test]
+    fn completion_duplicate_presentation_does_not_complete_twice() {
+        let mut state = DisplayState::new_test();
+        let generation = state.outputs["eDP-1"].state.generation;
+        let frame = completion_frame("eDP-1", generation, 1, 1, 1, 1);
+        let token = completion_token(&frame, MOCK_BACKEND_INSTANCE_ID);
+        state.outputs.get_mut("eDP-1").unwrap().outstanding =
+            Some(OutstandingPresentation { token: token.clone(), frame });
+        assert_eq!(
+            complete_presentation(&mut state, token.clone(), PresentationCompletion::Presented),
+            PresentationCompletion::Presented
+        );
+        assert_eq!(
+            complete_presentation(&mut state, token, PresentationCompletion::Presented),
+            PresentationCompletion::UnknownToken
+        );
+    }
+
+    #[test]
+    fn completion_newer_pending_damage_survives_older_completion() {
+        let mut state = DisplayState::new_test();
+        let generation = state.outputs["eDP-1"].state.generation;
+        let frame = completion_frame("eDP-1", generation, 1, 1, 1, 1);
+        let token = completion_token(&frame, MOCK_BACKEND_INSTANCE_ID);
+        let runtime = state.outputs.get_mut("eDP-1").unwrap();
+        runtime.outstanding = Some(OutstandingPresentation { token: token.clone(), frame });
+        runtime.pending_scene_epoch = 1;
+        runtime.pending_scene_generation = 2;
+        runtime.pending_commit_id = 2;
+        runtime.pending_damage = vec![RendererRect { x0: 0, y0: 0, x1: 1, y1: 1 }];
+        assert_eq!(
+            complete_presentation(&mut state, token, PresentationCompletion::Presented),
+            PresentationCompletion::Presented
+        );
+        assert!(!state.outputs["eDP-1"].pending_damage.is_empty());
+        assert_eq!(state.outputs["eDP-1"].pending_commit_id, 2);
+    }
+
+    #[test]
+    fn completion_feedback_exists_only_after_presented_completion() {
+        let mut state = DisplayState::new_test();
+        let generation = state.outputs["eDP-1"].state.generation;
+        let frame = completion_frame("eDP-1", generation, 1, 1, 11, 1);
+        let token = completion_token(&frame, MOCK_BACKEND_INSTANCE_ID);
+        state.presentation_obligations.insert(
+            11,
+            PresentationObligation {
+                scene_epoch: 1,
+                scene_generation: 1,
+                required_outputs: BTreeSet::from(["eDP-1".to_string()]),
+                presented_outputs: BTreeSet::new(),
+            },
+        );
+        state.outputs.get_mut("eDP-1").unwrap().outstanding =
+            Some(OutstandingPresentation { token: token.clone(), frame });
+        assert!(!state.presentation_feedbacks.contains_key(&11));
+        assert_eq!(
+            complete_presentation(&mut state, token, PresentationCompletion::Presented),
+            PresentationCompletion::Presented
+        );
+        assert!(matches!(
+            state.presentation_feedbacks.get(&11),
+            Some(DisplayEvent::FramePresented { commit_id: 11, .. })
+        ));
+    }
+
+    #[test]
+    fn completion_newer_presentation_resolves_older_obligation() {
+        let mut state = DisplayState::new_test();
+        state.presentation_obligations.insert(
+            7,
+            PresentationObligation {
+                scene_epoch: 2,
+                scene_generation: 3,
+                required_outputs: BTreeSet::from(["eDP-1".to_string()]),
+                presented_outputs: BTreeSet::new(),
+            },
+        );
+        let frame = completion_frame("eDP-1", 0, 2, 4, 8, 2);
+        note_presented_obligations(&mut state, &frame, "eDP-1", 16_666_667, 2);
+        assert!(state.presentation_feedbacks.contains_key(&7));
+        assert!(!state.presentation_obligations.contains_key(&7));
+    }
+
+    #[test]
+    fn completion_feedback_history_is_bounded() {
+        let mut state = DisplayState::new_test();
+        for commit_id in 1..=(MAX_PRESENTATION_FEEDBACKS as u64 + 17) {
+            insert_bounded_feedback(
+                &mut state,
+                commit_id,
+                DisplayEvent::FramePresented {
+                    commit_id,
+                    timestamp: commit_id,
+                    refresh_ns: 1,
+                    seq: commit_id,
+                    flags: 0,
+                },
+            );
+        }
+        assert_eq!(state.presentation_feedbacks.len(), MAX_PRESENTATION_FEEDBACKS);
+        assert!(!state.presentation_feedbacks.contains_key(&1));
+    }
+
+    #[test]
+    fn completion_retry_state_is_generation_scoped() {
+        let mut state = DisplayState::new_test();
+        let runtime = state.outputs.get_mut("eDP-1").unwrap();
+        runtime.pending_scene_epoch = 2;
+        runtime.pending_scene_generation = 2;
+        runtime.pending_commit_id = 2;
+        runtime.pending_damage = vec![RendererRect { x0: 0, y0: 0, x1: 1, y1: 1 }];
+        runtime.retry = Some(OutputRetryState {
+            scene_epoch: 1,
+            scene_generation: 1,
+            output_generation: runtime.state.generation,
+            frame_id: 1,
+            commit_id: 1,
+        });
+        let generation = runtime.state.generation;
+        let _ = advance_presentation(&mut state, "eDP-1", generation, 1_000, 1).unwrap();
+        assert!(state.outputs["eDP-1"].retry.is_none());
+    }
+
+    #[test]
+    fn completion_reconciliation_replay_reuses_commit_identity() {
+        let mut state = DisplayState::new_test();
+        let surface = completion_surface("surface-1", 9, 0);
+        state.last_scene_epoch = 4;
+        state.last_scene_generation = 9;
+        state.next_commit_id = 43;
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![surface.clone()],
+            scene_epoch: 4,
+            scene_generation: 9,
+            commit_id: 42,
+            unix_timestamp: 1,
+        });
+        state.reconciliation_state = DisplayReconciliationState::Recovering;
+        let config = Config::default();
+        let mut clock = FakePresentationClock;
+        let mut backend = MockDisplayBackend::default();
+        let event = handle_scene_acceptance(
+            waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            waybroker_common::FocusTarget::None,
+            waybroker_common::WaylandSelectionState::default(),
+            vec![surface],
+            vec![],
+            4,
+            9,
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            &mut clock,
+            &mut backend,
+        )
+        .unwrap();
+        assert!(matches!(event, DisplayEvent::SceneCommitted { commit_id: 42, .. }));
+        assert_eq!(state.next_commit_id, 43);
+    }
+
+    #[test]
+    fn completion_equal_generation_conflict_is_rejected() {
+        let mut state = DisplayState::new_test();
+        state.last_scene_epoch = 1;
+        state.last_scene_generation = 1;
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![],
+            scene_epoch: 1,
+            scene_generation: 1,
+            commit_id: 1,
+            unix_timestamp: 1,
+        });
+        let config = Config::default();
+        let mut clock = FakePresentationClock;
+        let mut backend = MockDisplayBackend::default();
+        let event = handle_scene_acceptance(
+            waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            waybroker_common::FocusTarget::None,
+            waybroker_common::WaylandSelectionState::default(),
+            vec![completion_surface("different-surface", 1, 0)],
+            vec![],
+            1,
+            1,
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            &mut clock,
+            &mut backend,
+        )
+        .unwrap();
+        assert!(matches!(event, DisplayEvent::Rejected { .. }));
+    }
+
+    #[test]
+    fn completion_presentation_obligation_budget_backpressures() {
+        let mut state = DisplayState::new_test();
+        for commit_id in 1..=MAX_PRESENTATION_OBLIGATIONS as u64 {
+            state.presentation_obligations.insert(
+                commit_id,
+                PresentationObligation {
+                    scene_epoch: 1,
+                    scene_generation: commit_id,
+                    required_outputs: BTreeSet::from(["eDP-1".to_string()]),
+                    presented_outputs: BTreeSet::new(),
+                },
+            );
+        }
+        let config = Config::default();
+        let mut clock = FakePresentationClock;
+        let mut backend = MockDisplayBackend::default();
+        let event = handle_scene_acceptance(
+            waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            waybroker_common::FocusTarget::None,
+            waybroker_common::WaylandSelectionState::default(),
+            vec![completion_surface("surface-1", 1, 0)],
+            vec![],
+            1,
+            1,
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            &mut clock,
+            &mut backend,
+        )
+        .unwrap();
+        assert!(matches!(event, DisplayEvent::Rejected { .. }));
+        assert!(state.last_scene.is_none());
+    }
+
+    #[test]
+    fn completion_backend_reconnect_rearms_latest_commit() {
+        let mut state = DisplayState::new_test();
+        state.outputs.clear();
+        state.display_epoch = 5;
+        state.last_scene_epoch = 3;
+        state.last_scene_generation = 8;
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "headless-0".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![],
+            scene_epoch: 3,
+            scene_generation: 8,
+            commit_id: 17,
+            unix_timestamp: 1,
+        });
+        let mut backend = MockDisplayBackend::default();
+        apply_backend_output_event(
+            &mut state,
+            &mut backend,
+            BackendOutputEvent::Connected {
+                backend_instance_id: 5,
+                backend_output_id: "headless-0".into(),
+                event_sequence: 1,
+                geometry: OutputGeometry {
+                    output_id: "headless-0".into(),
+                    width: 64,
+                    height: 32,
+                    stride: 256,
+                    format: WL_SHM_FORMAT_XRGB8888,
+                    origin_x: 0,
+                    origin_y: 0,
+                    output_generation: 1,
+                },
+                cadence: PresentationCadence { period_ns: 16_666_667 },
+            },
+        )
+        .unwrap();
+        assert_eq!(state.outputs["headless-0"].pending_scene_epoch, 3);
+        assert_eq!(state.outputs["headless-0"].pending_scene_generation, 8);
+        assert_eq!(state.outputs["headless-0"].pending_commit_id, 17);
+        assert_eq!(state.outputs["headless-0"].pending_damage.len(), 1);
+    }
+
+    #[test]
+    fn completion_headless_rejects_oversized_frame_before_allocation() {
+        let frame = FramePublication {
+            frame_id: 1,
+            commit_id: 1,
+            output_id: "huge".into(),
+            output_generation: 1,
+            scene_epoch: 1,
+            scene_generation: 1,
+            geometry: OutputGeometry {
+                output_id: "huge".into(),
+                width: 1,
+                height: u32::MAX,
+                stride: 4,
+                format: WL_SHM_FORMAT_XRGB8888,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation: 1,
+            },
+            format: WL_SHM_FORMAT_XRGB8888,
+            stride: 4,
+            pixels: std::sync::Arc::from(Vec::<u32>::new()),
+            damage: vec![],
+        };
+        assert!(HeadlessShmDisplayBackend::validate_frame(&frame).is_err());
+    }
+
+    #[test]
+    fn completion_metadata_only_recovery_can_be_hydrated_without_new_commit_id() {
+        let mut state = DisplayState::new_test();
+        let surface = completion_surface("surface-1", 9, 3);
+        state.last_scene_epoch = 4;
+        state.last_scene_generation = 9;
+        state.next_commit_id = 43;
+        state.last_scene = Some(CommittedSceneState {
+            source: ServiceRole::Compd,
+            target: waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            focus: waybroker_common::FocusTarget::None,
+            selection: waybroker_common::WaylandSelectionState::default(),
+            surfaces: vec![surface.clone()],
+            scene_epoch: 4,
+            scene_generation: 9,
+            commit_id: 42,
+            unix_timestamp: 1,
+        });
+        state.reconciliation_state = DisplayReconciliationState::Recovering;
+        let config = Config::default();
+        let mut clock = FakePresentationClock;
+        let mut backend = MockDisplayBackend::default();
+
+        let recovered = handle_scene_acceptance(
+            waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            waybroker_common::FocusTarget::None,
+            waybroker_common::WaylandSelectionState::default(),
+            vec![surface.clone()],
+            vec![],
+            4,
+            9,
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            &mut clock,
+            &mut backend,
+        )
+        .unwrap();
+        assert!(matches!(recovered, DisplayEvent::SceneCommitted { commit_id: 42, .. }));
+        assert_eq!(state.pixel_transport.len(), 0);
+
+        state.reconciliation_state = DisplayReconciliationState::ReconciledAwaitingPresentation;
+        let payload = completion_payload("surface-1", 9, 3, 0x0011_2233);
+        let hydrated = handle_scene_acceptance(
+            waybroker_common::CommitTarget::Output { name: "eDP-1".into() },
+            waybroker_common::FocusTarget::None,
+            waybroker_common::WaylandSelectionState::default(),
+            vec![surface.clone()],
+            vec![payload],
+            4,
+            9,
+            ServiceRole::Compd,
+            &config,
+            &mut state,
+            &mut clock,
+            &mut backend,
+        )
+        .unwrap();
+        assert!(matches!(hydrated, DisplayEvent::SceneCommitted { commit_id: 42, .. }));
+        assert!(state.pixel_transport.lookup(surface.pixel_transport.as_ref().unwrap()).is_some());
+        assert_eq!(state.next_commit_id, 43);
     }
 }

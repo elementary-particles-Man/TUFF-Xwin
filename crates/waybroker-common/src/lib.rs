@@ -1,16 +1,25 @@
 pub mod accel;
 mod ipc;
+pub mod pixel_transport;
 mod profile;
 mod transport;
 
 pub use accel::{AccelPolicy, SimdFlavor};
 pub use ipc::{
-    CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget,
-    ForeignToplevelHandle, HealthState, ImeBridgeMode, ImeCommand, ImeEvent, ImeStatus,
-    IpcEnvelope, LayerMetadata, LockCommand, LockState, MessageKind, OutputMode,
-    PointerConstraints, Rect, ResumeStage, SessionCommand, SurfacePlacement,
-    SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand, WaylandCommand, WaylandEvent,
-    WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
+    BackendOutputEvent, CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent,
+    DisplayReconciliationState, FocusTarget, ForeignToplevelHandle, HealthState, ImeBridgeMode,
+    ImeCommand, ImeEvent, ImeStatus, IpcEnvelope, LayerMetadata, LockCommand, LockState,
+    MessageKind, OutputGeometry, OutputMode, OutputPublicationOutcome, OutputPublicationResult,
+    OutputReadiness, OutputReadinessState, OutputTopologyDelta, OutputTopologyEntry,
+    OutputTopologyTransition, PointerConstraints, PresentationCadence, PresentationCompletion,
+    PresentationSchedulerState, PresentationToken, PublicationFailure, Rect, ResumeStage,
+    ScenePublicationResult, ServiceReadiness, ServiceReadinessState, SessionCommand,
+    SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WatchdogCommand, WaylandCommand,
+    WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole,
+    WaylandSurfaceState,
+};
+pub use pixel_transport::{
+    PixelTransportError, PixelTransportHandle, PixelTransportPayload, PixelTransportStore,
 };
 pub use profile::{
     DesktopComponent, DesktopComponentRole, DesktopComponentState, DesktopHealthStatus,
@@ -20,11 +29,14 @@ pub use profile::{
     SessionWatchdogComponentReport, SessionWatchdogReport,
 };
 pub use transport::{
-    ServiceEndpoint, ServiceListener, ServiceStream, bind_explicit_unix_socket,
-    bind_service_socket, connect_service_socket, ensure_runtime_dir, is_recoverable_accept_error,
-    read_json_line, runtime_dir, sanitize_artifact_filename, sanitize_session_instance_id,
-    send_json_line, service_socket_path, session_artifact_path, validate_artifact_filename,
-    validate_runtime_socket_path, validate_session_instance_id,
+    MAX_IPC_BINARY_ATTACHMENT_BYTES, MAX_IPC_BINARY_ATTACHMENTS, MAX_IPC_BINARY_TOTAL_BYTES,
+    MAX_IPC_FRAME_METADATA_BYTES, MAX_IPC_JSON_LINE_BYTES, ServiceEndpoint, ServiceListener,
+    ServiceStream, bind_explicit_unix_socket, bind_service_socket, connect_service_socket,
+    ensure_runtime_dir, is_recoverable_accept_error, read_ipc_envelope, read_json_line,
+    runtime_dir, sanitize_artifact_filename, sanitize_session_instance_id,
+    send_ipc_display_command, send_ipc_envelope, send_json_line, service_socket_path,
+    session_artifact_path, validate_artifact_filename, validate_runtime_socket_path,
+    validate_session_instance_id,
 };
 
 pub fn now_unix_timestamp() -> u64 {
@@ -79,10 +91,11 @@ impl ServiceBanner {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent, FocusTarget, IpcEnvelope,
-        MessageKind, OutputMode, ServiceBanner, ServiceRole, SurfacePlacement,
-        SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
-        WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
+        BackendOutputEvent, CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent,
+        FocusTarget, IpcEnvelope, MessageKind, OutputGeometry, OutputMode, PresentationCadence,
+        ServiceBanner, ServiceRole, SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot,
+        WaylandCommand, WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState,
+        WaylandSurfaceRole, WaylandSurfaceState,
     };
 
     #[test]
@@ -115,6 +128,7 @@ mod tests {
                             z: 10,
                             visible: true,
                         },
+                        ..Default::default()
                     },
                     SurfaceSnapshot {
                         id: "panel-1".into(),
@@ -127,8 +141,12 @@ mod tests {
                             z: 100,
                             visible: true,
                         },
+                        ..Default::default()
                     },
                 ],
+                pixel_payloads: vec![],
+                scene_epoch: 42,
+                scene_generation: 1,
             }),
         );
 
@@ -183,6 +201,34 @@ mod tests {
     }
 
     #[test]
+    fn roundtrips_backend_output_lifecycle_event() {
+        let event = BackendOutputEvent::Connected {
+            backend_instance_id: 2,
+            backend_output_id: "headless-0".into(),
+            event_sequence: 4,
+            geometry: OutputGeometry {
+                output_id: "headless-0".into(),
+                width: 64,
+                height: 32,
+                stride: 256,
+                format: 1,
+                origin_x: 0,
+                origin_y: 0,
+                output_generation: 3,
+            },
+            cadence: PresentationCadence { period_ns: 16_666_667 },
+        };
+        let envelope = IpcEnvelope::new(
+            ServiceRole::Displayd,
+            ServiceRole::Compd,
+            MessageKind::BackendOutputEvent(event),
+        );
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let decoded: IpcEnvelope = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
     fn roundtrips_display_scene_snapshot() {
         let envelope = IpcEnvelope::new(
             ServiceRole::Displayd,
@@ -204,7 +250,10 @@ mod tests {
                             z: 5,
                             visible: true,
                         },
+                        ..Default::default()
                     }],
+                    scene_epoch: 42,
+                    scene_generation: 1,
                     commit_id: 7,
                     unix_timestamp: 1_778_000_001,
                 }),
@@ -234,6 +283,7 @@ mod tests {
                             role: WaylandSurfaceRole::Toplevel,
                             mapped: true,
                             buffer_attached: true,
+                            ..Default::default()
                         },
                         WaylandSurfaceState {
                             id: "panel-1".into(),
@@ -241,6 +291,7 @@ mod tests {
                             role: WaylandSurfaceRole::Layer(super::LayerMetadata::default()),
                             mapped: false,
                             buffer_attached: false,
+                            ..Default::default()
                         },
                     ],
                     foreign_toplevels: vec![],

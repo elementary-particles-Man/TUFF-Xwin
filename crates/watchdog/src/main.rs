@@ -495,10 +495,6 @@ impl WatchdogServer {
         self.cached_states.insert(cache_key, next_state.clone());
         StateUpdateOutcome::Accepted(next_state)
     }
-
-    fn latest_session_instance_id(&self) -> Option<String> {
-        self.cached_states.keys().next().map(|key| key.session_instance_id.clone())
-    }
 }
 
 fn load_launch_states(config: &Config) -> Result<Vec<SessionLaunchState>> {
@@ -517,9 +513,9 @@ fn load_launch_states(config: &Config) -> Result<Vec<SessionLaunchState>> {
         let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
 
         // session-<instance_id>-launch-state.json 形式をサポート
-        if file_name.starts_with("session-") && file_name.ends_with("-launch-state.json") {
-            launch_states.push(load_launch_state(&path)?);
-        } else if file_name.starts_with("launch-state-") && file_name.ends_with(".json") {
+        if (file_name.starts_with("session-") && file_name.ends_with("-launch-state.json"))
+            || (file_name.starts_with("launch-state-") && file_name.ends_with(".json"))
+        {
             launch_states.push(load_launch_state(&path)?);
         }
     }
@@ -1215,5 +1211,37 @@ mod tests {
 
         let path_b = session_artifact_path("session-b", "watchdog-recovery-compd");
         assert!(!path_b.exists(), "artifact for session-b should not exist");
+    }
+
+    #[test]
+    fn test_phase6_degraded_fallback_policy_evaluation() {
+        let state = SessionLaunchState {
+            profile_id: "demo-x11".into(),
+            session_instance_id: "test-session".into(),
+            display_name: "Demo X11".into(),
+            protocol: DesktopProtocol::LayerX11,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            generation: 1,
+            sequence: 1,
+            components: vec![SessionLaunchComponentState {
+                id: "demo-shell".into(),
+                role: DesktopComponentRole::Shell,
+                critical: true,
+                command: vec!["demo-shell".into()],
+                resolved_command: Some("/usr/bin/demo-shell".into()),
+                state: DesktopComponentState::Failed,
+                pid: None,
+                restart_count: 5,
+                last_exit_status: Some(1),
+            }],
+            unix_timestamp: 0,
+            service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
+        };
+
+        let report = inspect_launch_state(&state);
+        assert_eq!(report.unhealthy_components, 1);
+        assert_eq!(report.components[0].action, DesktopRecoveryAction::DegradedProfile);
+        assert!(report.components[0].reason.contains("component spawn failed"));
     }
 }

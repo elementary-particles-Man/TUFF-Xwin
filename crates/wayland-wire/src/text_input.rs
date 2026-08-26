@@ -21,6 +21,7 @@ pub struct TextInputState {
     pub current: TextInputData,
 }
 
+#[derive(Default)]
 pub struct TextInputManager {
     pub inputs: HashMap<WaylandObjectId, TextInputState>,
 }

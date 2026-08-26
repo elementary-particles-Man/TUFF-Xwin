@@ -51,7 +51,7 @@ wait_for_socket() {
 
 wait_for_file() {
   local path=$1
-  local timeout=10
+  local timeout=${2:-10}
   local count=0
   echo "Waiting for file $path..."
   while [[ ! -f "$path" ]]; do
@@ -66,6 +66,23 @@ wait_for_file() {
   sleep 0.1
 }
 
+wait_for_log() {
+  local needle=$1
+  local path=$2
+  local timeout=${3:-10}
+  local count=0
+  echo "Waiting for log $path to contain: $needle"
+  while ! grep -Fq "$needle" "$path" 2>/dev/null; do
+    if [[ $count -ge $((timeout * 10)) ]]; then
+      echo "Error: Timeout waiting for log entry in $path: $needle" >&2
+      return 1
+    fi
+    sleep 0.1
+    count=$((count + 1))
+  done
+  echo "Log entry found in $path."
+}
+
 # Pre-build
 echo "==> Pre-building all packages..."
 cargo build --workspace
@@ -75,11 +92,22 @@ cargo build --workspace
 "$target_dir/displayd" --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/displayd.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/displayd.sock"
 
+"$target_dir/waylandd" --serve-ipc --registry "$repo_root/examples/minimal-scene/surface-registry.json" > "$WAYBROKER_RUNTIME_DIR/waylandd.log" 2>&1 &
+wait_for_socket "$WAYBROKER_RUNTIME_DIR/waylandd.sock"
+
 "$target_dir/watchdog" --serve-ipc --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/watchdog.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/watchdog.sock"
 
 "$target_dir/lockd" --serve-ipc > "$WAYBROKER_RUNTIME_DIR/lockd.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/lockd.sock"
+
+"$target_dir/compd" \
+  --scene "$repo_root/examples/minimal-scene/scene.json" \
+  --commit-demo \
+  --require-displayd \
+  --session-instance-id "$session_instance_id" \
+  > "$WAYBROKER_RUNTIME_DIR/compd-prime.log" 2>&1
+wait_for_log "service=compd op=displayd_response event=scene_committed" "$WAYBROKER_RUNTIME_DIR/compd-prime.log"
 
 # We need a profile selection for manage-active sessiond
 "$target_dir/sessiond" --select-profile demo-wayland-compd-recovery --write-selection --session-instance-id "$session_instance_id" > /dev/null
@@ -97,43 +125,25 @@ echo "==> Executing resume scenario: compd-trouble"
 
 # Wait for supervisor to detect and execute recovery
 echo "==> Waiting for recovery execution..."
-timeout=60
-count=0
-recovery_artifact_files=("$WAYBROKER_RUNTIME_DIR"/session-*-watchdog-recovery-compd.json)
-recovery_artifact="${recovery_artifact_files[0]:-}"
-while [[ ! -f "$recovery_artifact" ]]; do
-  if [[ $count -ge $((timeout * 10)) ]]; then
-    echo "FAILED: Recovery request artifact not found after timeout"
-    echo "--- sessiond log ---"
-    cat "$WAYBROKER_RUNTIME_DIR/sessiond-managed.log"
-    exit 1
-  fi
-  sleep 0.1
-  count=$((count + 1))
-done
-
-echo "Recovery request artifact found."
-
-count=0
-execution_artifact_files=("$WAYBROKER_RUNTIME_DIR"/session-*-watchdog-action-execution-compd.json)
-execution_artifact="${execution_artifact_files[0]:-}"
-while [[ ! -f "$execution_artifact" ]]; do
-  if [[ $count -ge $((timeout * 10)) ]]; then
-    echo "FAILED: Recovery execution artifact not found after timeout"
-    echo "--- sessiond log ---"
-    cat "$WAYBROKER_RUNTIME_DIR/sessiond-managed.log"
-    exit 1
-  fi
-  sleep 0.1
-  count=$((count + 1))
-done
+recovery_artifact="$WAYBROKER_RUNTIME_DIR/session-${session_instance_id}-watchdog-recovery-compd.json"
+execution_artifact="$WAYBROKER_RUNTIME_DIR/session-${session_instance_id}-watchdog-action-execution-compd.json"
+wait_for_log "service=watchdog op=write_recovery_artifact path=${recovery_artifact}" "$WAYBROKER_RUNTIME_DIR/watchdog.log" 60
+wait_for_file "$execution_artifact" 60
 
 echo "Recovery execution artifact found."
 grep '"result": "succeeded"' "$execution_artifact" > /dev/null
+grep '"role": "compd"' "$execution_artifact" > /dev/null
+grep '"--restore-from-displayd"' "$execution_artifact" > /dev/null
+grep '"--reconcile-waylandd"' "$execution_artifact" > /dev/null
+grep '"--handoff-selection"' "$execution_artifact" > /dev/null
+grep '"--require-displayd"' "$execution_artifact" > /dev/null
+grep '"--require-waylandd"' "$execution_artifact" > /dev/null
 echo "Recovery artifact content verified (result succeeded)."
 
-# Verify that sessiond log shows the execution
-grep "op=recovery_execution event=finished role=compd result=succeeded" "$WAYBROKER_RUNTIME_DIR/sessiond-managed.log" > /dev/null
-echo "Sessiond structured log verified."
+wait_for_log "service=compd op=scene_recover event=success" "$WAYBROKER_RUNTIME_DIR/sessiond-managed.log" 60
+wait_for_log "service=compd op=selection_handoff event=success" "$WAYBROKER_RUNTIME_DIR/sessiond-managed.log" 60
+wait_for_log "service=compd op=startup_rebuild event=scene_committed" "$WAYBROKER_RUNTIME_DIR/sessiond-managed.log" 60
+wait_for_log "service=sessiond op=recovery_execution event=finished role=compd result=succeeded" "$WAYBROKER_RUNTIME_DIR/sessiond-managed.log" 60
+wait_for_socket "$WAYBROKER_RUNTIME_DIR/compd.sock"
 
 echo "==> ROLE-SCOPED RECOVERY EXECUTION SMOKE TEST PASSED"

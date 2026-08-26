@@ -16,6 +16,7 @@ x11rb = { version = "0.13", optional = true }
 ashpd = { version = "0.9", optional = true, default-features = false, features = ["tokio"] }
 pipewire = { version = "0.10", optional = true }
 async-trait = "0.1"
+libc.workspace = true
 
 [features]
 default = []

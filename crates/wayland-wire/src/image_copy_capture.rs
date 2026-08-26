@@ -1,6 +1,7 @@
 use crate::{screencopy::CaptureScratch, WaylandObjectId};
 use std::collections::HashMap;
 
+#[derive(Default)]
 pub struct ImageCopyCaptureManager {
     pub sessions: HashMap<WaylandObjectId, ImageCopyCaptureSessionState>,
     pub frames: HashMap<WaylandObjectId, ImageCopyCaptureFrameState>,

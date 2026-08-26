@@ -18,16 +18,11 @@ use crate::{
 };
 use xwin_sec::{BrowserSecurityPolicy, PolicyContext, SecurityPolicy};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CaptureBackendKind {
+    #[default]
     Fake,
     IsolatedDisplayd,
-}
-
-impl Default for CaptureBackendKind {
-    fn default() -> Self {
-        Self::Fake
-    }
 }
 
 impl CaptureBackendKind {
@@ -120,10 +115,7 @@ impl CliOptions {
     {
         let raw = CliOverrides::parse_from(args)?;
         if raw.help {
-            let mut options = Self::default();
-            options.help = true;
-            options.config_path = raw.config_path;
-            return Ok(options);
+            return Ok(Self { help: true, config_path: raw.config_path, ..Self::default() });
         }
 
         let mut options = Self::default();
@@ -394,11 +386,10 @@ mod tests {
     use crate::harness_displayd::{HarnessDisplayd, HarnessDisplaydResponse};
     use crate::{
         artifact::{DisplaydArtifactCaptureClient, FileCaptureArtifactReader},
-        displayd_ipc::{DisplaydIpcCaptureClient, FakeDisplaydTransport},
+        displayd_ipc::DisplaydIpcCaptureClient,
     };
     use std::{fs, path::Path};
     use tempfile::tempdir;
-    use waybroker_common::{DisplayEvent, IpcEnvelope, MessageKind, ServiceRole};
     use xwin_sec::{DecisionReason, SecurityDecision, browser_hostile_client};
 
     #[test]

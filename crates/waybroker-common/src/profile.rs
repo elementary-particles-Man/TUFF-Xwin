@@ -61,18 +61,13 @@ impl DesktopComponentRole {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum DesktopLauncher {
+    #[default]
     System,
     RepoScript,
     RepoBinary,
-}
-
-impl Default for DesktopLauncher {
-    fn default() -> Self {
-        Self::System
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -43,7 +43,7 @@ pub struct ArgSpec {
 impl ProtocolSpec {
     pub fn parse(xml: &str) -> Result<Self> {
         let mut reader = Reader::from_str(xml);
-        reader.trim_text(true);
+        reader.config_mut().trim_text(true);
 
         let mut protocol_name = String::new();
         let mut interfaces = HashMap::new();
@@ -199,9 +199,7 @@ impl ProtocolSpec {
                     Event::Eof => break,
                     _ => {}
                 },
-                Err(e) => {
-                    return Err(WireError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))
-                }
+                Err(e) => return Err(WireError::Io(std::io::Error::other(e))),
             }
             buf.clear();
         }

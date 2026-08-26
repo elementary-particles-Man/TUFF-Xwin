@@ -2,8 +2,9 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CaptureTarget {
+    #[default]
     Fullscreen,
     ActiveWindow,
 }
@@ -17,14 +18,9 @@ impl CaptureTarget {
     }
 }
 
-impl Default for CaptureTarget {
-    fn default() -> Self {
-        Self::Fullscreen
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ScreenshotFormat {
+    #[default]
     Png,
     Jpeg,
 }
@@ -42,12 +38,6 @@ impl ScreenshotFormat {
             Self::Png => "png",
             Self::Jpeg => "jpeg",
         }
-    }
-}
-
-impl Default for ScreenshotFormat {
-    fn default() -> Self {
-        Self::Png
     }
 }
 

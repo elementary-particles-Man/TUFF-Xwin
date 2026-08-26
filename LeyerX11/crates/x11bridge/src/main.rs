@@ -89,6 +89,9 @@ fn commit_scene_to_displayd(scene: &X11RootlessScene) -> Result<usize> {
             focus: scene.focus_target(),
             selection: scene.selection_state(),
             surfaces: scene.to_surface_snapshots(),
+            pixel_payloads: vec![],
+            scene_epoch: 0,
+            scene_generation: 0,
         }),
     );
     send_json_line(&mut stream, &request)?;

@@ -104,7 +104,7 @@ Environment=PATH=$bin_path
 EnvironmentFile=-%h/.config/tuff-xwin/session.env
 Environment=WAYBROKER_RUNTIME_DIR=$runtime_dir
 Environment=TUFF_XWIN_SESSION_INSTANCE_ID=$session_id
-ExecStart=/usr/bin/env waylandd --serve-ipc --require-displayd \$TUFF_XWIN_WAYLANDD_ARGS --session-instance-id \${TUFF_XWIN_SESSION_INSTANCE_ID}
+ExecStart=/usr/bin/env waylandd --serve-ipc --require-displayd --production --bind-wayland-display \$WAYBROKER_RUNTIME_DIR/wayland-tuff \$TUFF_XWIN_WAYLANDD_ARGS --session-instance-id \${TUFF_XWIN_SESSION_INSTANCE_ID}
 Restart=on-failure
 RestartSec=1
 "
@@ -211,6 +211,21 @@ assert_tuff_active() {
     fi
   done
   [[ $failed -eq 0 ]] || die "TUFF-Xwin current-session is not fully active; aborting takeover"
+
+  # Perform real compositor readiness check
+  log "running real compositor readiness check..."
+  local target_socket="$runtime_dir/wayland-tuff"
+
+  local waylandd_bin
+  waylandd_bin="$(PATH="$bin_path" which waylandd 2>/dev/null || true)"
+  if [[ -z "$waylandd_bin" ]]; then
+    die "waylandd binary not found in path: $bin_path"
+  fi
+
+  if ! "$waylandd_bin" --check-readiness "$target_socket"; then
+    die "Compositor readiness check failed on $target_socket; aborting takeover (fail closed)"
+  fi
+  log "readiness check success"
 }
 
 cmd_start() {

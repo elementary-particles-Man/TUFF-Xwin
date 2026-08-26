@@ -1,36 +1,26 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BrowserRuntimeFamily {
     Chrome,
     Chromium,
     Electron,
     ChromiumBasedBrowser,
+    #[default]
     Unknown,
 }
 
-impl Default for BrowserRuntimeFamily {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BrowserRuntimePosture {
     KairoAllowed,
     KairoObserve,
     KairoQuarantine,
     KairoFailClosed,
+    #[default]
     Unknown,
 }
 
-impl Default for BrowserRuntimePosture {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BrowserWindowRole {
     NormalBrowserWindow,
     WebAppWindow,
@@ -40,16 +30,11 @@ pub enum BrowserWindowRole {
     ExtensionPopup,
     FilePickerDialog,
     PermissionPrompt,
+    #[default]
     Unknown,
 }
 
-impl Default for BrowserWindowRole {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BrowserSurfaceState {
     NewWindow,
     Focused,
@@ -62,32 +47,22 @@ pub enum BrowserSurfaceState {
     FilePickerRequested,
     NativeMessagingRequested,
     GpuSurfaceRequested,
+    #[default]
     Unknown,
 }
 
-impl Default for BrowserSurfaceState {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BrowserClipboardPolicy {
     None,
     ReadRequested,
     WriteRequested,
     ReadWriteRequested,
     SensitiveClipboardPresent,
+    #[default]
     Unknown,
 }
 
-impl Default for BrowserClipboardPolicy {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BrowserFileBoundaryPolicy {
     None,
     FilePickerReadRequested,
@@ -95,16 +70,11 @@ pub enum BrowserFileBoundaryPolicy {
     DirectoryPickerRequested,
     DragDropFileInbound,
     DragDropFileOutbound,
+    #[default]
     Unknown,
 }
 
-impl Default for BrowserFileBoundaryPolicy {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BrowserInputBoundaryPolicy {
     NormalInput,
     GlobalShortcutRequested,
@@ -112,44 +82,29 @@ pub enum BrowserInputBoundaryPolicy {
     PointerLockRequested,
     InputCaptureRequested,
     ImeBoundaryUnknown,
+    #[default]
     Unknown,
 }
 
-impl Default for BrowserInputBoundaryPolicy {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BrowserGpuBoundaryPolicy {
     NormalCompositedSurface,
     GpuAcceleratedSurface,
     SharedGpuContextRequested,
     DirectScanoutRequested,
     ScreenCaptureOrMirroringRequested,
+    #[default]
     Unknown,
 }
 
-impl Default for BrowserGpuBoundaryPolicy {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BrowserExtensionOrNativePolicy {
     None,
     ExtensionSurface,
     NativeMessagingRequested,
     ExternalProtocolHandlerRequested,
+    #[default]
     Unknown,
-}
-
-impl Default for BrowserExtensionOrNativePolicy {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -162,7 +117,7 @@ pub struct BrowserOperatorOverrides {
     pub operator_confirmed_native_messaging_allowed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BrowserSurfaceBoundaryContext {
     pub runtime_family: BrowserRuntimeFamily,
     pub runtime_posture: BrowserRuntimePosture,
@@ -174,23 +129,6 @@ pub struct BrowserSurfaceBoundaryContext {
     pub gpu_boundary_policy: BrowserGpuBoundaryPolicy,
     pub extension_or_native_policy: BrowserExtensionOrNativePolicy,
     pub operator_overrides: BrowserOperatorOverrides,
-}
-
-impl Default for BrowserSurfaceBoundaryContext {
-    fn default() -> Self {
-        Self {
-            runtime_family: BrowserRuntimeFamily::default(),
-            runtime_posture: BrowserRuntimePosture::default(),
-            window_role: BrowserWindowRole::default(),
-            surface_state: BrowserSurfaceState::default(),
-            clipboard_policy: BrowserClipboardPolicy::default(),
-            file_boundary_policy: BrowserFileBoundaryPolicy::default(),
-            input_boundary_policy: BrowserInputBoundaryPolicy::default(),
-            gpu_boundary_policy: BrowserGpuBoundaryPolicy::default(),
-            extension_or_native_policy: BrowserExtensionOrNativePolicy::default(),
-            operator_overrides: BrowserOperatorOverrides::default(),
-        }
-    }
 }
 
 impl BrowserSurfaceBoundaryContext {

@@ -46,6 +46,20 @@ wait_for_socket() {
   sleep 0.1
 }
 
+wait_for_file() {
+  local path=$1
+  local timeout=${2:-10}
+  local count=0
+  while [[ ! -f "$path" ]]; do
+    if [[ $count -ge $((timeout * 10)) ]]; then
+      echo "FAILED: timeout waiting for file $path" >&2
+      return 1
+    fi
+    sleep 0.1
+    count=$((count + 1))
+  done
+}
+
 run_scenario() {
   local scenario=$1
   local expected_final_state=$2
@@ -53,32 +67,33 @@ run_scenario() {
   local expected_bound_id=$4
   local expected_lock_outcome=$5
   local expected_auth_outcome=$6
+  local session_instance_id="lockd-identity-${scenario}"
   
   echo
   echo "==> [Scenario: $scenario] (Expecting: $expected_final_state, $expected_binding_source)"
 
   # We use demo-x11 which has lockd explicit binding
-  "$target_dir/sessiond" --select-profile demo-x11 --write-selection > /dev/null
+  "$target_dir/sessiond" --select-profile demo-x11 --write-selection --session-instance-id "$session_instance_id" > /dev/null
 
   local lockd_args="--serve-ipc"
   if [[ "$scenario" == "lockd-trouble" ]]; then
     lockd_args="--serve-ipc --fail-resume"
   fi
 
-  "$target_dir/displayd" > "$WAYBROKER_RUNTIME_DIR/displayd-$scenario.log" 2>&1 &
+  "$target_dir/displayd" --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/displayd-$scenario.log" 2>&1 &
   wait_for_socket "$WAYBROKER_RUNTIME_DIR/displayd.sock"
 
   "$target_dir/lockd" $lockd_args > "$WAYBROKER_RUNTIME_DIR/lockd-$scenario.log" 2>&1 &
   wait_for_socket "$WAYBROKER_RUNTIME_DIR/lockd.sock"
 
-  "$target_dir/compd" --serve-ipc > "$WAYBROKER_RUNTIME_DIR/compd-$scenario.log" 2>&1 &
+  "$target_dir/compd" --serve-ipc --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/compd-$scenario.log" 2>&1 &
   wait_for_socket "$WAYBROKER_RUNTIME_DIR/compd.sock"
 
   # Run sessiond scenario
-  "$target_dir/sessiond" --resume-scenario "$scenario" > "$WAYBROKER_RUNTIME_DIR/sessiond-$scenario.log" 2>&1
+  "$target_dir/sessiond" --resume-scenario "$scenario" --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/sessiond-$scenario.log" 2>&1
 
   # Verify trace
-  local trace_file="$WAYBROKER_RUNTIME_DIR/lock-ui-path-$scenario.json"
+  local trace_file="$WAYBROKER_RUNTIME_DIR/session-${session_instance_id}-lock-ui-path-${scenario}.json"
   if [[ ! -f "$trace_file" ]]; then
     echo "Error: Trace file not found: $trace_file"
     return 1
@@ -132,8 +147,9 @@ run_scenario "lockd-trouble" "blank-only" "explicit" "demo-lockui" "failed" "ski
 
 echo
 echo "==> Test missing binding behavior"
+missing_session_instance_id="lockd-identity-missing"
 # Create a temporary profile with no lockd binding
-cat << 'EOF' > "$WAYBROKER_RUNTIME_DIR/active-profile.json"
+cat << 'EOF' > "$WAYBROKER_RUNTIME_DIR/session-${missing_session_instance_id}-active-profile.json"
 {
   "id": "demo-no-lockd",
   "display_name": "Demo No Lockd",
@@ -146,13 +162,13 @@ cat << 'EOF' > "$WAYBROKER_RUNTIME_DIR/active-profile.json"
 }
 EOF
 
-"$target_dir/displayd" > "$WAYBROKER_RUNTIME_DIR/displayd-missing.log" 2>&1 &
+"$target_dir/displayd" --session-instance-id "$missing_session_instance_id" > "$WAYBROKER_RUNTIME_DIR/displayd-missing.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/displayd.sock"
 
 # We won't start lockd, because sessiond should fail early
-"$target_dir/sessiond" --resume-scenario "normal" > "$WAYBROKER_RUNTIME_DIR/sessiond-missing.log" 2>&1
+"$target_dir/sessiond" --resume-scenario "normal" --session-instance-id "$missing_session_instance_id" > "$WAYBROKER_RUNTIME_DIR/sessiond-missing.log" 2>&1
 
-trace_file="$WAYBROKER_RUNTIME_DIR/lock-ui-path-normal.json"
+trace_file="$WAYBROKER_RUNTIME_DIR/session-${missing_session_instance_id}-lock-ui-path-normal.json"
 if [[ ! -f "$trace_file" ]]; then
   echo "Error: Trace file not found: $trace_file"
   exit 1
