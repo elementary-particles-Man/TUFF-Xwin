@@ -803,6 +803,9 @@ pub enum WaylandEvent {
 pub enum LockCommand {
     SetLockState { state: LockState },
     AuthPrompt { reason: String },
+    GetState,
+    State { state: LockState, generation: u64, session_instance_id: String },
+    Rejected { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

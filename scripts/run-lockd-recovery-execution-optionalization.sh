@@ -89,7 +89,7 @@ run_scenario() {
   pkill -u "$USER" -f "$target_dir/lockd" || true
   sleep 0.5
   rm -f "$WAYBROKER_RUNTIME_DIR/lockd.sock"
-  "$target_dir/lockd" --serve-ipc --fail-resume > "$WAYBROKER_RUNTIME_DIR/lockd-faulty-$scenario.log" 2>&1 &
+  "$target_dir/lockd" --serve-ipc --fail-resume --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/lockd-faulty-$scenario.log" 2>&1 &
   wait_for_socket "$WAYBROKER_RUNTIME_DIR/lockd.sock"
 
   # Make sure compd is running so we can talk to it
@@ -183,7 +183,7 @@ wait_for_socket "$WAYBROKER_RUNTIME_DIR/displayd.sock"
 "$target_dir/watchdog" --serve-ipc --session-instance-id "$missing_session_instance_id" > "$WAYBROKER_RUNTIME_DIR/watchdog-missing.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/watchdog.sock"
 
-"$target_dir/lockd" --serve-ipc --fail-resume > "$WAYBROKER_RUNTIME_DIR/lockd-missing.log" 2>&1 &
+"$target_dir/lockd" --serve-ipc --fail-resume --session-instance-id "$missing_session_instance_id" > "$WAYBROKER_RUNTIME_DIR/lockd-missing.log" 2>&1 &
 wait_for_socket "$WAYBROKER_RUNTIME_DIR/lockd.sock"
 
 "$target_dir/compd" --serve-ipc --session-instance-id "$missing_session_instance_id" > "$WAYBROKER_RUNTIME_DIR/compd-missing.log" 2>&1 &

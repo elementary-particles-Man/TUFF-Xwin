@@ -581,6 +581,30 @@ fn resolve_lockd_resume_binding(
     }
 
     if let Some(component_id) = lockd_bindings.first() {
+        let Some(component) =
+            profile.session_components.iter().find(|component| component.id == *component_id)
+        else {
+            return (
+                Some(component_id.clone()),
+                "explicit".into(),
+                "missing-target".into(),
+                format!("bound component {} not found in profile", component_id),
+            );
+        };
+
+        if component.role != waybroker_common::DesktopComponentRole::LockScreen {
+            return (
+                Some(component_id.clone()),
+                "explicit".into(),
+                "role-mismatch".into(),
+                format!(
+                    "expected {:?}, got {:?}",
+                    waybroker_common::DesktopComponentRole::LockScreen,
+                    component.role
+                ),
+            );
+        }
+
         return (Some(component_id.clone()), "explicit".into(), "selected".into(), String::new());
     }
 

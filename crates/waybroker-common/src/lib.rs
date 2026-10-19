@@ -92,10 +92,10 @@ impl ServiceBanner {
 mod tests {
     use super::{
         BackendOutputEvent, CommitTarget, CommittedSceneState, DisplayCommand, DisplayEvent,
-        FocusTarget, IpcEnvelope, MessageKind, OutputGeometry, OutputMode, PresentationCadence,
-        ServiceBanner, ServiceRole, SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot,
-        WaylandCommand, WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState,
-        WaylandSurfaceRole, WaylandSurfaceState,
+        FocusTarget, IpcEnvelope, LockCommand, LockState, MessageKind, OutputGeometry, OutputMode,
+        PresentationCadence, ServiceBanner, ServiceRole, SurfacePlacement, SurfaceRegistrySnapshot,
+        SurfaceSnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff,
+        WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
     };
 
     #[test]
@@ -513,5 +513,43 @@ mod tests {
         assert_eq!(decoded, envelope);
         assert!(json.contains("\"op\":\"set-ime-bridge-mode\""));
         assert!(json.contains("\"mode\":\"passthrough-external\""));
+    }
+    #[test]
+    fn roundtrips_lock_state_query_status_and_rejection() {
+        let query = IpcEnvelope::new(
+            ServiceRole::Sessiond,
+            ServiceRole::Lockd,
+            MessageKind::LockCommand(LockCommand::GetState),
+        );
+        let query_json = serde_json::to_string(&query).expect("serialize query");
+        assert!(query_json.contains("\"op\":\"get-state\""));
+        assert_eq!(serde_json::from_str::<IpcEnvelope>(&query_json).expect("decode query"), query);
+
+        let state = IpcEnvelope::new(
+            ServiceRole::Lockd,
+            ServiceRole::Sessiond,
+            MessageKind::LockCommand(LockCommand::State {
+                state: LockState::BlankOnly,
+                generation: 7,
+                session_instance_id: "session-a".into(),
+            }),
+        );
+        let state_json = serde_json::to_string(&state).expect("serialize state");
+        assert!(state_json.contains("\"op\":\"state\""));
+        assert!(state_json.contains("\"state\":\"blank-only\""));
+        assert!(state_json.contains("\"generation\":7"));
+        assert_eq!(serde_json::from_str::<IpcEnvelope>(&state_json).expect("decode state"), state);
+
+        let rejected = IpcEnvelope::new(
+            ServiceRole::Lockd,
+            ServiceRole::Compd,
+            MessageKind::LockCommand(LockCommand::Rejected { reason: "unauthorized".into() }),
+        );
+        let rejected_json = serde_json::to_string(&rejected).expect("serialize rejection");
+        assert!(rejected_json.contains("\"op\":\"rejected\""));
+        assert_eq!(
+            serde_json::from_str::<IpcEnvelope>(&rejected_json).expect("decode rejection"),
+            rejected
+        );
     }
 }
