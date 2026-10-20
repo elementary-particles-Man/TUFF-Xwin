@@ -59,8 +59,12 @@ jobs:
         run: ./scripts/run-role-scoped-recovery-execution.sh
       - name: Component Identity Mapping Smoke Test
         run: ./scripts/run-component-identity-mapping-smoke.sh
+      - name: Binding Collision Handling Smoke Test
+        run: ./scripts/run-binding-collision-handling-smoke.sh
       - name: Lockd Identity and UI Path Smoke Test
         run: ./scripts/run-lockd-identity-and-ui-path-smoke.sh
+      - name: Lockd State Persistence Smoke Test
+        run: ./scripts/run-lockd-state-persistence-smoke.sh
       - name: Lockd Recovery Execution Optionalization Smoke Test
         run: ./scripts/run-lockd-recovery-execution-optionalization.sh
 

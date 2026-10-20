@@ -83,7 +83,7 @@ run_scenario() {
   "$target_dir/displayd" --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/displayd-$scenario.log" 2>&1 &
   wait_for_socket "$WAYBROKER_RUNTIME_DIR/displayd.sock"
 
-  "$target_dir/lockd" $lockd_args > "$WAYBROKER_RUNTIME_DIR/lockd-$scenario.log" 2>&1 &
+  "$target_dir/lockd" $lockd_args --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/lockd-$scenario.log" 2>&1 &
   wait_for_socket "$WAYBROKER_RUNTIME_DIR/lockd.sock"
 
   "$target_dir/compd" --serve-ipc --session-instance-id "$session_instance_id" > "$WAYBROKER_RUNTIME_DIR/compd-$scenario.log" 2>&1 &
