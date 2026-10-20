@@ -2481,6 +2481,7 @@ trait PresentationClock {
     fn current_seq(&self) -> u64;
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 trait CaptureBackend: Send + Sync {
     async fn capture(&self, output: &str) -> Result<(u32, u32, Vec<u32>)>;
