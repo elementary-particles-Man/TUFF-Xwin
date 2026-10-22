@@ -61,6 +61,8 @@ jobs:
         run: ./scripts/run-component-identity-mapping-smoke.sh
       - name: Sessiond Authority and Isolation Smoke Test
         run: ./scripts/run-sessiond-authority-isolation-smoke.sh
+      - name: Watchdog Bounded Isolation Smoke Test
+        run: ./scripts/run-watchdog-bounded-isolation-smoke.sh
       - name: Binding Collision Handling Smoke Test
         run: ./scripts/run-binding-collision-handling-smoke.sh
       - name: Lockd Identity and UI Path Smoke Test

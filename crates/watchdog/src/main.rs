@@ -1,8 +1,10 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fs,
-    io::BufReader,
+    io::{BufReader, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -11,9 +13,16 @@ use waybroker_common::{
     ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, SessionCommand,
     SessionLaunchComponentState, SessionLaunchDelta, SessionLaunchState,
     SessionWatchdogComponentReport, SessionWatchdogReport, WatchdogCommand, bind_service_socket,
-    connect_service_socket, ensure_runtime_dir, now_unix_timestamp, read_json_line, runtime_dir,
-    send_json_line, session_artifact_path, validate_session_instance_id,
+    connect_service_socket, ensure_runtime_dir, is_recoverable_accept_error, now_unix_timestamp,
+    read_json_line, runtime_dir, send_json_line, session_artifact_path,
+    validate_session_instance_id,
 };
+
+const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_CACHED_STATES: usize = 128;
+const MAX_COMPONENTS_PER_STATE: usize = 256;
+const MAX_PROFILE_ID_BYTES: usize = 128;
+const MAX_RESTART_REASON_BYTES: usize = 1024;
 
 fn main() -> Result<()> {
     let config = Config::from_args(env::args().skip(1))?;
@@ -115,13 +124,24 @@ fn serve_ipc(config: &Config) -> Result<()> {
     let mut server = WatchdogServer::default();
 
     let mut served = 0usize;
-    for stream in listener.incoming() {
-        let stream = stream?;
-        handle_client(stream, config, &mut server)?;
-        served += 1;
+    loop {
+        let stream = match listener.accept() {
+            Ok((stream, _peer)) => stream,
+            Err(err) if is_recoverable_accept_error(&err) => {
+                eprintln!("watchdog accept recoverable error: {err}");
+                continue;
+            }
+            Err(err) => return Err(err).context("watchdog listener accept failed"),
+        };
 
-        if config.serve_once {
-            break;
+        match handle_client(stream, config, &mut server) {
+            Ok(()) => {
+                served += 1;
+                if config.serve_once {
+                    break;
+                }
+            }
+            Err(err) => eprintln!("watchdog client failed: {err:#}"),
         }
     }
 
@@ -134,6 +154,8 @@ fn handle_client(
     config: &Config,
     server: &mut WatchdogServer,
 ) -> Result<()> {
+    stream.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(CLIENT_IO_TIMEOUT))?;
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
@@ -152,7 +174,13 @@ fn build_response(
     let source = request.source;
     let response_kind = match request.kind {
         MessageKind::WatchdogCommand(command) if request.destination == ServiceRole::Watchdog => {
-            MessageKind::WatchdogCommand(handle_watchdog_command(command, source, config, server)?)
+            let response = if let Some(reason) = validate_watchdog_request(&command, source, config)
+            {
+                WatchdogCommand::Escalate { level: 1, reason }
+            } else {
+                handle_watchdog_command(command, source, config, server)?
+            };
+            MessageKind::WatchdogCommand(response)
         }
         MessageKind::WatchdogCommand(_) => {
             MessageKind::WatchdogCommand(WatchdogCommand::Escalate {
@@ -172,6 +200,99 @@ fn build_response(
     Ok(IpcEnvelope::new(ServiceRole::Watchdog, source, response_kind))
 }
 
+fn validate_watchdog_request(
+    command: &WatchdogCommand,
+    source: ServiceRole,
+    config: &Config,
+) -> Option<String> {
+    if source != ServiceRole::Sessiond {
+        return Some(format!("watchdog command source {} is not authorized", source.as_str()));
+    }
+
+    match command {
+        WatchdogCommand::Restart { role, session_instance_id, reason } => {
+            if *role != ServiceRole::Compd && *role != ServiceRole::Lockd {
+                return Some(format!("watchdog does not support restarting {}", role.as_str()));
+            }
+            if !validate_session_instance_id(session_instance_id) {
+                return Some("invalid session-instance-id".into());
+            }
+            if let Some(expected) = config.session_instance_id.as_deref()
+                && expected != session_instance_id
+            {
+                return Some("session-instance-id does not match watchdog configuration".into());
+            }
+            if !valid_reason(reason) {
+                return Some(
+                    "restart reason must be 1-1024 UTF-8 bytes without control characters".into(),
+                );
+            }
+            None
+        }
+        WatchdogCommand::InspectLaunchState { state } => validate_launch_state(state, config).err(),
+        WatchdogCommand::UpdateLaunchState { delta } => validate_delta(delta, config).err(),
+        _ => Some("watchdog IPC command is not accepted from a client".into()),
+    }
+}
+
+fn valid_reason(reason: &str) -> bool {
+    !reason.is_empty()
+        && reason.len() <= MAX_RESTART_REASON_BYTES
+        && !reason.chars().any(char::is_control)
+}
+
+fn valid_profile_id(profile_id: &str) -> bool {
+    !profile_id.is_empty()
+        && profile_id.len() <= MAX_PROFILE_ID_BYTES
+        && !profile_id.chars().any(char::is_control)
+}
+
+fn validate_session_for_config(session_instance_id: &str, config: &Config) -> Result<(), String> {
+    if !validate_session_instance_id(session_instance_id) {
+        return Err("invalid session-instance-id".into());
+    }
+    if let Some(expected) = config.session_instance_id.as_deref()
+        && expected != session_instance_id
+    {
+        return Err("session-instance-id does not match watchdog configuration".into());
+    }
+    Ok(())
+}
+
+fn validate_components(components: &[SessionLaunchComponentState]) -> Result<(), String> {
+    if components.len() > MAX_COMPONENTS_PER_STATE {
+        return Err(format!(
+            "component count {} exceeds {}",
+            components.len(),
+            MAX_COMPONENTS_PER_STATE
+        ));
+    }
+
+    let mut ids = HashSet::with_capacity(components.len());
+    for component in components {
+        if component.id.is_empty() || !ids.insert(component.id.as_str()) {
+            return Err(format!("component id is empty or duplicated: {:?}", component.id));
+        }
+    }
+    Ok(())
+}
+
+fn validate_launch_state(state: &SessionLaunchState, config: &Config) -> Result<(), String> {
+    if !valid_profile_id(&state.profile_id) {
+        return Err("invalid profile id".into());
+    }
+    validate_session_for_config(&state.session_instance_id, config)?;
+    validate_components(&state.components)
+}
+
+fn validate_delta(delta: &SessionLaunchDelta, config: &Config) -> Result<(), String> {
+    if !valid_profile_id(&delta.profile_id) {
+        return Err("invalid profile id".into());
+    }
+    validate_session_for_config(&delta.session_instance_id, config)?;
+    validate_components(&delta.components)
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct WatchdogRecoveryArtifact {
     role: String,
@@ -188,6 +309,10 @@ fn handle_watchdog_command(
     config: &Config,
     server: &mut WatchdogServer,
 ) -> Result<WatchdogCommand> {
+    if let Some(reason) = validate_watchdog_request(&command, source, config) {
+        return Ok(WatchdogCommand::Escalate { level: 1, reason });
+    }
+
     match command {
         WatchdogCommand::Restart { role, session_instance_id, reason } => {
             if role == ServiceRole::Compd || role == ServiceRole::Lockd {
@@ -256,17 +381,10 @@ fn handle_watchdog_command(
                 let report = inspect_launch_state(&state);
                 print_report(&state, &report);
 
-                if config.write_reports {
-                    let report_path = write_report(&report)?;
-                    println!("watchdog wrote_report={}", report_path.display());
-                }
-
-                if config.notify_sessiond && source != ServiceRole::Sessiond {
-                    let response = notify_sessiond(&report)?;
-                    print_sessiond_response(&response);
-                }
-
                 Ok(WatchdogCommand::InspectionResult { report })
+            }
+            StateUpdateOutcome::Invalid { reason } => {
+                Ok(WatchdogCommand::Escalate { level: 1, reason })
             }
             StateUpdateOutcome::Resync { profile_id, session_instance_id, reason } => {
                 Ok(WatchdogCommand::ResyncLaunchState { profile_id, session_instance_id, reason })
@@ -302,17 +420,10 @@ fn handle_watchdog_command(
                 let report = inspect_launch_state(&state);
                 print_report(&state, &report);
 
-                if config.write_reports {
-                    let report_path = write_report(&report)?;
-                    println!("watchdog wrote_report={}", report_path.display());
-                }
-
-                if config.notify_sessiond && source != ServiceRole::Sessiond {
-                    let response = notify_sessiond(&report)?;
-                    print_sessiond_response(&response);
-                }
-
                 Ok(WatchdogCommand::InspectionResult { report })
+            }
+            StateUpdateOutcome::Invalid { reason } => {
+                Ok(WatchdogCommand::Escalate { level: 1, reason })
             }
             StateUpdateOutcome::Resync { profile_id, session_instance_id, reason } => {
                 Ok(WatchdogCommand::ResyncLaunchState { profile_id, session_instance_id, reason })
@@ -353,11 +464,16 @@ impl LaunchStateCacheKey {
 enum StateUpdateOutcome {
     Accepted(SessionLaunchState),
     Ignored { state: SessionLaunchState, reason: String },
+    Invalid { reason: String },
     Resync { profile_id: String, session_instance_id: String, reason: String },
 }
 
 impl WatchdogServer {
     fn cache_full_state(&mut self, state: &SessionLaunchState) -> StateUpdateOutcome {
+        if let Err(reason) = validate_launch_state(state, &Config::default()) {
+            return StateUpdateOutcome::Invalid { reason };
+        }
+
         let cache_key = LaunchStateCacheKey::from_state(state);
 
         if let Some(current) = self.cached_states.get(&cache_key).cloned() {
@@ -372,6 +488,24 @@ impl WatchdogServer {
                     ),
                 };
             }
+
+            if state.generation == current.generation && state.sequence == current.sequence {
+                if state == &current {
+                    return StateUpdateOutcome::Ignored {
+                        state: current,
+                        reason: "duplicate full state".into(),
+                    };
+                }
+                return StateUpdateOutcome::Resync {
+                    profile_id: state.profile_id.clone(),
+                    session_instance_id: state.session_instance_id.clone(),
+                    reason: "same generation and sequence carried different full state".into(),
+                };
+            }
+        } else if self.cached_states.len() >= MAX_CACHED_STATES {
+            return StateUpdateOutcome::Invalid {
+                reason: format!("watchdog cache capacity {} reached", MAX_CACHED_STATES),
+            };
         }
 
         self.cached_states.insert(cache_key, state.clone());
@@ -393,6 +527,19 @@ impl WatchdogServer {
             service_component_bindings,
             service_recovery_execution_policies,
         } = delta;
+
+        let validation = if !valid_profile_id(&profile_id) {
+            Err("invalid profile id".into())
+        } else if let Err(reason) =
+            validate_session_for_config(&session_instance_id, &Config::default())
+        {
+            Err(reason)
+        } else {
+            validate_components(&components)
+        };
+        if let Err(reason) = validation {
+            return StateUpdateOutcome::Invalid { reason };
+        }
 
         let cache_key =
             LaunchStateCacheKey::from_delta(profile_id.clone(), session_instance_id.clone());
@@ -441,7 +588,13 @@ impl WatchdogServer {
                 };
             }
         } else {
-            let expected_sequence = current.sequence.saturating_add(1);
+            let Some(expected_sequence) = current.sequence.checked_add(1) else {
+                return StateUpdateOutcome::Resync {
+                    profile_id,
+                    session_instance_id,
+                    reason: "watchdog sequence overflow requires full launch-state resend".into(),
+                };
+            };
             if sequence != expected_sequence {
                 return StateUpdateOutcome::Resync {
                     profile_id,
@@ -491,6 +644,16 @@ impl WatchdogServer {
 
             state
         };
+
+        if next_state.components.len() > MAX_COMPONENTS_PER_STATE {
+            return StateUpdateOutcome::Invalid {
+                reason: format!(
+                    "merged component count {} exceeds {}",
+                    next_state.components.len(),
+                    MAX_COMPONENTS_PER_STATE
+                ),
+            };
+        }
 
         self.cached_states.insert(cache_key, next_state.clone());
         StateUpdateOutcome::Accepted(next_state)
@@ -653,7 +816,7 @@ fn write_recovery_artifact(
         session_artifact_path(session_instance_id, &format!("watchdog-recovery-{}", artifact.role));
     let json = serde_json::to_string_pretty(artifact)
         .context("failed to serialize watchdog recovery artifact")?;
-    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    atomic_write_json(&path, &json)?;
     Ok(path)
 }
 
@@ -662,8 +825,39 @@ fn write_report(report: &SessionWatchdogReport) -> Result<PathBuf> {
     let path = session_artifact_path(&report.session_instance_id, "watchdog-report");
     let json =
         serde_json::to_string_pretty(report).context("failed to serialize watchdog report")?;
-    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    atomic_write_json(&path, &json)?;
     Ok(path)
+}
+
+fn atomic_write_json(path: &Path, json: &str) -> Result<()> {
+    let parent = path.parent().context("artifact path has no parent directory")?;
+    let file_name = path.file_name().context("artifact path has no file name")?.to_string_lossy();
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let temp_path = parent.join(format!(".{file_name}.tmp-{}-{nonce}", std::process::id()));
+    let mut created = false;
+
+    let result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        let mut file = options.open(&temp_path).with_context(|| {
+            format!("failed to create temporary artifact {}", temp_path.display())
+        })?;
+        created = true;
+        file.write_all(json.as_bytes()).with_context(|| {
+            format!("failed to write temporary artifact {}", temp_path.display())
+        })?;
+        file.sync_all().with_context(|| {
+            format!("failed to sync temporary artifact {}", temp_path.display())
+        })?;
+        fs::rename(&temp_path, path)
+            .with_context(|| format!("failed to replace artifact {}", path.display()))?;
+        Ok(())
+    })();
+
+    if result.is_err() && created {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
 }
 
 fn print_report(state: &SessionLaunchState, report: &SessionWatchdogReport) {
