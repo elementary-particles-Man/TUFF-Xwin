@@ -1,6 +1,8 @@
 use std::{
+    collections::HashSet,
     env, fs,
-    io::{BufReader, ErrorKind},
+    fs::OpenOptions,
+    io::{BufReader, ErrorKind, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command},
@@ -10,15 +12,20 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use waybroker_common::{
-    DesktopComponent, DesktopComponentState, DesktopProfile, DesktopRecoveryAction, IpcEnvelope,
-    MessageKind, ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, SessionCommand,
-    SessionLaunchComponentState, SessionLaunchDelta, SessionLaunchState, SessionProfileTransition,
-    SessionWatchdogReport, WatchdogCommand, bind_service_socket, connect_service_socket,
-    ensure_runtime_dir, now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
+    DesktopComponent, DesktopComponentState, DesktopHealthStatus, DesktopProfile,
+    DesktopRecoveryAction, IpcEnvelope, MessageKind, ServiceBanner, ServiceEndpoint, ServiceRole,
+    ServiceStream, SessionCommand, SessionLaunchComponentState, SessionLaunchDelta,
+    SessionLaunchState, SessionProfileTransition, SessionWatchdogReport, WatchdogCommand,
+    bind_service_socket, connect_service_socket, ensure_runtime_dir, is_recoverable_accept_error,
+    now_unix_timestamp, read_json_line, send_json_line, session_artifact_path,
     validate_session_instance_id,
 };
 
-#[derive(Debug, serde::Serialize)]
+const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(2);
+const SESSION_AUTHORITY_ARTIFACT: &str = "sessiond-state";
+const SESSION_AUTHORITY_ARTIFACT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, serde::Serialize)]
 struct BindingResolutionResult {
     service: String,
     resolution_source: String,
@@ -37,6 +44,22 @@ struct BindingCollisionReport {
     role_mismatch_bindings: Vec<String>,
     role_ambiguities: Vec<String>,
     unix_timestamp: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SessionAuthorityState {
+    version: u32,
+    session_instance_id: String,
+    active_profile_id: String,
+    stream_generation: u64,
+    stream_sequence: u64,
+    unix_timestamp: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionAuthorityStartup {
+    Fresh,
+    Recovered { previous_profile_id: String, previous_generation: u64, previous_sequence: u64 },
 }
 
 fn validate_profile_bindings(profile: &DesktopProfile) -> BindingCollisionReport {
@@ -69,15 +92,7 @@ fn validate_profile_bindings(profile: &DesktopProfile) -> BindingCollisionReport
                 binding.component_id
             ));
         } else if let Some(component) = target {
-            // Check role compatibility
-            let expected_role = match binding.service {
-                ServiceRole::Compd => Some(waybroker_common::DesktopComponentRole::WindowManager),
-                ServiceRole::Lockd => Some(waybroker_common::DesktopComponentRole::LockScreen),
-                ServiceRole::X11Bridge => Some(waybroker_common::DesktopComponentRole::CompatLayer),
-                _ => None,
-            };
-
-            if let Some(expected) = expected_role {
+            if let Some(expected) = expected_component_role(binding.service) {
                 if component.role != expected {
                     report.role_mismatch_bindings.push(format!(
                         "{}: {} (expected {:?}, got {:?})",
@@ -94,15 +109,54 @@ fn validate_profile_bindings(profile: &DesktopProfile) -> BindingCollisionReport
     report
 }
 
+fn atomic_write_json<T: serde::Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+    label: &str,
+) -> Result<()> {
+    let parent = path.parent().with_context(|| format!("{label} has no parent directory"))?;
+    if !parent.exists() {
+        bail!("{label} parent does not exist: {}", parent.display());
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("{label} filename is not valid UTF-8"))?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos();
+    let temp_path = path.with_file_name(format!(".{file_name}.tmp-{}-{nonce}", std::process::id()));
+    let encoded =
+        serde_json::to_vec_pretty(value).with_context(|| format!("failed to serialize {label}"))?;
+
+    let write_result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .with_context(|| format!("failed to create {}", temp_path.display()))?;
+        file.write_all(&encoded)
+            .with_context(|| format!("failed to write {}", temp_path.display()))?;
+        file.write_all(b"\n")
+            .with_context(|| format!("failed to terminate {}", temp_path.display()))?;
+        file.sync_all().with_context(|| format!("failed to sync {}", temp_path.display()))?;
+        fs::rename(&temp_path, path)
+            .with_context(|| format!("failed to atomically replace {label} {}", path.display()))?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    write_result
+}
+
 fn write_binding_collision_report(
     report: &BindingCollisionReport,
     session_instance_id: &str,
 ) -> Result<PathBuf> {
     let _ = ensure_runtime_dir()?;
     let path = session_artifact_path(session_instance_id, "binding-collision-report");
-    let json =
-        serde_json::to_string_pretty(report).context("failed to serialize collision report")?;
-    fs::write(&path, json)?;
+    atomic_write_json(&path, report, "binding collision report")?;
     Ok(path)
 }
 
@@ -115,9 +169,7 @@ fn write_binding_resolution_artifact(
         session_instance_id,
         &format!("binding-resolution-{}", resolution.service),
     );
-    let json = serde_json::to_string_pretty(resolution)
-        .context("failed to serialize resolution artifact")?;
-    fs::write(&path, json)?;
+    atomic_write_json(&path, resolution, "binding resolution artifact")?;
     Ok(path)
 }
 
@@ -130,14 +182,98 @@ fn write_watchdog_execution_artifact(
         session_instance_id,
         &format!("watchdog-action-execution-{}", execution.role),
     );
-    let json = serde_json::to_string_pretty(execution)
-        .context("failed to serialize execution artifact")?;
-    fs::write(&path, json)?;
+    atomic_write_json(&path, execution, "watchdog execution artifact")?;
     Ok(path)
 }
 
 fn watchdog_recovery_artifact_path(session_instance_id: &str, role: ServiceRole) -> PathBuf {
     session_artifact_path(session_instance_id, &format!("watchdog-recovery-{}", role.as_str()))
+}
+
+fn session_authority_state_path(session_instance_id: &str) -> PathBuf {
+    session_artifact_path(session_instance_id, SESSION_AUTHORITY_ARTIFACT)
+}
+
+fn load_session_authority_generation(
+    session_instance_id: &str,
+) -> Result<(u64, SessionAuthorityStartup)> {
+    let path = session_authority_state_path(session_instance_id);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            return Ok((1, SessionAuthorityStartup::Fresh));
+        }
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("failed to read session authority state {}", path.display())
+            });
+        }
+    };
+
+    let state: SessionAuthorityState = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to decode session authority state {}", path.display()))?;
+    if state.version != SESSION_AUTHORITY_ARTIFACT_VERSION {
+        bail!(
+            "unsupported session authority state version {} in {}",
+            state.version,
+            path.display()
+        );
+    }
+    if state.session_instance_id != session_instance_id {
+        bail!(
+            "session authority state identity mismatch: expected {}, found {}",
+            session_instance_id,
+            state.session_instance_id
+        );
+    }
+    if state.stream_generation == 0 {
+        bail!("session authority state has zero stream generation");
+    }
+
+    let next_generation =
+        state.stream_generation.checked_add(1).context("session stream generation exhausted")?;
+    Ok((
+        next_generation,
+        SessionAuthorityStartup::Recovered {
+            previous_profile_id: state.active_profile_id,
+            previous_generation: state.stream_generation,
+            previous_sequence: state.stream_sequence,
+        },
+    ))
+}
+
+fn persist_session_authority_state(
+    state: &SessionAuthorityState,
+    session_instance_id: &str,
+) -> Result<PathBuf> {
+    let _ = ensure_runtime_dir()?;
+    if state.session_instance_id != session_instance_id {
+        bail!(
+            "refusing to persist session authority state for mismatched session {} as {}",
+            state.session_instance_id,
+            session_instance_id
+        );
+    }
+    let path = session_authority_state_path(session_instance_id);
+    atomic_write_json(&path, state, "session authority state")?;
+    Ok(path)
+}
+
+fn persist_launch_state_with_authority(
+    state: &SessionLaunchState,
+    session_instance_id: &str,
+) -> Result<(PathBuf, PathBuf)> {
+    let launch_path = write_launch_state(state, session_instance_id)?;
+    let authority = SessionAuthorityState {
+        version: SESSION_AUTHORITY_ARTIFACT_VERSION,
+        session_instance_id: session_instance_id.to_string(),
+        active_profile_id: state.profile_id.clone(),
+        stream_generation: state.generation,
+        stream_sequence: state.sequence,
+        unix_timestamp: now_unix_timestamp(),
+    };
+    let authority_path = persist_session_authority_state(&authority, session_instance_id)?;
+    Ok((launch_path, authority_path))
 }
 
 fn main() -> Result<()> {
@@ -234,11 +370,20 @@ fn main() -> Result<()> {
         let report = validate_profile_bindings(profile);
         write_binding_collision_report(&report, &session_instance_id)?;
 
-        let launch_state = launch_state_for_profile(profile, &config)?;
-        let state_path = write_launch_state(&launch_state, &session_instance_id)?;
+        let (stream_generation, _) = load_session_authority_generation(&session_instance_id)?;
+        let launch_state =
+            launch_state_for_profile(profile, &config, &session_instance_id, stream_generation)?;
+        let (state_path, authority_path) =
+            persist_launch_state_with_authority(&launch_state, &session_instance_id)?;
 
         print_launch_state(&launch_state);
         println!("service=sessiond op=write_launch_state path={}", state_path.display());
+        println!(
+            "service=sessiond op=authority_persist event=success path={} generation={} sequence={}",
+            authority_path.display(),
+            launch_state.generation,
+            launch_state.sequence
+        );
     }
 
     if config.launch_active {
@@ -247,17 +392,27 @@ fn main() -> Result<()> {
         let report = validate_profile_bindings(&profile);
         write_binding_collision_report(&report, &session_instance_id)?;
 
-        let launch_state = launch_state_for_profile(&profile, &config)?;
-        let state_path = write_launch_state(&launch_state, &session_instance_id)?;
+        let (stream_generation, _) = load_session_authority_generation(&session_instance_id)?;
+        let launch_state =
+            launch_state_for_profile(&profile, &config, &session_instance_id, stream_generation)?;
+        let (state_path, authority_path) =
+            persist_launch_state_with_authority(&launch_state, &session_instance_id)?;
 
         print_launch_state(&launch_state);
         println!("service=sessiond op=write_launch_state path={}", state_path.display());
+        println!(
+            "service=sessiond op=authority_persist event=success path={} generation={} sequence={}",
+            authority_path.display(),
+            launch_state.generation,
+            launch_state.sequence
+        );
     }
 
     if config.apply_watchdog_active {
         let active_profile = read_active_profile(&session_instance_id)?;
         let report = read_watchdog_report(&config, &active_profile, &session_instance_id)?;
-        let outcome = apply_watchdog_report(&active_profile, &profiles, &report)?;
+        let outcome =
+            apply_watchdog_report(&active_profile, &profiles, &report, &session_instance_id)?;
         let _ = persist_watchdog_apply_outcome(&outcome, &config, None, &session_instance_id)?;
     }
 
@@ -514,10 +669,11 @@ fn load_profiles(dir: &Path) -> Result<Vec<DesktopProfile>> {
 
 fn write_active_profile(profile: &DesktopProfile, session_instance_id: &str) -> Result<PathBuf> {
     let _ = ensure_runtime_dir()?;
+    if !validate_session_instance_id(session_instance_id) {
+        bail!("invalid session instance id for active profile");
+    }
     let path = session_artifact_path(session_instance_id, "active-profile");
-    let json =
-        serde_json::to_string_pretty(profile).context("failed to serialize active profile")?;
-    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    atomic_write_json(&path, profile, "active profile")?;
     Ok(path)
 }
 
@@ -525,16 +681,14 @@ fn active_profile_path(session_instance_id: &str) -> PathBuf {
     session_artifact_path(session_instance_id, "active-profile")
 }
 
-fn new_session_instance_id(profile_id: &str) -> String {
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos();
-    format!("{profile_id}-{}-{nonce}", std::process::id())
-}
-
 fn watchdog_report_path(session_instance_id: &str) -> PathBuf {
     session_artifact_path(session_instance_id, "watchdog-report")
 }
 
 fn read_active_profile(session_instance_id: &str) -> Result<DesktopProfile> {
+    if !validate_session_instance_id(session_instance_id) {
+        bail!("invalid session instance id for active profile read");
+    }
     let path = active_profile_path(session_instance_id);
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("failed to read active profile {}", path.display()))?;
@@ -557,69 +711,128 @@ fn read_watchdog_report(
         .with_context(|| format!("failed to decode watchdog report {}", path.display()))
 }
 
-fn resolve_lockd_resume_binding(
+fn expected_component_role(service: ServiceRole) -> Option<waybroker_common::DesktopComponentRole> {
+    match service {
+        ServiceRole::Compd => Some(waybroker_common::DesktopComponentRole::WindowManager),
+        ServiceRole::Lockd => Some(waybroker_common::DesktopComponentRole::LockScreen),
+        ServiceRole::X11Bridge => Some(waybroker_common::DesktopComponentRole::CompatLayer),
+        _ => None,
+    }
+}
+
+fn resolve_service_component_binding(
     profile: Option<&DesktopProfile>,
-) -> (Option<String>, String, String, String) {
-    let Some(profile) = profile else {
-        return (None, "missing".into(), "missing".into(), "no active profile loaded".into());
+    service: ServiceRole,
+) -> BindingResolutionResult {
+    let mut resolution = BindingResolutionResult {
+        service: service.as_str().into(),
+        resolution_source: "missing".into(),
+        candidate_component_ids: Vec::new(),
+        selected_component_id: None,
+        result: "missing".into(),
+        reason: "no active profile loaded".into(),
+        unix_timestamp: now_unix_timestamp(),
     };
 
-    let lockd_bindings: Vec<String> = profile
+    let Some(profile) = profile else {
+        return resolution;
+    };
+
+    let explicit: Vec<String> = profile
         .service_component_bindings
         .iter()
-        .filter(|binding| binding.service == ServiceRole::Lockd)
+        .filter(|binding| binding.service == service)
         .map(|binding| binding.component_id.clone())
         .collect();
 
-    if lockd_bindings.len() > 1 {
-        return (
-            None,
-            "collision".into(),
-            "collision".into(),
-            "multiple bindings found for lockd".into(),
-        );
+    if explicit.len() > 1 {
+        resolution.resolution_source = "collision".into();
+        resolution.candidate_component_ids = explicit;
+        resolution.result = "collision".into();
+        resolution.reason = format!("multiple bindings found for {}", service.as_str());
+        return resolution;
     }
 
-    if let Some(component_id) = lockd_bindings.first() {
+    if let Some(component_id) = explicit.first() {
+        resolution.resolution_source = "explicit".into();
+        resolution.candidate_component_ids = vec![component_id.clone()];
+        resolution.selected_component_id = Some(component_id.clone());
+
         let Some(component) =
             profile.session_components.iter().find(|component| component.id == *component_id)
         else {
-            return (
-                Some(component_id.clone()),
-                "explicit".into(),
-                "missing-target".into(),
-                format!("bound component {} not found in profile", component_id),
-            );
+            resolution.result = "missing-target".into();
+            resolution.reason = format!("bound component {} not found in profile", component_id);
+            return resolution;
         };
 
-        if component.role != waybroker_common::DesktopComponentRole::LockScreen {
-            return (
-                Some(component_id.clone()),
-                "explicit".into(),
-                "role-mismatch".into(),
-                format!(
-                    "expected {:?}, got {:?}",
-                    waybroker_common::DesktopComponentRole::LockScreen,
-                    component.role
-                ),
-            );
+        if let Some(expected) = expected_component_role(service) {
+            if component.role != expected {
+                resolution.result = "role-mismatch".into();
+                resolution.reason = format!("expected {:?}, got {:?}", expected, component.role);
+                return resolution;
+            }
         }
 
-        return (Some(component_id.clone()), "explicit".into(), "selected".into(), String::new());
+        resolution.result = "selected".into();
+        resolution.reason.clear();
+        return resolution;
     }
 
-    if profile.protocol == waybroker_common::DesktopProtocol::WaylandNative
+    if service == ServiceRole::Lockd
+        && profile.protocol == waybroker_common::DesktopProtocol::WaylandNative
         && profile.broker_services.contains(&ServiceRole::Lockd)
     {
-        return (
-            None,
-            "service-only".into(),
-            "selected".into(),
-            "using broker-owned lockd UI path".into(),
-        );
+        resolution.resolution_source = "service-only".into();
+        resolution.result = "selected".into();
+        resolution.reason = "using broker-owned lockd UI path".into();
+        return resolution;
     }
 
-    (None, "missing".into(), "missing".into(), "no lockd binding found".into())
+    if service == ServiceRole::Compd {
+        let candidates: Vec<String> = profile
+            .session_components
+            .iter()
+            .filter(|component| {
+                component.role == waybroker_common::DesktopComponentRole::WindowManager
+            })
+            .map(|component| component.id.clone())
+            .collect();
+        resolution.resolution_source = "legacy_fallback".into();
+        resolution.candidate_component_ids = candidates.clone();
+        match candidates.as_slice() {
+            [component_id] => {
+                resolution.selected_component_id = Some(component_id.clone());
+                resolution.result = "selected".into();
+                resolution.reason.clear();
+            }
+            [] => {
+                resolution.result = "missing".into();
+                resolution.reason = "no compd binding or legacy candidate found".into();
+            }
+            _ => {
+                resolution.result = "collision".into();
+                resolution.reason = "multiple legacy candidates found".into();
+            }
+        }
+        return resolution;
+    }
+
+    resolution.reason = format!("no {} binding found", service.as_str());
+    resolution
+}
+
+#[cfg(test)]
+fn resolve_lockd_resume_binding(
+    profile: Option<&DesktopProfile>,
+) -> (Option<String>, String, String, String) {
+    let resolution = resolve_service_component_binding(profile, ServiceRole::Lockd);
+    (
+        resolution.selected_component_id,
+        resolution.resolution_source,
+        resolution.result,
+        resolution.reason,
+    )
 }
 
 fn run_resume_scenario(scenario: ResumeScenario, session_instance_id: &str) -> Result<()> {
@@ -652,80 +865,19 @@ fn run_resume_scenario(scenario: ResumeScenario, session_instance_id: &str) -> R
     };
     write_binding_collision_report(&report, session_instance_id)?;
 
-    // Resolve Lockd binding
-    let (lockd_bound_id, lockd_binding_source, lockd_res_result, lockd_res_reason) =
-        resolve_lockd_resume_binding(profile.as_ref());
+    // Resolve Lockd and Compd bindings under one contract.
+    let lockd_resolution = resolve_service_component_binding(profile.as_ref(), ServiceRole::Lockd);
+    let lockd_bound_id = lockd_resolution.selected_component_id.clone();
+    let lockd_binding_source = lockd_resolution.resolution_source.clone();
+    let lockd_res_result = lockd_resolution.result.clone();
+    let lockd_res_reason = lockd_resolution.reason.clone();
+    write_binding_resolution_artifact(&lockd_resolution, session_instance_id)?;
 
-    // Resolve Compd binding
-    let compd_binding_count = profile
-        .as_ref()
-        .map(|p| {
-            p.service_component_bindings.iter().filter(|b| b.service == ServiceRole::Compd).count()
-        })
-        .unwrap_or(0);
-
-    let (compd_bound_id, compd_binding_source, compd_res_result, compd_res_reason) =
-        if compd_binding_count > 1 {
-            (None, "collision", "collision", "multiple bindings found for compd")
-        } else if let Some(b) = profile.as_ref().and_then(|p| {
-            p.service_component_bindings.iter().find(|b| b.service == ServiceRole::Compd)
-        }) {
-            (Some(b.component_id.clone()), "explicit", "selected", "")
-        } else {
-            // Check legacy fallback candidates for Compd
-            let candidates: Vec<String> = profile
-                .as_ref()
-                .map(|p| {
-                    p.session_components
-                        .iter()
-                        .filter(|c| c.role == waybroker_common::DesktopComponentRole::WindowManager)
-                        .map(|c| c.id.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            if candidates.len() == 1 {
-                (Some(candidates[0].clone()), "legacy_fallback", "selected", "")
-            } else if candidates.len() > 1 {
-                (None, "legacy_fallback", "collision", "multiple legacy candidates found")
-            } else {
-                (None, "missing", "missing", "no compd binding or legacy candidate found")
-            }
-        };
-
-    let compd_res_artifact = BindingResolutionResult {
-        service: "compd".into(),
-        resolution_source: compd_binding_source.into(),
-        candidate_component_ids: if compd_binding_source == "explicit"
-            || compd_res_result == "collision" && compd_binding_source == "collision"
-        {
-            profile
-                .as_ref()
-                .map(|p| {
-                    p.service_component_bindings
-                        .iter()
-                        .filter(|b| b.service == ServiceRole::Compd)
-                        .map(|b| b.component_id.clone())
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            profile
-                .as_ref()
-                .map(|p| {
-                    p.session_components
-                        .iter()
-                        .filter(|c| c.role == waybroker_common::DesktopComponentRole::WindowManager)
-                        .map(|c| c.id.clone())
-                        .collect()
-                })
-                .unwrap_or_default()
-        },
-        selected_component_id: compd_bound_id.clone(),
-        result: compd_res_result.into(),
-        reason: compd_res_reason.into(),
-        unix_timestamp: now_unix_timestamp(),
-    };
-    write_binding_resolution_artifact(&compd_res_artifact, session_instance_id)?;
+    let compd_resolution = resolve_service_component_binding(profile.as_ref(), ServiceRole::Compd);
+    let compd_bound_id = compd_resolution.selected_component_id.clone();
+    let compd_binding_source = compd_resolution.resolution_source.clone();
+    let compd_res_result = compd_resolution.result.clone();
+    write_binding_resolution_artifact(&compd_resolution, session_instance_id)?;
 
     let ui_component_present = if let (Some(p), Some(id)) = (&profile, &lockd_bound_id) {
         p.session_components
@@ -734,26 +886,6 @@ fn run_resume_scenario(scenario: ResumeScenario, session_instance_id: &str) -> R
     } else {
         false
     };
-
-    let lockd_res_artifact = BindingResolutionResult {
-        service: "lockd".into(),
-        resolution_source: lockd_binding_source.clone(),
-        candidate_component_ids: profile
-            .as_ref()
-            .map(|p| {
-                p.service_component_bindings
-                    .iter()
-                    .filter(|b| b.service == ServiceRole::Lockd)
-                    .map(|b| b.component_id.clone())
-                    .collect()
-            })
-            .unwrap_or_default(),
-        selected_component_id: lockd_bound_id.clone(),
-        result: lockd_res_result.clone(),
-        reason: lockd_res_reason.clone(),
-        unix_timestamp: now_unix_timestamp(),
-    };
-    write_binding_resolution_artifact(&lockd_res_artifact, session_instance_id)?;
 
     if lockd_res_result != "selected" {
         println!(
@@ -1080,7 +1212,7 @@ fn run_resume_scenario(scenario: ResumeScenario, session_instance_id: &str) -> R
                 }
             }
         } else {
-            let reason = if !is_compd_enabled { "policy-disabled" } else { compd_res_result };
+            let reason = if !is_compd_enabled { "policy-disabled" } else { &compd_res_result };
             println!(
                 "service=sessiond op=resume_sequence event=watchdog_restart_request_skipped role=compd reason={}",
                 reason
@@ -1261,9 +1393,7 @@ fn write_lock_path_artifact(
     let _ = ensure_runtime_dir()?;
     let path =
         session_artifact_path(session_instance_id, &format!("lock-ui-path-{}", artifact.scenario));
-    let json =
-        serde_json::to_string_pretty(artifact).context("failed to serialize lock path artifact")?;
-    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    atomic_write_json(&path, artifact, "lock path artifact")?;
     println!("service=sessiond op=write_lock_path_artifact event=success path={}", path.display());
     Ok(path)
 }
@@ -1272,14 +1402,19 @@ fn write_resume_trace(trace: &ResumeTrace, session_instance_id: &str) -> Result<
     let _ = ensure_runtime_dir()?;
     let path =
         session_artifact_path(session_instance_id, &format!("resume-trace-{}", trace.scenario));
-    let json = serde_json::to_string_pretty(trace).context("failed to serialize resume trace")?;
-    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    atomic_write_json(&path, trace, "resume trace")?;
     println!("service=sessiond op=write_resume_trace event=success path={}", path.display());
     Ok(path)
 }
 
 fn send_ipc_and_wait(destination: ServiceRole, kind: MessageKind) -> Result<IpcEnvelope> {
     let mut stream = connect_service_socket(destination)?;
+    stream
+        .set_read_timeout(Some(CLIENT_IO_TIMEOUT))
+        .context("failed to set outbound IPC read timeout")?;
+    stream
+        .set_write_timeout(Some(CLIENT_IO_TIMEOUT))
+        .context("failed to set outbound IPC write timeout")?;
     let request = IpcEnvelope::new(ServiceRole::Sessiond, destination, kind);
     send_json_line(&mut stream, &request)?;
 
@@ -1310,8 +1445,13 @@ fn serve_ipc(config: &Config, profiles: &[DesktopProfile]) -> Result<()> {
 
         match listener.accept() {
             Ok((stream, _addr)) => {
-                handle_client(stream, profiles, config, supervisor.as_mut())?;
-                served += 1;
+                served = served.saturating_add(1);
+                if let Err(err) = handle_client(stream, profiles, config, supervisor.as_mut()) {
+                    println!(
+                        "service=sessiond op=client event=failed served_request={} reason=\"{:#}\"",
+                        served, err
+                    );
+                }
 
                 if config.serve_once {
                     break;
@@ -1319,6 +1459,9 @@ fn serve_ipc(config: &Config, profiles: &[DesktopProfile]) -> Result<()> {
             }
             Err(err) if err.kind() == ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(200));
+            }
+            Err(err) if is_recoverable_accept_error(&err) => {
+                println!("service=sessiond op=accept event=recoverable_error reason=\"{}\"", err);
             }
             Err(err) => {
                 return Err(err)
@@ -1337,6 +1480,13 @@ fn handle_client(
     config: &Config,
     supervisor: Option<&mut SessionSupervisor>,
 ) -> Result<()> {
+    stream
+        .set_read_timeout(Some(CLIENT_IO_TIMEOUT))
+        .context("failed to set sessiond client read timeout")?;
+    stream
+        .set_write_timeout(Some(CLIENT_IO_TIMEOUT))
+        .context("failed to set sessiond client write timeout")?;
+
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
         read_json_line(&mut reader)?
@@ -1356,7 +1506,7 @@ fn build_response(
     let source = request.source;
     let response_kind = match request.kind {
         MessageKind::SessionCommand(command) if request.destination == ServiceRole::Sessiond => {
-            match handle_session_command(command, profiles, config, supervisor) {
+            match handle_session_command(command, source, profiles, config, supervisor) {
                 Ok(command) => MessageKind::SessionCommand(command),
                 Err(err) => MessageKind::SessionCommand(SessionCommand::ProfileUnchanged {
                     profile_id: "unknown".into(),
@@ -1384,18 +1534,39 @@ fn build_response(
 
 fn handle_session_command(
     command: SessionCommand,
+    source: ServiceRole,
     profiles: &[DesktopProfile],
     config: &Config,
     supervisor: Option<&mut SessionSupervisor>,
 ) -> Result<SessionCommand> {
+    if !session_command_source_authorized(source, &command) {
+        bail!("source {} is not authorized for session command {:?}", source.as_str(), command);
+    }
+
     match command {
         SessionCommand::ApplyWatchdogReport { report } => {
-            let session_instance_id = report.session_instance_id.clone();
+            if !validate_session_instance_id(&report.session_instance_id) {
+                bail!("watchdog report contains invalid session instance id");
+            }
+            let session_instance_id = match supervisor.as_ref() {
+                Some(supervisor) => {
+                    if report.session_instance_id != supervisor.session_instance_id {
+                        bail!(
+                            "watchdog report session instance {} does not match managed session {}",
+                            report.session_instance_id,
+                            supervisor.session_instance_id
+                        );
+                    }
+                    supervisor.session_instance_id.clone()
+                }
+                None => report.session_instance_id.clone(),
+            };
             let active_profile = match supervisor.as_ref() {
                 Some(supervisor) => supervisor.profile(),
                 None => read_active_profile(&session_instance_id)?,
             };
-            let outcome = apply_watchdog_report(&active_profile, profiles, &report)?;
+            let outcome =
+                apply_watchdog_report(&active_profile, profiles, &report, &session_instance_id)?;
             persist_watchdog_apply_outcome(&outcome, config, supervisor, &session_instance_id)
         }
         SessionCommand::InhibitIdle { reason } => {
@@ -1477,18 +1648,40 @@ fn handle_session_command(
     }
 }
 
+fn session_command_source_authorized(source: ServiceRole, command: &SessionCommand) -> bool {
+    match command {
+        SessionCommand::ApplyWatchdogReport { .. } => source == ServiceRole::Watchdog,
+        SessionCommand::InhibitIdle { .. } | SessionCommand::ReleaseIdle { .. } => {
+            source == ServiceRole::Waylandd
+        }
+        SessionCommand::SuspendRequested | SessionCommand::ResumeHint { .. } => {
+            matches!(source, ServiceRole::Sessiond | ServiceRole::Waylandd | ServiceRole::Displayd)
+        }
+        SessionCommand::DegradedMode { .. }
+        | SessionCommand::ProfileTransition { .. }
+        | SessionCommand::ProfileUnchanged { .. } => false,
+    }
+}
+
 fn launch_state_for_profile(
     profile: &DesktopProfile,
     config: &Config,
+    session_instance_id: &str,
+    stream_generation: u64,
 ) -> Result<SessionLaunchState> {
     if config.supervise_seconds > 0 {
-        return supervise_launch_state(profile, config);
+        return supervise_launch_state(profile, config, session_instance_id, stream_generation);
     }
 
-    build_launch_state(profile, config)
+    build_launch_state(profile, config, session_instance_id, stream_generation)
 }
 
-fn build_launch_state(profile: &DesktopProfile, config: &Config) -> Result<SessionLaunchState> {
+fn build_launch_state(
+    profile: &DesktopProfile,
+    config: &Config,
+    session_instance_id: &str,
+    stream_generation: u64,
+) -> Result<SessionLaunchState> {
     let mut components = Vec::with_capacity(profile.session_components.len());
 
     for component in &profile.session_components {
@@ -1497,11 +1690,11 @@ fn build_launch_state(profile: &DesktopProfile, config: &Config) -> Result<Sessi
 
     Ok(SessionLaunchState {
         profile_id: profile.id.clone(),
-        session_instance_id: new_session_instance_id(&profile.id),
+        session_instance_id: session_instance_id.to_string(),
         display_name: profile.display_name.clone(),
         protocol: profile.protocol,
         broker_services: profile.broker_services.clone(),
-        generation: 1,
+        generation: stream_generation,
         sequence: 1,
         components,
         unix_timestamp: now_unix_timestamp(),
@@ -1510,9 +1703,12 @@ fn build_launch_state(profile: &DesktopProfile, config: &Config) -> Result<Sessi
     })
 }
 
-fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<SessionLaunchState> {
-    let session_instance_id =
-        config.session_instance_id.clone().unwrap_or_else(|| new_session_instance_id(&profile.id));
+fn supervise_launch_state(
+    profile: &DesktopProfile,
+    config: &Config,
+    session_instance_id: &str,
+    stream_generation: u64,
+) -> Result<SessionLaunchState> {
     let mut components = Vec::with_capacity(profile.session_components.len());
 
     for component in &profile.session_components {
@@ -1520,7 +1716,7 @@ fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<S
     }
 
     for component in &mut components {
-        component.spawn(&profile.id, &session_instance_id)?;
+        component.spawn(&profile.id, session_instance_id)?;
     }
 
     let deadline = Instant::now() + Duration::from_secs(config.supervise_seconds);
@@ -1528,11 +1724,7 @@ fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<S
         let mut had_event = false;
 
         for component in &mut components {
-            if component.poll_and_restart(
-                &profile.id,
-                &session_instance_id,
-                config.restart_limit,
-            )? {
+            if component.poll_and_restart(&profile.id, session_instance_id, config.restart_limit)? {
                 had_event = true;
             }
         }
@@ -1544,11 +1736,11 @@ fn supervise_launch_state(profile: &DesktopProfile, config: &Config) -> Result<S
 
     Ok(SessionLaunchState {
         profile_id: profile.id.clone(),
-        session_instance_id,
+        session_instance_id: session_instance_id.to_string(),
         display_name: profile.display_name.clone(),
         protocol: profile.protocol,
         broker_services: profile.broker_services.clone(),
-        generation: 1,
+        generation: stream_generation,
         sequence: 1,
         components: components.into_iter().map(|component| component.state).collect(),
         unix_timestamp: now_unix_timestamp(),
@@ -1689,9 +1881,15 @@ fn is_executable(path: &Path) -> bool {
 
 fn write_launch_state(state: &SessionLaunchState, session_instance_id: &str) -> Result<PathBuf> {
     let _ = ensure_runtime_dir()?;
+    if state.session_instance_id != session_instance_id {
+        bail!(
+            "launch-state session identity mismatch: state={} artifact={}",
+            state.session_instance_id,
+            session_instance_id
+        );
+    }
     let path = session_artifact_path(session_instance_id, "launch-state");
-    let json = serde_json::to_string_pretty(state).context("failed to serialize launch state")?;
-    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    atomic_write_json(&path, state, "launch state")?;
     Ok(path)
 }
 
@@ -1701,9 +1899,7 @@ fn write_profile_transition(
 ) -> Result<PathBuf> {
     let _ = ensure_runtime_dir()?;
     let path = session_artifact_path(session_instance_id, "profile-transition");
-    let json = serde_json::to_string_pretty(transition)
-        .context("failed to serialize profile transition")?;
-    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    atomic_write_json(&path, transition, "profile transition")?;
     Ok(path)
 }
 
@@ -1749,11 +1945,18 @@ fn print_profile_transition(transition: &SessionProfileTransition) {
     );
 }
 
-fn apply_watchdog_report(
+fn validate_watchdog_report_identity(
     active_profile: &DesktopProfile,
-    profiles: &[DesktopProfile],
     report: &SessionWatchdogReport,
-) -> Result<WatchdogApplyOutcome> {
+    session_instance_id: &str,
+) -> Result<()> {
+    if report.session_instance_id != session_instance_id {
+        bail!(
+            "watchdog report session instance {} does not match active session {}",
+            report.session_instance_id,
+            session_instance_id
+        );
+    }
     if report.profile_id != active_profile.id {
         bail!(
             "watchdog report profile {} does not match active profile {}",
@@ -1761,6 +1964,92 @@ fn apply_watchdog_report(
             active_profile.id
         );
     }
+    if report.protocol != active_profile.protocol {
+        bail!("watchdog report protocol does not match active profile");
+    }
+    if report.display_name != active_profile.display_name {
+        bail!("watchdog report display name does not match active profile");
+    }
+
+    let reported_total = report
+        .healthy_components
+        .checked_add(report.unhealthy_components)
+        .and_then(|value| value.checked_add(report.inactive_components))
+        .context("watchdog report component count overflow")?;
+    if reported_total != report.components.len() {
+        bail!(
+            "watchdog report component counts do not match payload: counts={} payload={}",
+            reported_total,
+            report.components.len()
+        );
+    }
+    let actual_healthy = report
+        .components
+        .iter()
+        .filter(|component| component.status == DesktopHealthStatus::Healthy)
+        .count();
+    let actual_unhealthy = report
+        .components
+        .iter()
+        .filter(|component| component.status == DesktopHealthStatus::Unhealthy)
+        .count();
+    let actual_inactive = report
+        .components
+        .iter()
+        .filter(|component| component.status == DesktopHealthStatus::Inactive)
+        .count();
+    if (report.healthy_components, report.unhealthy_components, report.inactive_components)
+        != (actual_healthy, actual_unhealthy, actual_inactive)
+    {
+        bail!(
+            "watchdog report status counts do not match component states: reported=({},{},{}) actual=({},{},{})",
+            report.healthy_components,
+            report.unhealthy_components,
+            report.inactive_components,
+            actual_healthy,
+            actual_unhealthy,
+            actual_inactive
+        );
+    }
+
+    let mut seen = HashSet::new();
+    for component in &report.components {
+        if !seen.insert(component.id.as_str()) {
+            bail!("watchdog report contains duplicate component {}", component.id);
+        }
+        let expected = active_profile
+            .session_components
+            .iter()
+            .find(|candidate| candidate.id == component.id)
+            .with_context(|| {
+                format!(
+                    "watchdog report references component {} outside active profile",
+                    component.id
+                )
+            })?;
+        if expected.role != component.role {
+            bail!(
+                "watchdog report role mismatch for {}: expected {:?}, got {:?}",
+                component.id,
+                expected.role,
+                component.role
+            );
+        }
+        if expected.critical != component.critical {
+            bail!("watchdog report criticality mismatch for {}", component.id);
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_watchdog_report(
+    active_profile: &DesktopProfile,
+    profiles: &[DesktopProfile],
+    report: &SessionWatchdogReport,
+    session_instance_id: &str,
+) -> Result<WatchdogApplyOutcome> {
+    validate_watchdog_report_identity(active_profile, report, session_instance_id)?;
 
     let trigger_component_ids = degraded_trigger_component_ids(report);
 
@@ -1834,8 +2123,16 @@ fn persist_watchdog_apply_outcome(
             if let Some(supervisor) = supervisor {
                 supervisor.switch_to(target_profile.clone(), config)?;
             } else if should_auto_launch_transition(config) {
-                let launch_state = launch_state_for_profile(target_profile, config)?;
-                let state_path = write_launch_state(&launch_state, session_instance_id)?;
+                let (stream_generation, _) =
+                    load_session_authority_generation(session_instance_id)?;
+                let launch_state = launch_state_for_profile(
+                    target_profile,
+                    config,
+                    session_instance_id,
+                    stream_generation,
+                )?;
+                let (state_path, authority_path) =
+                    persist_launch_state_with_authority(&launch_state, session_instance_id)?;
                 print_launch_state(&launch_state);
                 println!(
                     "service=sessiond op=persist_outcome event=auto_launch_profile id={}",
@@ -1844,6 +2141,12 @@ fn persist_watchdog_apply_outcome(
                 println!(
                     "service=sessiond op=persist_outcome event=write_launch_state path={}",
                     state_path.display()
+                );
+                println!(
+                    "service=sessiond op=authority_persist event=success path={} generation={} sequence={}",
+                    authority_path.display(),
+                    launch_state.generation,
+                    launch_state.sequence
                 );
             }
 
@@ -1922,6 +2225,12 @@ fn notify_watchdog(
 
 fn send_watchdog_command(command: WatchdogCommand) -> Result<IpcEnvelope> {
     let mut stream = connect_service_socket(ServiceRole::Watchdog)?;
+    stream
+        .set_read_timeout(Some(CLIENT_IO_TIMEOUT))
+        .context("failed to set watchdog IPC read timeout")?;
+    stream
+        .set_write_timeout(Some(CLIENT_IO_TIMEOUT))
+        .context("failed to set watchdog IPC write timeout")?;
     let request = IpcEnvelope::new(
         ServiceRole::Sessiond,
         ServiceRole::Watchdog,
@@ -2033,13 +2342,10 @@ impl Drop for SocketGuard {
 
 #[derive(Debug, serde::Deserialize)]
 struct WatchdogRecoveryArtifact {
-    #[allow(dead_code)]
     role: String,
     reason: String,
-    #[allow(dead_code)]
     requested_by: String,
     unix_timestamp: u64,
-    #[allow(dead_code)]
     action: String,
     status: String,
 }
@@ -2081,7 +2387,27 @@ impl SessionSupervisor {
             .clone()
             .unwrap_or_else(|| "legacy-single-session".to_string());
         let profile = read_active_profile(&session_instance_id)?;
-        let mut supervisor = Self::new(profile, profiles.to_vec(), session_instance_id, 1, config)?;
+        let (stream_generation, startup) = load_session_authority_generation(&session_instance_id)?;
+        let mut supervisor =
+            Self::new(profile, profiles.to_vec(), session_instance_id, stream_generation, config)?;
+        match startup {
+            SessionAuthorityStartup::Fresh => println!(
+                "service=sessiond op=authority_restore event=fresh session_instance_id={} generation={}",
+                supervisor.session_instance_id, supervisor.stream_generation
+            ),
+            SessionAuthorityStartup::Recovered {
+                previous_profile_id,
+                previous_generation,
+                previous_sequence,
+            } => println!(
+                "service=sessiond op=authority_restore event=recovered session_instance_id={} previous_profile={} previous_generation={} previous_sequence={} generation={}",
+                supervisor.session_instance_id,
+                previous_profile_id,
+                previous_generation,
+                previous_sequence,
+                supervisor.stream_generation
+            ),
+        }
         supervisor.activate(config)?;
         Ok(supervisor)
     }
@@ -2130,7 +2456,8 @@ impl SessionSupervisor {
         self.stop_all()?;
         let profiles = self.profiles.clone();
         let session_instance_id = self.session_instance_id.clone();
-        let next_generation = self.stream_generation.saturating_add(1);
+        let next_generation =
+            self.stream_generation.checked_add(1).context("session stream generation exhausted")?;
         *self = Self::new(profile, profiles, session_instance_id, next_generation, config)?;
         self.activate(config)?;
         println!(
@@ -2166,6 +2493,20 @@ impl SessionSupervisor {
             };
 
             if recovery.status != "pending" {
+                continue;
+            }
+            if recovery.role != role.as_str()
+                || recovery.requested_by != ServiceRole::Sessiond.as_str()
+                || recovery.action != "restart-request-accepted"
+            {
+                println!(
+                    "service=sessiond op=recovery_execution event=rejected_artifact role={} artifact_role={} requested_by={} action={}",
+                    role.as_str(),
+                    recovery.role,
+                    recovery.requested_by,
+                    recovery.action
+                );
+                let _ = fs::remove_file(&recovery_path);
                 continue;
             }
 
@@ -2215,36 +2556,14 @@ impl SessionSupervisor {
             recovery_command_args: Vec::new(),
         };
 
-        // Resolve Resolution Result for Artifact
-        let mut resolution = BindingResolutionResult {
-            service: role.as_str().into(),
-            resolution_source: "explicit".into(),
-            candidate_component_ids: Vec::new(),
-            selected_component_id: None,
-            result: "unknown".into(),
-            reason: "".into(),
-            unix_timestamp: now_unix_timestamp(),
-        };
+        let resolution = resolve_service_component_binding(Some(&self.profile), role);
+        artifact.resolution_source = resolution.resolution_source.clone();
+        artifact.bound_component_id = resolution.selected_component_id.clone();
 
-        // 1. Validate Bindings for this specific request
-        let report = validate_profile_bindings(&self.profile);
-
-        // Check for duplicate bindings for THIS service
-        let is_duplicate = report.duplicate_service_bindings.iter().any(|s| s == role.as_str());
-        if is_duplicate {
-            resolution.result = "collision".into();
-            resolution.reason = "multiple bindings found for service".into();
-            resolution.candidate_component_ids = self
-                .profile
-                .service_component_bindings
-                .iter()
-                .filter(|b| b.service == role)
-                .map(|b| b.component_id.clone())
-                .collect();
+        if resolution.result == "collision" {
             write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
-
             artifact.result = "config-error".into();
-            artifact.reason = "binding collision detected".into();
+            artifact.reason = resolution.reason;
             return Ok(artifact);
         }
 
@@ -2258,7 +2577,6 @@ impl SessionSupervisor {
                 "profile-optin".into(),
             ),
             None => {
-                // Compd defaults to enabled (for legacy compat), others like Lockd default to disabled
                 if role == ServiceRole::Compd {
                     (true, "implicit-default".into())
                 } else {
@@ -2272,124 +2590,28 @@ impl SessionSupervisor {
             policy.map(|pol| pol.restart_command_args.clone()).unwrap_or_default();
 
         if !is_enabled {
-            resolution.result = "policy-disabled".into();
-            resolution.reason = "recovery execution disabled by policy".into();
-            write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
+            let mut disabled = resolution.clone();
+            disabled.result = "policy-disabled".into();
+            disabled.reason = "recovery execution disabled by policy".into();
+            write_binding_resolution_artifact(&disabled, &self.session_instance_id)?;
 
             artifact.result = "policy-disabled".into();
             artifact.reason = "recovery execution is disabled by policy".into();
             return Ok(artifact);
         }
 
-        // Try explicit binding
-        let target_id = self
-            .profile
-            .service_component_bindings
-            .iter()
-            .find(|b| b.service == role)
-            .map(|b| b.component_id.clone());
-
-        let target_component = if let Some(id) = target_id {
-            resolution.selected_component_id = Some(id.clone());
-            resolution.candidate_component_ids = vec![id.clone()];
-
-            // Verify target exists
-            if !self.components.iter().any(|c| c.component.id == id) {
-                resolution.result = "missing-target".into();
-                resolution.reason = format!("bound component {} not found in profile", id);
-                write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
-
-                artifact.result = "config-error".into();
-                artifact.bound_component_id = Some(id);
-                artifact.reason = "binding target missing".into();
-                return Ok(artifact);
-            }
-
-            // Verify role mismatch
-            let expected_role = match role {
-                ServiceRole::Compd => Some(waybroker_common::DesktopComponentRole::WindowManager),
-                ServiceRole::Lockd => Some(waybroker_common::DesktopComponentRole::LockScreen),
-                _ => None,
-            };
-
-            if let Some(expected) = expected_role {
-                let comp = self.components.iter().find(|c| c.component.id == id).unwrap();
-                if comp.component.role != expected {
-                    resolution.result = "role-mismatch".into();
-                    resolution.reason =
-                        format!("expected {:?}, got {:?}", expected, comp.component.role);
-                    write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
-
-                    artifact.result = "config-error".into();
-                    artifact.bound_component_id = Some(id);
-                    artifact.reason = "binding role mismatch".into();
-                    return Ok(artifact);
-                }
-            }
-
-            resolution.result = "selected".into();
+        if matches!(resolution.result.as_str(), "missing-target" | "role-mismatch") {
             write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
+            artifact.result = "config-error".into();
+            artifact.reason = resolution.reason;
+            return Ok(artifact);
+        }
 
-            artifact.bound_component_id = Some(id.clone());
-            println!(
-                "service=sessiond op=recovery_resolution event=bound role={} component_id={}",
-                role.as_str(),
-                id
-            );
-            self.components.iter_mut().find(|c| c.component.id == id)
-        } else {
-            // Legacy fallback (only for Compd)
-            if role == ServiceRole::Compd {
-                resolution.resolution_source = "legacy_fallback".into();
-                artifact.resolution_source = "legacy_fallback".into();
-                let target_role_str = "window-manager";
+        write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
 
-                let candidates: Vec<String> = self
-                    .components
-                    .iter()
-                    .filter(|c| c.component.role.as_str() == target_role_str)
-                    .map(|c| c.component.id.clone())
-                    .collect();
-
-                resolution.candidate_component_ids = candidates.clone();
-
-                if candidates.len() > 1 {
-                    resolution.result = "collision".into();
-                    resolution.reason = "multiple candidates found for legacy role search".into();
-                    write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
-
-                    artifact.result = "config-error".into();
-                    artifact.reason = "legacy role ambiguity".into();
-                    return Ok(artifact);
-                }
-
-                println!(
-                    "service=sessiond op=recovery_resolution event=legacy_fallback role={} target_role={}",
-                    role.as_str(),
-                    target_role_str
-                );
-
-                if candidates.len() == 1 {
-                    resolution.result = "selected".into();
-                    resolution.selected_component_id = Some(candidates[0].clone());
-                    write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
-                    self.components
-                        .iter_mut()
-                        .find(|c| c.component.role.as_str() == target_role_str)
-                } else {
-                    resolution.result = "missing".into();
-                    resolution.reason = "no component found for legacy role".into();
-                    write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
-                    None
-                }
-            } else {
-                resolution.result = "missing".into();
-                resolution.reason =
-                    "no explicit binding found and no legacy fallback allowed".into();
-                write_binding_resolution_artifact(&resolution, &self.session_instance_id)?;
-                None
-            }
-        };
+        let target_component = resolution.selected_component_id.as_deref().and_then(|id| {
+            self.components.iter_mut().find(|component| component.component.id == id)
+        });
 
         let Some(component) = target_component else {
             artifact.result = "no-executor".into();
@@ -2456,10 +2678,11 @@ impl SessionSupervisor {
         Ok(())
     }
 
-    fn snapshot(&mut self) -> SessionLaunchState {
-        self.stream_sequence = self.stream_sequence.saturating_add(1);
+    fn snapshot(&mut self) -> Result<SessionLaunchState> {
+        self.stream_sequence =
+            self.stream_sequence.checked_add(1).context("session stream sequence exhausted")?;
 
-        SessionLaunchState {
+        Ok(SessionLaunchState {
             profile_id: self.profile.id.clone(),
             session_instance_id: self.session_instance_id.clone(),
             display_name: self.profile.display_name.clone(),
@@ -2474,18 +2697,34 @@ impl SessionSupervisor {
                 .profile
                 .service_recovery_execution_policies
                 .clone(),
-        }
+        })
     }
 
     fn write_snapshot(&mut self, label: &str, config: &Config) -> Result<()> {
-        let launch_state = self.snapshot();
+        let launch_state = self.snapshot()?;
         let state_path = write_launch_state(&launch_state, &self.session_instance_id)?;
+        let authority_state = SessionAuthorityState {
+            version: SESSION_AUTHORITY_ARTIFACT_VERSION,
+            session_instance_id: self.session_instance_id.clone(),
+            active_profile_id: self.profile.id.clone(),
+            stream_generation: self.stream_generation,
+            stream_sequence: self.stream_sequence,
+            unix_timestamp: now_unix_timestamp(),
+        };
+        let authority_path =
+            persist_session_authority_state(&authority_state, &self.session_instance_id)?;
         print_launch_state(&launch_state);
         println!(
             "service=sessiond op=snapshot event={} profile={} session_instance={} timestamp={}",
             label, self.profile.id, self.session_instance_id, launch_state.unix_timestamp
         );
         println!("service=sessiond op=snapshot path={}", state_path.display());
+        println!(
+            "service=sessiond op=authority_persist event=success path={} generation={} sequence={}",
+            authority_path.display(),
+            self.stream_generation,
+            self.stream_sequence
+        );
 
         if should_notify_watchdog(config) {
             match notify_watchdog(&launch_state, self.last_streamed_state.as_ref()) {
@@ -2511,7 +2750,12 @@ impl SessionSupervisor {
         report: &SessionWatchdogReport,
         config: &Config,
     ) -> Result<()> {
-        let outcome = apply_watchdog_report(&self.profile, &self.profiles, report)?;
+        let outcome = apply_watchdog_report(
+            &self.profile,
+            &self.profiles,
+            report,
+            &self.session_instance_id,
+        )?;
 
         match outcome {
             WatchdogApplyOutcome::Transition { target_profile, transition } => {
@@ -2641,7 +2885,9 @@ impl RuntimeComponent {
 mod tests {
     use super::{
         apply_watchdog_report, build_launch_state, is_executable, resolve_command_path,
-        resolve_lockd_resume_binding, watchdog_stream_command,
+        resolve_lockd_resume_binding, resolve_service_component_binding,
+        session_command_source_authorized, validate_watchdog_report_identity,
+        watchdog_stream_command,
     };
     use std::{
         fs,
@@ -2723,7 +2969,8 @@ mod tests {
         };
 
         let config = super::Config::default();
-        let state = build_launch_state(&profile, &config).expect("build launch state");
+        let state =
+            build_launch_state(&profile, &config, "test-session", 1).expect("build launch state");
 
         assert!(!state.session_instance_id.is_empty());
         assert_eq!(state.components.len(), 1);
@@ -2771,7 +3018,13 @@ mod tests {
             summary: "crash test".into(),
             degraded_profile_id: Some("demo-x11-degraded".into()),
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
-            session_components: Vec::new(),
+            session_components: vec![DesktopComponent {
+                id: "crashy-wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                command: vec!["demo-wm".into()],
+                critical: true,
+                launcher: waybroker_common::DesktopLauncher::System,
+            }],
             service_component_bindings: Vec::new(),
             service_recovery_execution_policies: Vec::new(),
         };
@@ -2791,7 +3044,7 @@ mod tests {
             session_instance_id: "test-session".into(),
             display_name: "Crashy Demo".into(),
             protocol: DesktopProtocol::LayerX11,
-            healthy_components: 1,
+            healthy_components: 0,
             unhealthy_components: 1,
             inactive_components: 0,
             components: vec![SessionWatchdogComponentReport {
@@ -2811,6 +3064,7 @@ mod tests {
             &active_profile,
             &[active_profile.clone(), degraded_profile.clone()],
             &report,
+            "test-session",
         )
         .expect("evaluate transition");
 
@@ -2836,7 +3090,13 @@ mod tests {
             summary: "demo".into(),
             degraded_profile_id: Some("demo-x11-degraded".into()),
             broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
-            session_components: Vec::new(),
+            session_components: vec![DesktopComponent {
+                id: "demo-wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                command: vec!["demo-wm".into()],
+                critical: true,
+                launcher: waybroker_common::DesktopLauncher::System,
+            }],
             service_component_bindings: Vec::new(),
             service_recovery_execution_policies: Vec::new(),
         };
@@ -2861,9 +3121,13 @@ mod tests {
             unix_timestamp: 0,
         };
 
-        let outcome =
-            apply_watchdog_report(&active_profile, std::slice::from_ref(&active_profile), &report)
-                .expect("evaluate transition");
+        let outcome = apply_watchdog_report(
+            &active_profile,
+            std::slice::from_ref(&active_profile),
+            &report,
+            "test-session",
+        )
+        .expect("evaluate transition");
 
         match outcome {
             super::WatchdogApplyOutcome::Transition { .. } => {
@@ -3155,6 +3419,7 @@ mod tests {
 
         let res_suspend = super::handle_session_command(
             waybroker_common::SessionCommand::SuspendRequested,
+            ServiceRole::Sessiond,
             &[supervisor.profile.clone()],
             &config,
             Some(&mut supervisor),
@@ -3170,6 +3435,7 @@ mod tests {
                 stage: waybroker_common::ResumeStage::Complete,
                 output: None,
             },
+            ServiceRole::Sessiond,
             &[supervisor.profile.clone()],
             &config,
             Some(&mut supervisor),
@@ -3184,5 +3450,131 @@ mod tests {
             }
         );
         assert!(!supervisor.is_suspended);
+    }
+
+    #[test]
+    fn launch_state_preserves_requested_session_identity() {
+        let profile = DesktopProfile {
+            id: "demo".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            summary: "demo".into(),
+            degraded_profile_id: None,
+            broker_services: vec![ServiceRole::Sessiond],
+            session_components: Vec::new(),
+            service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
+        };
+        let state = build_launch_state(&profile, &super::Config::default(), "authority-a", 7)
+            .expect("build launch state");
+        assert_eq!(state.session_instance_id, "authority-a");
+        assert_eq!(state.generation, 7);
+    }
+
+    #[test]
+    fn watchdog_report_rejects_cross_session_and_unknown_component() {
+        let profile = DesktopProfile {
+            id: "demo".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            summary: "demo".into(),
+            degraded_profile_id: None,
+            broker_services: vec![ServiceRole::Sessiond, ServiceRole::Watchdog],
+            session_components: vec![DesktopComponent {
+                id: "wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                command: vec!["wm".into()],
+                critical: true,
+                launcher: waybroker_common::DesktopLauncher::System,
+            }],
+            service_component_bindings: Vec::new(),
+            service_recovery_execution_policies: Vec::new(),
+        };
+        let mut report = SessionWatchdogReport {
+            profile_id: profile.id.clone(),
+            session_instance_id: "other-session".into(),
+            display_name: profile.display_name.clone(),
+            protocol: profile.protocol,
+            healthy_components: 1,
+            unhealthy_components: 0,
+            inactive_components: 0,
+            components: vec![SessionWatchdogComponentReport {
+                id: "wm".into(),
+                role: DesktopComponentRole::WindowManager,
+                critical: true,
+                status: DesktopHealthStatus::Healthy,
+                pid: None,
+                crash_loop_count: 0,
+                action: DesktopRecoveryAction::None,
+                reason: "healthy".into(),
+            }],
+            unix_timestamp: 0,
+        };
+        assert!(validate_watchdog_report_identity(&profile, &report, "authority-a").is_err());
+
+        report.session_instance_id = "authority-a".into();
+        report.components[0].id = "ghost".into();
+        assert!(validate_watchdog_report_identity(&profile, &report, "authority-a").is_err());
+    }
+
+    #[test]
+    fn compd_binding_resolution_rejects_missing_target_and_role_mismatch() {
+        let mut profile = DesktopProfile {
+            id: "demo".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            summary: "demo".into(),
+            degraded_profile_id: None,
+            broker_services: vec![ServiceRole::Compd],
+            session_components: Vec::new(),
+            service_component_bindings: vec![waybroker_common::ServiceComponentBinding {
+                service: ServiceRole::Compd,
+                component_id: "ghost".into(),
+            }],
+            service_recovery_execution_policies: Vec::new(),
+        };
+        let missing = resolve_service_component_binding(Some(&profile), ServiceRole::Compd);
+        assert_eq!(missing.result, "missing-target");
+
+        profile.session_components.push(DesktopComponent {
+            id: "ghost".into(),
+            role: DesktopComponentRole::Panel,
+            command: vec!["panel".into()],
+            critical: false,
+            launcher: waybroker_common::DesktopLauncher::System,
+        });
+        let mismatch = resolve_service_component_binding(Some(&profile), ServiceRole::Compd);
+        assert_eq!(mismatch.result, "role-mismatch");
+    }
+
+    #[test]
+    fn session_command_sources_are_role_scoped() {
+        let report = SessionWatchdogReport {
+            profile_id: "demo".into(),
+            session_instance_id: "session-a".into(),
+            display_name: "Demo".into(),
+            protocol: DesktopProtocol::LayerX11,
+            healthy_components: 0,
+            unhealthy_components: 0,
+            inactive_components: 0,
+            components: Vec::new(),
+            unix_timestamp: 0,
+        };
+        assert!(session_command_source_authorized(
+            ServiceRole::Watchdog,
+            &waybroker_common::SessionCommand::ApplyWatchdogReport { report: report.clone() },
+        ));
+        assert!(!session_command_source_authorized(
+            ServiceRole::Compd,
+            &waybroker_common::SessionCommand::ApplyWatchdogReport { report },
+        ));
+        assert!(session_command_source_authorized(
+            ServiceRole::Waylandd,
+            &waybroker_common::SessionCommand::InhibitIdle { reason: "video".into() },
+        ));
+        assert!(!session_command_source_authorized(
+            ServiceRole::Compd,
+            &waybroker_common::SessionCommand::InhibitIdle { reason: "video".into() },
+        ));
     }
 }
