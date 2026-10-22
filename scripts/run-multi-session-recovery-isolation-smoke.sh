@@ -82,12 +82,13 @@ else
   exit 1
 fi
 
-# 4. Verify Path Safety with evil ID
-echo "==> Testing path safety with unsafe ID..."
-python3 -c '
-import socket, json
+# 4. Verify invalid session IDs are rejected without artifact creation.
+echo "==> Testing rejection of unsafe session ID..."
+response="$(python3 -c '
+import json, socket, sys
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect("'"$WAYBROKER_RUNTIME_DIR"'/watchdog.sock")
+s.settimeout(3)
+s.connect(sys.argv[1])
 msg = {
     "source": "sessiond",
     "destination": "watchdog",
@@ -102,28 +103,22 @@ msg = {
     }
 }
 s.sendall(json.dumps(msg).encode() + b"\n")
-# Wait for response to avoid breaking pipe on watchdog side
-s.recv(1024)
-s.close()
-'
+data = b""
+while b"\n" not in data:
+    data += s.recv(65536)
+print(json.loads(data.split(b"\n", 1)[0])["kind"]["payload"]["op"])
+' "$WAYBROKER_RUNTIME_DIR/watchdog.sock")"
+[[ "$response" == "escalate" ]]
 
 sleep 0.5
 
-# Expect the ID to be sanitized to ".._evil"
 artifact_sanitized="$WAYBROKER_RUNTIME_DIR/session-.._evil-watchdog-recovery-compd.json"
-
-if [[ -f "$artifact_sanitized" ]]; then
-  echo "PASS: Sanitized artifact found: $artifact_sanitized"
-else
-  echo "FAIL: Sanitized artifact MISSING. Expected path-safe file."
+if [[ -e "$artifact_sanitized" || -e "$WAYBROKER_RUNTIME_DIR/session-../evil-watchdog-recovery-compd.json" ]]; then
+  echo "FAIL: unsafe session ID created an artifact"
   exit 1
 fi
-
-# Verify no directory traversal occurred
-if ls "$WAYBROKER_RUNTIME_DIR"/session-*-../evil-watchdog-recovery-compd.json > /dev/null 2>&1; then
-  echo "FAIL: Directory traversal detected!"
-  exit 1
-fi
+kill -0 "$watchdog_pid"
+[[ -f "$artifact_alpha" ]]
 
 echo "==> MULTI-SESSION RECOVERY ISOLATION SMOKE TEST PASSED"
 
