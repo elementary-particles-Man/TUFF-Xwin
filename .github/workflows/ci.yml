@@ -51,6 +51,8 @@ jobs:
         run: bash scripts/dev-check.sh
       - name: Integration Smoke Test
         run: ./scripts/run-integration-smoke.sh
+      - name: Displayd IPC Isolation Smoke Test
+        run: ./scripts/run-displayd-ipc-isolation-smoke.sh
       - name: Resume Scenarios Smoke Test
         run: ./scripts/run-resume-scenarios.sh
       - name: Watchdog Auto-Recovery Smoke Test

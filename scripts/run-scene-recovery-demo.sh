@@ -5,10 +5,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 runtime_dir="${WAYBROKER_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/waybroker-scene-recovery}"
+session_instance_id="scene-recovery-demo"
 displayd_socket="$runtime_dir/displayd.sock"
 waylandd_socket="$runtime_dir/waylandd.sock"
-snapshot_path="$runtime_dir/displayd-last-scene.json"
-wayland_registry_snapshot="$runtime_dir/waylandd-surface-registry.json"
+snapshot_path="$runtime_dir/session-${session_instance_id}-scene-snapshot.json"
+wayland_registry_snapshot="$runtime_dir/session-${session_instance_id}-surface-registry.json"
 target_dir="$(
   cargo metadata --format-version 1 --no-deps --quiet |
     python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
@@ -46,7 +47,7 @@ wait_for_socket() {
 }
 
 start_displayd() {
-  "$target_dir/displayd" > "$runtime_dir/displayd.log" 2>&1 &
+  "$target_dir/displayd" --session-instance-id "$session_instance_id" > "$runtime_dir/displayd.log" 2>&1 &
   displayd_pid=$!
 
   if ! wait_for_socket "$displayd_socket"; then
@@ -65,7 +66,7 @@ stop_displayd() {
 }
 
 start_waylandd() {
-  "$target_dir/waylandd" --serve-ipc --registry "$registry_path" > "$runtime_dir/waylandd.log" 2>&1 &
+  "$target_dir/waylandd" --serve-ipc --session-instance-id "$session_instance_id" --registry "$registry_path" > "$runtime_dir/waylandd.log" 2>&1 &
   waylandd_pid=$!
 
   if ! wait_for_socket "$waylandd_socket"; then
@@ -94,7 +95,7 @@ start_waylandd
 
 echo
 echo "==> cargo run -p compd -- --scene $scene_path --commit-demo --require-displayd"
-cargo run -p compd -- --scene "$scene_path" --commit-demo --require-displayd
+cargo run -p compd -- --session-instance-id "$session_instance_id" --scene "$scene_path" --commit-demo --require-displayd
 
 if [[ ! -f "$snapshot_path" ]]; then
   echo "scene snapshot was not written: $snapshot_path" >&2
@@ -109,7 +110,7 @@ start_displayd
 
 echo
 echo "==> cargo run -p compd -- --restore-from-displayd --reconcile-waylandd --handoff-selection --print-scene --require-displayd --require-waylandd"
-cargo run -p compd -- --restore-from-displayd --reconcile-waylandd --handoff-selection --print-scene --require-displayd --require-waylandd
+cargo run -p compd -- --session-instance-id "$session_instance_id" --restore-from-displayd --reconcile-waylandd --handoff-selection --print-scene --require-displayd --require-waylandd
 
 if [[ ! -f "$wayland_registry_snapshot" ]]; then
   echo "waylandd runtime registry was not written: $wayland_registry_snapshot" >&2

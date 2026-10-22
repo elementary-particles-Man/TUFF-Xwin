@@ -27,9 +27,9 @@ use waybroker_common::{
     PresentationCadence, PresentationCompletion, PresentationSchedulerState, PresentationToken,
     ScenePublicationResult, ServiceBanner, ServiceEndpoint, ServiceReadiness,
     ServiceReadinessState, ServiceRole, ServiceStream, accel::global_accel_policy,
-    bind_service_socket, ensure_runtime_dir, now_unix_timestamp, read_ipc_envelope,
-    sanitize_artifact_filename, send_ipc_envelope, session_artifact_path,
-    validate_artifact_filename,
+    bind_service_socket, ensure_runtime_dir, is_recoverable_accept_error, now_unix_timestamp,
+    read_ipc_envelope, sanitize_artifact_filename, send_ipc_envelope, session_artifact_path,
+    validate_artifact_filename, validate_session_instance_id,
 };
 
 const DEFAULT_SESSION_INSTANCE_ID: &str = "default-single-session";
@@ -49,7 +49,8 @@ const MAX_OUTPUT_FRAMEBUFFER_BYTES: usize = 512 * 1024 * 1024;
 const MAX_TOTAL_FRAMEBUFFER_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_HEADLESS_PENDING_SUBMISSIONS: usize = MAX_OUTPUTS;
 const MAX_SCENE_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
-const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const IPC_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const IPC_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_arch = "x86_64")]
 const SIMD_XRGB_MIN_PIXELS: usize = 64;
 
@@ -154,9 +155,16 @@ async fn main() -> Result<()> {
     println!("service=displayd op=listen event=socket_bound path={}", listener.endpoint());
 
     let mut served = 0usize;
-    for stream in listener.incoming() {
-        let stream = stream?;
-        handle_client(
+    loop {
+        let stream = match listener.accept() {
+            Ok((stream, _peer)) => stream,
+            Err(err) if is_recoverable_accept_error(&err) => {
+                eprintln!("service=displayd op=accept event=recoverable_error error={err}");
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        };
+        match handle_client(
             stream,
             &config,
             &mut state,
@@ -166,11 +174,17 @@ async fn main() -> Result<()> {
             &mut record_backend,
             display_backend.as_mut(),
         )
-        .await?;
-        served += 1;
-
-        if config.serve_once {
-            break;
+        .await
+        {
+            Ok(()) => {
+                served += 1;
+                if config.serve_once {
+                    break;
+                }
+            }
+            Err(err) => {
+                eprintln!("service=displayd op=client event=failed error={err:#}");
+            }
         }
     }
 
@@ -334,6 +348,10 @@ impl Config {
             bail!("--capture-backend fake only supports --capture-method stub");
         }
 
+        if !validate_session_instance_id(&config.session_instance_id) {
+            bail!("invalid --session-instance-id");
+        }
+
         Ok(config)
     }
 }
@@ -359,8 +377,8 @@ async fn handle_client(
     record_backend: &mut dyn RecordBackend,
     display_backend: &mut dyn DisplayBackend,
 ) -> Result<()> {
-    stream.set_read_timeout(Some(IPC_REQUEST_TIMEOUT))?;
-    stream.set_write_timeout(Some(IPC_REQUEST_TIMEOUT))?;
+    stream.set_read_timeout(Some(IPC_READ_TIMEOUT))?;
+    stream.set_write_timeout(Some(IPC_WRITE_TIMEOUT))?;
     apply_backend_output_events(state, display_backend)?;
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
@@ -1204,16 +1222,6 @@ async fn handle_display_command(
                 }
 
                 let commit_id = state.next_commit_id;
-                if scene_generation != 0 {
-                    if scene_epoch > state.last_scene_epoch {
-                        state.last_scene_epoch = scene_epoch;
-                        state.last_scene_generation = scene_generation;
-                    } else if scene_epoch == state.last_scene_epoch
-                        && scene_generation > state.last_scene_generation
-                    {
-                        state.last_scene_generation = scene_generation;
-                    }
-                }
                 let snapshot = CommittedSceneState {
                     source,
                     target: target.clone(),
@@ -3818,10 +3826,19 @@ impl DisplayState {
             scene.commit_id,
             temp_nonce
         ));
+        let mut temp_created = false;
         let write_result = (|| -> Result<()> {
-            let mut file = fs::File::create(&temp_path).with_context(|| {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temp_path).with_context(|| {
                 format!("failed to create temporary scene snapshot {}", temp_path.display())
             })?;
+            temp_created = true;
             file.write_all(&bytes).context("failed to write temporary scene snapshot")?;
             file.sync_all().context("failed to sync temporary scene snapshot")?;
             fs::rename(&temp_path, &self.snapshot_path).with_context(|| {
@@ -3832,7 +3849,7 @@ impl DisplayState {
             })?;
             Ok(())
         })();
-        if write_result.is_err() {
+        if write_result.is_err() && temp_created {
             let _ = fs::remove_file(&temp_path);
         }
         write_result?;
@@ -5755,6 +5772,35 @@ mod tests {
         let config = Config::from_args(args).unwrap();
         assert_eq!(config.capture_backend, CaptureBackendType::Fake);
         assert!(!config.allow_real_capture);
+        assert_eq!(config.session_instance_id, DEFAULT_SESSION_INSTANCE_ID);
+    }
+
+    #[test]
+    fn test_config_parser_accepts_valid_session_instance_id() {
+        let args = vec![
+            "displayd".to_string(),
+            "--session-instance-id".to_string(),
+            "session-a_1".to_string(),
+        ]
+        .into_iter()
+        .skip(1);
+        let config = Config::from_args(args).unwrap();
+        assert_eq!(config.session_instance_id, "session-a_1");
+    }
+
+    #[test]
+    fn test_config_parser_rejects_invalid_session_instance_id() {
+        for invalid in ["", "../evil", "bad/id", &"x".repeat(129)] {
+            let args = vec![
+                "displayd".to_string(),
+                "--session-instance-id".to_string(),
+                invalid.to_string(),
+            ]
+            .into_iter()
+            .skip(1);
+            let err = Config::from_args(args).unwrap_err();
+            assert!(err.to_string().contains("invalid --session-instance-id"));
+        }
     }
 
     #[test]
