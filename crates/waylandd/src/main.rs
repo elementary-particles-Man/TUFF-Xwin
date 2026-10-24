@@ -8,6 +8,7 @@ use std::{
 
 #[cfg(unix)]
 use std::os::unix::{
+    fs::PermissionsExt,
     io::AsRawFd,
     net::{UnixListener, UnixStream},
 };
@@ -78,6 +79,7 @@ const MAX_PENDING_WAYLAND_FDS: usize = 64;
 const MAX_WAYLAND_CLIENT_RECEIVE_BYTES: usize = wayland_wire::codec::MAX_WIRE_MESSAGE_BYTES + 4096;
 const SIMD_COPY_THRESHOLD: usize = 512;
 const IPC_SCENE_IO_TIMEOUT: Duration = Duration::from_secs(30);
+const IPC_CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SceneResourceUsage {
@@ -277,6 +279,7 @@ enum TopologyInput {
     },
 }
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+use tempfile::NamedTempFile;
 use vulkan_backend::{
     VulkanBackend, VulkanBackendConfig, VulkanBatchSubmission, VulkanWorkloadClass,
 };
@@ -288,8 +291,8 @@ use waybroker_common::{
     SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
     WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
     accel::global_accel_policy, bind_service_socket, connect_service_socket, ensure_runtime_dir,
-    now_unix_timestamp, read_ipc_envelope, send_ipc_display_command, send_ipc_envelope,
-    session_artifact_path,
+    is_recoverable_accept_error, now_unix_timestamp, read_ipc_envelope, send_ipc_display_command,
+    send_ipc_envelope, session_artifact_path, validate_session_instance_id,
 };
 
 fn run_wire_headless_test() -> Result<()> {
@@ -652,6 +655,9 @@ impl Config {
             }
         }
 
+        if !validate_session_instance_id(&config.session_instance_id) {
+            bail!("invalid --session-instance-id: {}", config.session_instance_id);
+        }
         Ok(config)
     }
 }
@@ -684,19 +690,16 @@ async fn serve_ipc(
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(stream) => stream,
+            Err(err) if is_recoverable_accept_error(&err) => {
+                println!("service=waylandd op=accept event=recoverable_error reason=\"{}\"", err);
+                continue;
+            }
             Err(err) => {
-                println!("service=waylandd op=accept event=failed reason=\"{}\"", err);
-                if err.kind() == std::io::ErrorKind::Interrupted
-                    || err.kind() == std::io::ErrorKind::WouldBlock
-                    || err.kind() == std::io::ErrorKind::ConnectionAborted
-                    || err.kind() == std::io::ErrorKind::ConnectionReset
-                {
-                    continue;
-                }
+                println!("service=waylandd op=accept event=fatal_error reason=\"{}\"", err);
                 return Err(err).context("waylandd IPC accept failed");
             }
         };
-        handle_client(
+        match handle_client(
             stream,
             registry,
             ime_state,
@@ -706,8 +709,17 @@ async fn serve_ipc(
             config,
             &config.session_instance_id,
         )
-        .await?;
-        served += 1;
+        .await
+        {
+            Ok(()) => served += 1,
+            Err(ClientHandlingError::Client(err)) => {
+                println!("service=waylandd op=client event=local_failure reason=\"{}\"", err);
+                continue;
+            }
+            Err(ClientHandlingError::Internal(err)) => {
+                return Err(err).context("waylandd IPC internal state failure");
+            }
+        }
 
         if config.serve_once {
             break;
@@ -716,6 +728,11 @@ async fn serve_ipc(
 
     println!("service=waylandd op=terminate event=finished served_requests={served}");
     Ok(())
+}
+
+enum ClientHandlingError {
+    Client(anyhow::Error),
+    Internal(anyhow::Error),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -728,30 +745,46 @@ async fn handle_client(
     vulkan: Option<&VulkanBackend>,
     config: &Config,
     session_instance_id: &str,
-) -> Result<()> {
-    stream.set_read_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
+) -> std::result::Result<(), ClientHandlingError> {
+    stream
+        .set_read_timeout(Some(IPC_CLIENT_READ_TIMEOUT))
+        .map_err(|err| ClientHandlingError::Client(err.into()))?;
+    stream
+        .set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))
+        .map_err(|err| ClientHandlingError::Client(err.into()))?;
     {
         if let Some(ref global) = *GLOBAL_REGISTRY.lock().unwrap() {
             *registry = global.clone();
         }
     }
     let request: IpcEnvelope = {
-        let mut reader = BufReader::new(stream.try_clone()?);
-        read_ipc_envelope(&mut reader)?
+        let mut reader = BufReader::new(
+            stream.try_clone().map_err(|err| ClientHandlingError::Client(err.into()))?,
+        );
+        read_ipc_envelope(&mut reader).map_err(ClientHandlingError::Client)?
     };
 
-    let (response, registry_changed) =
-        build_response(request, registry, ime_state, ime_backend, data_payloads, vulkan, config)
-            .await;
-    send_ipc_envelope(&mut stream, &response)?;
+    let mut candidate = registry.clone();
+    let (response, registry_changed) = build_response(
+        request,
+        &mut candidate,
+        ime_state,
+        ime_backend,
+        data_payloads,
+        vulkan,
+        config,
+    )
+    .await;
     if registry_changed {
+        write_surface_registry_artifact(&candidate, session_instance_id)
+            .map_err(ClientHandlingError::Internal)?;
+        *registry = candidate;
         {
             let mut global = GLOBAL_REGISTRY.lock().unwrap();
             *global = Some(registry.clone());
         }
-        write_surface_registry_artifact(registry, session_instance_id)?;
     }
+    send_ipc_envelope(&mut stream, &response).map_err(ClientHandlingError::Client)?;
     Ok(())
 }
 
@@ -1818,10 +1851,21 @@ fn write_surface_registry_artifact(
     registry: &SurfaceRegistrySnapshot,
     session_instance_id: &str,
 ) -> Result<PathBuf> {
-    let _ = ensure_runtime_dir()?;
+    let runtime = ensure_runtime_dir()?;
     let path = session_artifact_path(session_instance_id, "surface-registry");
-    fs::write(&path, serde_json::to_string_pretty(registry)?)
-        .with_context(|| format!("failed to write runtime surface registry {}", path.display()))?;
+    let mut temp = NamedTempFile::new_in(&runtime)
+        .with_context(|| format!("failed to create registry snapshot in {}", runtime.display()))?;
+    #[cfg(unix)]
+    temp.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
+    let json = serde_json::to_string_pretty(registry)?;
+    temp.write_all(json.as_bytes())?;
+    temp.as_file().sync_all()?;
+    if let Err(err) = temp.persist(&path) {
+        let _ = err.file;
+        return Err(err.error).with_context(|| {
+            format!("failed to atomically persist runtime surface registry {}", path.display())
+        });
+    }
     Ok(path)
 }
 
@@ -1927,8 +1971,21 @@ fn bind_single_wayland_display_socket_ext(
                                 log_path.display()
                             );
                             let client_path = log_path.clone();
-                            thread::spawn(move || {
-                                if let Err(err) = handle_production_client(stream, scene_epoch) {
+                            let permit = match ProductionClientPermit::acquire() {
+                                Ok(permit) => permit,
+                                Err(err) => {
+                                    eprintln!(
+                                        "service=waylandd op=wayland_display event=client_rejected reason={:?}",
+                                        err
+                                    );
+                                    drop(stream);
+                                    continue;
+                                }
+                            };
+                            let spawn_result = thread::Builder::new()
+                                .name("wayland-client".to_string())
+                                .spawn(move || {
+                                if let Err(err) = handle_production_client(stream, scene_epoch, permit) {
                                     eprintln!(
                                         "service=waylandd op=wayland_display event=production_client_error path={} reason={:?}",
                                         client_path.display(),
@@ -1937,6 +1994,12 @@ fn bind_single_wayland_display_socket_ext(
 
 }
                             });
+                            if let Err(err) = spawn_result {
+                                eprintln!(
+                                    "service=waylandd op=wayland_display event=client_thread_spawn_failed reason={:?}",
+                                    err
+                                );
+                            }
                         } else {
                             println!(
                                 "service=waylandd op=wayland_display event=client_connected path={} info=\"connection accepted by diagnostic listener (no data read)\"",
@@ -1980,12 +2043,24 @@ struct ProductionClientPermit;
 
 impl ProductionClientPermit {
     fn acquire() -> Result<Self> {
-        let previous = ACTIVE_PRODUCTION_WAYLAND_CLIENTS.fetch_add(1, Ordering::AcqRel);
-        if previous >= MAX_PRODUCTION_WAYLAND_CLIENTS {
-            ACTIVE_PRODUCTION_WAYLAND_CLIENTS.fetch_sub(1, Ordering::AcqRel);
-            bail!("production Wayland client budget exhausted: {}", MAX_PRODUCTION_WAYLAND_CLIENTS);
+        let mut current = ACTIVE_PRODUCTION_WAYLAND_CLIENTS.load(Ordering::Acquire);
+        loop {
+            if current >= MAX_PRODUCTION_WAYLAND_CLIENTS {
+                bail!(
+                    "production Wayland client budget exhausted: {}",
+                    MAX_PRODUCTION_WAYLAND_CLIENTS
+                );
+            }
+            match ACTIVE_PRODUCTION_WAYLAND_CLIENTS.compare_exchange(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(Self),
+                Err(observed) => current = observed,
+            }
         }
-        Ok(Self)
     }
 }
 
@@ -2020,8 +2095,11 @@ impl Drop for SceneCommitPermit {
     }
 }
 
-fn handle_production_client(stream: UnixStream, scene_epoch: u64) -> Result<()> {
-    let _client_permit = ProductionClientPermit::acquire()?;
+fn handle_production_client(
+    stream: UnixStream,
+    scene_epoch: u64,
+    _client_permit: ProductionClientPermit,
+) -> Result<()> {
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let (command_sender, command_receiver) = sync_channel(64);
     let _command_guard = ClientCommandGuard { client_id };
@@ -3375,10 +3453,11 @@ impl Drop for WaylandDisplaySocket {
 #[cfg(test)]
 mod tests {
     use super::{
-        PendingFrameCallbacks, ResyncState, SNAPSHOT_RETRY_LIMIT, TOPOLOGY_DELTA_BUFFER_LIMIT,
-        TOPOLOGY_QUEUE_CAPACITY, handle_wayland_command, intersecting_output_ids,
-        mock_surface_registry, output_viewports, projection_diff_commands,
-        should_clear_pending_commit, should_store_pending_commit, socket_lock_is_stale,
+        Config, MAX_PRODUCTION_WAYLAND_CLIENTS, PendingFrameCallbacks, ProductionClientPermit,
+        ResyncState, SNAPSHOT_RETRY_LIMIT, TOPOLOGY_DELTA_BUFFER_LIMIT, TOPOLOGY_QUEUE_CAPACITY,
+        handle_wayland_command, intersecting_output_ids, mock_surface_registry, output_viewports,
+        projection_diff_commands, should_clear_pending_commit, should_store_pending_commit,
+        socket_lock_is_stale,
     };
     use std::collections::BTreeMap;
     use std::fs;
@@ -3414,6 +3493,50 @@ mod tests {
             name: "test-1".into(),
             description: "test".into(),
         }
+    }
+
+    #[test]
+    fn session_instance_id_validation_rejects_invalid_values_before_runtime_use() {
+        assert!(Config::from_args(std::iter::empty()).is_ok());
+        assert!(
+            Config::from_args(
+                vec!["--session-instance-id", "valid-session"].into_iter().map(String::from)
+            )
+            .is_ok()
+        );
+        for invalid in ["", "../escape", "a/b", ".", "..", "bad\\id"] {
+            assert!(
+                Config::from_args(
+                    vec!["--session-instance-id", invalid].into_iter().map(String::from)
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            Config::from_args(
+                vec!["--session-instance-id".to_string(), "x".repeat(129)].into_iter()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn production_client_permit_is_bounded_and_reusable() {
+        let permits = (0..MAX_PRODUCTION_WAYLAND_CLIENTS)
+            .map(|_| ProductionClientPermit::acquire().expect("permit below bound"))
+            .collect::<Vec<_>>();
+        assert!(ProductionClientPermit::acquire().is_err());
+        drop(permits);
+        let permit = ProductionClientPermit::acquire().expect("permit reusable");
+        assert_eq!(
+            super::ACTIVE_PRODUCTION_WAYLAND_CLIENTS.load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        drop(permit);
+        assert_eq!(
+            super::ACTIVE_PRODUCTION_WAYLAND_CLIENTS.load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
     }
 
     #[test]
