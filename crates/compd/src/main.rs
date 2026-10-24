@@ -26,6 +26,7 @@ const MAX_RELAY_PIXEL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_RELAY_SINGLE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 const DISPLAY_RECONNECT_RETRY_LIMIT: u8 = 3;
 const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const IPC_CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RelayResourceUsage {
@@ -705,8 +706,15 @@ fn serve_ipc(config: &Config) -> Result<()> {
                 return Err(err).context("compd IPC accept failed");
             }
         };
-        handle_client(stream, config, &mut relay_state)?;
-        served += 1;
+        match handle_client(stream, config, &mut relay_state) {
+            Ok(()) => {
+                served += 1;
+            }
+            Err(err) => {
+                println!("service=compd op=client event=local_failure reason=\"{}\"", err);
+                continue;
+            }
+        }
 
         if config.serve_once {
             break;
@@ -739,7 +747,7 @@ fn handle_client(
     config: &Config,
     relay_state: &mut CompdRelayState,
 ) -> Result<()> {
-    stream.set_read_timeout(Some(IPC_REQUEST_TIMEOUT))?;
+    stream.set_read_timeout(Some(IPC_CLIENT_READ_TIMEOUT))?;
     stream.set_write_timeout(Some(IPC_REQUEST_TIMEOUT))?;
     let request: IpcEnvelope = {
         let mut reader = BufReader::new(stream.try_clone()?);
@@ -789,7 +797,9 @@ fn build_response(
                 })
             }
         }
-        MessageKind::LockCommand(waybroker_common::LockCommand::SetLockState { state }) => {
+        MessageKind::LockCommand(waybroker_common::LockCommand::SetLockState { state })
+            if request.destination == ServiceRole::Compd =>
+        {
             println!("service=compd op=lock_state_hint event=success state={:?}", state);
             MessageKind::LockCommand(waybroker_common::LockCommand::SetLockState { state })
         }
@@ -1672,14 +1682,17 @@ fn is_focusable_role(role: &WaylandSurfaceRole) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
-        CompdScene, apply_role_based_layout, mock_demo_scene, reconcile_scene_with_registry,
+        CompdRelayState, CompdScene, Config, IPC_CLIENT_READ_TIMEOUT, IPC_REQUEST_TIMEOUT,
+        apply_role_based_layout, build_response, mock_demo_scene, reconcile_scene_with_registry,
         scene_from_snapshot,
     };
     use waybroker_common::{
-        CommitTarget, CommittedSceneState, FocusTarget, ServiceRole, SurfacePlacement,
-        SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandSelectionState, WaylandSurfaceRole,
-        WaylandSurfaceState,
+        CommitTarget, CommittedSceneState, FocusTarget, IpcEnvelope, LockCommand, LockState,
+        MessageKind, ServiceRole, SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot,
+        WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
     };
 
     #[test]
@@ -1688,6 +1701,41 @@ mod tests {
         assert_eq!(scene.target_output, "eDP-1");
         assert_eq!(scene.focus, FocusTarget::Surface { id: "konsole-1".into() });
         assert_eq!(scene.surfaces.len(), 2);
+    }
+
+    #[test]
+    fn lock_command_with_wrong_destination_is_degraded() {
+        let request = IpcEnvelope::new(
+            ServiceRole::Lockd,
+            ServiceRole::Displayd,
+            MessageKind::LockCommand(LockCommand::SetLockState { state: LockState::Locked }),
+        );
+        let response = build_response(request, &Config::default(), &mut CompdRelayState::default());
+        assert!(matches!(
+            response.kind,
+            MessageKind::SessionCommand(waybroker_common::SessionCommand::DegradedMode { .. })
+        ));
+    }
+
+    #[test]
+    fn lock_command_for_compd_preserves_lock_state_hint() {
+        let request = IpcEnvelope::new(
+            ServiceRole::Lockd,
+            ServiceRole::Compd,
+            MessageKind::LockCommand(LockCommand::SetLockState { state: LockState::Locked }),
+        );
+        let response = build_response(request, &Config::default(), &mut CompdRelayState::default());
+        assert_eq!(
+            response.kind,
+            MessageKind::LockCommand(LockCommand::SetLockState { state: LockState::Locked })
+        );
+    }
+
+    #[test]
+    fn client_and_outbound_ipc_timeouts_are_separate() {
+        assert_eq!(IPC_CLIENT_READ_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(IPC_REQUEST_TIMEOUT, Duration::from_secs(30));
+        assert_ne!(IPC_CLIENT_READ_TIMEOUT, IPC_REQUEST_TIMEOUT);
     }
 
     #[test]
