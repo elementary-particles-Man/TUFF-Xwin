@@ -53,6 +53,8 @@ jobs:
         run: ./scripts/run-integration-smoke.sh
       - name: Displayd IPC Isolation Smoke Test
         run: ./scripts/run-displayd-ipc-isolation-smoke.sh
+      - name: Compd IPC Isolation Smoke Test
+        run: bash scripts/run-compd-ipc-isolation-smoke.sh
       - name: Resume Scenarios Smoke Test
         run: ./scripts/run-resume-scenarios.sh
       - name: Watchdog Auto-Recovery Smoke Test
