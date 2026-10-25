@@ -80,6 +80,8 @@ const MAX_WAYLAND_CLIENT_RECEIVE_BYTES: usize = wayland_wire::codec::MAX_WIRE_ME
 const SIMD_COPY_THRESHOLD: usize = 512;
 const IPC_SCENE_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const IPC_CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const TOPOLOGY_RECONNECT_INITIAL: Duration = Duration::from_millis(250);
+const TOPOLOGY_RECONNECT_MAX: Duration = Duration::from_millis(2000);
 const SCENE_RETRY_INITIAL: Duration = Duration::from_millis(250);
 const SCENE_RETRY_MAX: Duration = Duration::from_millis(2000);
 const WAYLAND_CLIENT_POLL_TIMEOUT_MS: i32 = 100;
@@ -275,6 +277,14 @@ enum ResyncReason {
 #[allow(clippy::large_enum_variant)]
 enum TopologyInput {
     Event(DisplayEvent),
+    SubscriptionSnapshot {
+        epoch: u64,
+        sequence: u64,
+        outputs: Vec<OutputTopologyEntry>,
+    },
+    SubscriptionLost {
+        reason: String,
+    },
     Overflow,
     SnapshotResult {
         resync_generation: u64,
@@ -1325,6 +1335,8 @@ fn validate_output_snapshot(outputs: &[OutputTopologyEntry]) -> Result<()> {
 
 fn start_topology_subscription() -> Result<()> {
     let mut stream = connect_service_socket(ServiceRole::Displayd)?;
+    stream.set_read_timeout(Some(IPC_CLIENT_READ_TIMEOUT))?;
+    stream.set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
     let request = IpcEnvelope::new(
         ServiceRole::Waylandd,
         ServiceRole::Displayd,
@@ -1333,12 +1345,17 @@ fn start_topology_subscription() -> Result<()> {
     send_ipc_envelope(&mut stream, &request)?;
     let mut reader = BufReader::new(stream);
     let response: IpcEnvelope = read_ipc_envelope(&mut reader)?;
+    if response.source != ServiceRole::Displayd || response.destination != ServiceRole::Waylandd {
+        bail!("invalid displayd reconciliation envelope");
+    }
     let epoch = match response.kind {
         MessageKind::DisplayEvent(DisplayEvent::Reconciliation { epoch, .. }) => epoch,
         other => bail!("unexpected displayd reconciliation response: {other:?}"),
     };
     drop(reader);
     let mut stream = connect_service_socket(ServiceRole::Displayd)?;
+    stream.set_read_timeout(Some(IPC_CLIENT_READ_TIMEOUT))?;
+    stream.set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
     let request = IpcEnvelope::new(
         ServiceRole::Waylandd,
         ServiceRole::Displayd,
@@ -1350,28 +1367,125 @@ fn start_topology_subscription() -> Result<()> {
     let (sender, receiver): (SyncSender<TopologyInput>, Receiver<TopologyInput>) =
         sync_channel(TOPOLOGY_QUEUE_CAPACITY + 1);
     let initial: IpcEnvelope = read_ipc_envelope(&mut reader)?;
-    if let MessageKind::DisplayEvent(event) = initial.kind {
+    if initial.source != ServiceRole::Displayd || initial.destination != ServiceRole::Waylandd {
+        bail!("invalid displayd topology envelope");
+    }
+    if let MessageKind::DisplayEvent(DisplayEvent::OutputTopology { epoch, sequence, outputs }) =
+        initial.kind
+    {
+        validate_output_snapshot(&outputs)?;
         sender
-            .try_send(TopologyInput::Event(event))
+            .try_send(TopologyInput::SubscriptionSnapshot { epoch, sequence, outputs })
             .map_err(|_| anyhow::anyhow!("topology receiver overflow"))?;
     } else {
-        bail!("invalid topology subscription response");
+        bail!("invalid topology subscription snapshot");
     }
     *TOPOLOGY_SENDER.lock().unwrap() = Some(sender.clone());
     *TOPOLOGY_RECEIVER.lock().unwrap() = Some(receiver);
     std::thread::spawn(move || {
-        while let Ok(message) = read_ipc_envelope(&mut reader) {
-            let event = match message.kind {
-                MessageKind::DisplayEvent(event) => event,
-                _ => break,
-            };
-            if sender.try_send(TopologyInput::Event(event)).is_err() {
-                let _ = sender.try_send(TopologyInput::Overflow);
-                break;
+        let mut backoff = TOPOLOGY_RECONNECT_INITIAL;
+        loop {
+            match read_ipc_envelope(&mut reader) {
+                Ok(message) => {
+                    if message.source != ServiceRole::Displayd
+                        || message.destination != ServiceRole::Waylandd
+                    {
+                        eprintln!("service=waylandd op=topology event=invalid_envelope");
+                        continue;
+                    }
+                    let event = match message.kind {
+                        MessageKind::DisplayEvent(event) => event,
+                        _ => continue,
+                    };
+                    if sender.try_send(TopologyInput::Event(event)).is_err() {
+                        let _ = sender.try_send(TopologyInput::Overflow);
+                        break;
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "service=waylandd op=topology event=subscription_lost reason={} retry_ms={}",
+                        error,
+                        backoff.as_millis()
+                    );
+                    let _ = sender
+                        .try_send(TopologyInput::SubscriptionLost { reason: error.to_string() });
+                    std::thread::sleep(backoff);
+                    match reconnect_topology_subscription() {
+                        Ok((new_reader, epoch, sequence, outputs)) => {
+                            reader = new_reader;
+                            if sender
+                                .try_send(TopologyInput::SubscriptionSnapshot {
+                                    epoch,
+                                    sequence,
+                                    outputs,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                            backoff = TOPOLOGY_RECONNECT_INITIAL;
+                        }
+                        Err(reconnect_error) => {
+                            eprintln!(
+                                "service=waylandd op=topology event=reconnect_failed reason={} retry_ms={}",
+                                reconnect_error,
+                                backoff.as_millis()
+                            );
+                            backoff = next_topology_reconnect_backoff(backoff);
+                        }
+                    }
+                }
             }
         }
     });
     Ok(())
+}
+
+fn next_topology_reconnect_backoff(current: Duration) -> Duration {
+    std::cmp::min(current.saturating_mul(2), TOPOLOGY_RECONNECT_MAX)
+}
+
+fn reconnect_topology_subscription()
+-> Result<(BufReader<waybroker_common::ServiceStream>, u64, u64, Vec<OutputTopologyEntry>)> {
+    let mut reconciliation = connect_service_socket(ServiceRole::Displayd)?;
+    reconciliation.set_read_timeout(Some(IPC_CLIENT_READ_TIMEOUT))?;
+    reconciliation.set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Waylandd,
+        ServiceRole::Displayd,
+        MessageKind::DisplayCommand(DisplayCommand::GetReconciliation),
+    );
+    send_ipc_envelope(&mut reconciliation, &request)?;
+    let response = read_ipc_envelope(&mut BufReader::new(reconciliation))?;
+    if response.source != ServiceRole::Displayd || response.destination != ServiceRole::Waylandd {
+        bail!("invalid displayd reconciliation envelope during reconnect");
+    }
+    let epoch = match response.kind {
+        MessageKind::DisplayEvent(DisplayEvent::Reconciliation { epoch, .. }) => epoch,
+        other => bail!("unexpected displayd reconciliation response: {other:?}"),
+    };
+    let mut subscription = connect_service_socket(ServiceRole::Displayd)?;
+    subscription.set_read_timeout(Some(IPC_CLIENT_READ_TIMEOUT))?;
+    subscription.set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
+    let request = IpcEnvelope::new(
+        ServiceRole::Waylandd,
+        ServiceRole::Displayd,
+        MessageKind::DisplayCommand(DisplayCommand::SubscribeOutputTopology { epoch, sequence: 0 }),
+    );
+    send_ipc_envelope(&mut subscription, &request)?;
+    let mut reader = BufReader::new(subscription);
+    let response = read_ipc_envelope(&mut reader)?;
+    if response.source != ServiceRole::Displayd || response.destination != ServiceRole::Waylandd {
+        bail!("invalid displayd topology envelope during reconnect");
+    }
+    match response.kind {
+        MessageKind::DisplayEvent(DisplayEvent::OutputTopology { epoch, sequence, outputs }) => {
+            validate_output_snapshot(&outputs)?;
+            Ok((reader, epoch, sequence, outputs))
+        }
+        other => bail!("unexpected displayd topology response during reconnect: {other:?}"),
+    }
 }
 
 #[allow(unused_assignments)]
@@ -1455,6 +1569,30 @@ fn start_topology_supervisor_loop<F>(
             }
 
             match input {
+                TopologyInput::SubscriptionLost { reason } => {
+                    eprintln!(
+                        "service=waylandd op=topology event=reconnect_pending reason={reason}"
+                    );
+                    state = ResyncState::SnapshotPending;
+                    buffered_deltas.clear();
+                    resync_gen = resync_gen.saturating_add(1);
+                    pending_reason = Some(ResyncReason::Reset);
+                }
+                TopologyInput::SubscriptionSnapshot { epoch, sequence, outputs } => {
+                    if validate_output_snapshot(&outputs).is_err() {
+                        eprintln!("service=waylandd op=topology event=invalid_snapshot");
+                        continue;
+                    }
+                    if apply_authoritative_topology_snapshot(epoch, sequence, outputs) {
+                        buffered_deltas.clear();
+                        state = ResyncState::Streaming;
+                        pending_reason = None;
+                        eprintln!(
+                            "service=waylandd op=topology event=reconnected epoch={} sequence={}",
+                            epoch, sequence
+                        );
+                    }
+                }
                 TopologyInput::Overflow => {
                     state = ResyncState::Failed;
                     break;
@@ -1533,8 +1671,16 @@ fn start_topology_supervisor_loop<F>(
                                 pending_reason = None;
                             }
                         }
-                        Err(_) => {
-                            state = ResyncState::Failed;
+                        Err(error) => {
+                            eprintln!(
+                                "service=waylandd op=topology event=snapshot_retry_failed reason={error}"
+                            );
+                            // Keep the last valid projection and continue consuming the
+                            // subscription. A later delta or authoritative reconnect snapshot
+                            // will drive the next bounded resynchronization attempt.
+                            buffered_deltas.clear();
+                            state = ResyncState::Streaming;
+                            pending_reason = None;
                         }
                     }
                 }
@@ -1571,10 +1717,23 @@ fn start_topology_supervisor_loop<F>(
                                 continue;
                             }
                             let mut reg = TOPOLOGY_REGISTRY.0.lock().unwrap();
-                            if reg.epoch != 0 && next_epoch < reg.epoch {
+                            if reg.epoch == next_epoch && next_sequence < reg.sequence {
                                 continue;
                             }
-                            if next_sequence < reg.sequence {
+                            if next_epoch != reg.epoch {
+                                let previous = reg.projection.clone();
+                                let next = outputs
+                                    .into_iter()
+                                    .map(|output| (output.geometry.output_id.clone(), output))
+                                    .collect::<BTreeMap<_, _>>();
+                                let _ = apply_authoritative_topology_snapshot_locked(
+                                    &mut reg,
+                                    previous,
+                                    next,
+                                    next_epoch,
+                                    next_sequence,
+                                );
+                                TOPOLOGY_REGISTRY.1.notify_all();
                                 continue;
                             }
                             let next = outputs
@@ -1609,7 +1768,8 @@ fn start_topology_supervisor_loop<F>(
                         DisplayEvent::OutputTopologyDelta(delta) => {
                             let mut reg = TOPOLOGY_REGISTRY.0.lock().unwrap();
                             if delta.epoch != reg.epoch
-                                || delta.topology_sequence != reg.sequence.saturating_add(1)
+                                || delta.topology_sequence < reg.sequence
+                                || delta.topology_sequence > reg.sequence.saturating_add(1)
                             {
                                 let req_epoch = reg.epoch;
                                 let req_seq = reg.sequence;
@@ -1716,27 +1876,84 @@ fn apply_topology_delta(
     }
 }
 
+fn apply_authoritative_topology_snapshot(
+    epoch: u64,
+    sequence: u64,
+    outputs: Vec<OutputTopologyEntry>,
+) -> bool {
+    let mut reg = TOPOLOGY_REGISTRY.0.lock().unwrap();
+    let previous = reg.projection.clone();
+    let next = outputs
+        .into_iter()
+        .map(|output| (output.geometry.output_id.clone(), output))
+        .collect::<BTreeMap<_, _>>();
+    let applied =
+        apply_authoritative_topology_snapshot_locked(&mut reg, previous, next, epoch, sequence);
+    if applied {
+        TOPOLOGY_REGISTRY.1.notify_all();
+    }
+    applied
+}
+
+fn apply_authoritative_topology_snapshot_locked(
+    reg: &mut TopologyRegistry,
+    previous: BTreeMap<String, OutputTopologyEntry>,
+    next: BTreeMap<String, OutputTopologyEntry>,
+    epoch: u64,
+    sequence: u64,
+) -> bool {
+    if epoch == reg.epoch && sequence < reg.sequence {
+        return false;
+    }
+    let epoch_changed = epoch != reg.epoch;
+    reg.projection = next.clone();
+    reg.epoch = epoch;
+    reg.sequence = sequence;
+    if epoch_changed {
+        broadcast_client_command(ClientCommand::TopologyReset { epoch, sequence }, reg);
+        for (output_id, old) in &previous {
+            broadcast_client_command(
+                ClientCommand::RemoveGlobal {
+                    epoch,
+                    sequence,
+                    output_id: output_id.clone(),
+                    output_generation: old.geometry.output_generation,
+                },
+                reg,
+            );
+        }
+        for output in next.values() {
+            broadcast_client_command(
+                ClientCommand::AddGlobal { epoch, sequence, output: output.clone() },
+                reg,
+            );
+        }
+    } else {
+        for command in projection_diff_commands(&previous, &next, epoch, sequence) {
+            broadcast_client_command(command, reg);
+        }
+    }
+    broadcast_client_command(ClientCommand::RecalculateMembership { epoch, sequence }, reg);
+    true
+}
+
 fn replay_buffered_deltas(
     buffered: &mut VecDeque<OutputTopologyDelta>,
     reg: &mut TopologyRegistry,
 ) {
     let mut queued = buffered.drain(..).collect::<Vec<_>>();
     queued.sort_by_key(|delta| delta.topology_sequence);
-    let mut last_sequence = None;
     for delta in queued {
-        if delta.epoch != reg.epoch || delta.topology_sequence <= reg.sequence {
+        if delta.epoch != reg.epoch || delta.topology_sequence < reg.sequence {
             continue;
         }
-        if last_sequence == Some(delta.topology_sequence)
-            || delta.topology_sequence != reg.sequence.saturating_add(1)
-        {
+        if delta.topology_sequence > reg.sequence.saturating_add(1) {
             continue;
         }
         let Some(command) = apply_topology_delta(&mut reg.projection, &delta) else {
             continue;
         };
         reg.sequence = delta.topology_sequence;
-        last_sequence = Some(reg.sequence);
         broadcast_client_command(command, reg);
         broadcast_client_command(
             ClientCommand::RecalculateMembership { epoch: reg.epoch, sequence: reg.sequence },
@@ -2331,9 +2548,6 @@ fn apply_client_command(
     }
     if command_sequence < *sequence {
         bail!("client topology command sequence moved backwards");
-    }
-    if command_sequence == *sequence && command_epoch != 0 {
-        return Ok(false);
     }
     *epoch = command_epoch;
     *sequence = command_sequence;
@@ -3631,9 +3845,9 @@ mod tests {
     use super::{
         Config, MAX_PRODUCTION_WAYLAND_CLIENTS, PendingFrameCallbacks, ProductionClientPermit,
         ResyncState, SNAPSHOT_RETRY_LIMIT, TOPOLOGY_DELTA_BUFFER_LIMIT, TOPOLOGY_QUEUE_CAPACITY,
-        handle_wayland_command, intersecting_output_ids, mock_surface_registry, output_viewports,
-        projection_diff_commands, should_clear_pending_commit, should_store_pending_commit,
-        socket_lock_is_stale,
+        handle_wayland_command, intersecting_output_ids, mock_surface_registry,
+        next_topology_reconnect_backoff, output_viewports, projection_diff_commands,
+        should_clear_pending_commit, should_store_pending_commit, socket_lock_is_stale,
     };
     use std::collections::BTreeMap;
     use std::fs;
@@ -3713,6 +3927,19 @@ mod tests {
             super::ACTIVE_PRODUCTION_WAYLAND_CLIENTS.load(std::sync::atomic::Ordering::Acquire),
             0
         );
+    }
+
+    #[test]
+    fn topology_reconnect_backoff_is_250_to_2000_ms_and_bounded() {
+        let mut delay = Duration::from_millis(250);
+        assert_eq!(delay, Duration::from_millis(250));
+        delay = next_topology_reconnect_backoff(delay);
+        assert_eq!(delay, Duration::from_millis(500));
+        delay = next_topology_reconnect_backoff(delay);
+        assert_eq!(delay, Duration::from_millis(1000));
+        delay = next_topology_reconnect_backoff(delay);
+        assert_eq!(delay, Duration::from_millis(2000));
+        assert_eq!(next_topology_reconnect_backoff(delay), delay);
     }
 
     #[test]
