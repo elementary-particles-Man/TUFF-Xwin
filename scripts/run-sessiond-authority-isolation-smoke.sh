@@ -74,6 +74,57 @@ wait_for_absence() {
   done
 }
 
+wait_for_managed_authority() {
+  local minimum_generation=$1
+  local log_path=$2
+  python3 - "$authority_state" "$launch_state" "$sessiond_pid" "$minimum_generation" "$log_path" <<'PY'
+import json
+import os
+import sys
+import time
+
+authority_path, launch_path, pid_text, minimum_text, log_path = sys.argv[1:]
+pid = int(pid_text)
+minimum_generation = int(minimum_text)
+deadline = time.monotonic() + 10.0
+observed = "unavailable"
+while time.monotonic() < deadline:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        print(f"FAILED: sessiond PID {pid} exited; observed {observed}", file=sys.stderr)
+        print(f"sessiond log: {log_path}", file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        with open(authority_path, encoding="utf-8") as handle:
+            authority = json.load(handle)
+        with open(launch_path, encoding="utf-8") as handle:
+            launch = json.load(handle)
+        authority_generation = authority["stream_generation"]
+        launch_generation = launch["generation"]
+        sequence = authority["stream_sequence"]
+        observed = (
+            f"authority_generation={authority_generation} "
+            f"launch_generation={launch_generation} sequence={sequence}"
+        )
+        if (
+            authority_generation > minimum_generation
+            and launch_generation == authority_generation
+            and sequence == 1
+        ):
+            echo = print
+            echo(observed)
+            raise SystemExit(0)
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    time.sleep(0.05)
+
+print(f"FAILED: authority state timeout; observed {observed}", file=sys.stderr)
+print(f"sessiond log: {log_path}", file=sys.stderr)
+raise SystemExit(1)
+PY
+}
+
 json_field() {
   local path=$1
   local field=$2
@@ -143,6 +194,7 @@ PY
 
 start_managed_sessiond() {
   local log_path=$1
+  local minimum_generation=$2
   cleanup
   "$target_dir/sessiond" \
     --serve-ipc \
@@ -151,6 +203,11 @@ start_managed_sessiond() {
     > "$log_path" 2>&1 &
   sessiond_pid=$!
   wait_for_socket "$WAYBROKER_RUNTIME_DIR/sessiond.sock" 5
+  if ! wait_for_managed_authority "$minimum_generation" "$log_path"; then
+    echo "---- sessiond log: $log_path ----" >&2
+    tail -n 80 "$log_path" >&2 || true
+    return 1
+  fi
 }
 
 stop_managed_sessiond() {
@@ -184,11 +241,8 @@ wait_for_file "$authority_state" 5
 [[ "$(json_field "$authority_state" stream_generation)" == "1" ]]
 
 echo "==> Starting managed sessiond"
-start_managed_sessiond "$WAYBROKER_RUNTIME_DIR/sessiond-first.log"
-wait_for_file "$authority_state" 5
+start_managed_sessiond "$WAYBROKER_RUNTIME_DIR/sessiond-first.log" 1
 first_generation="$(json_field "$authority_state" stream_generation)"
-[[ "$first_generation" -gt 1 ]]
-[[ "$(json_field "$launch_state" generation)" == "$first_generation" ]]
 [[ "$(json_field "$launch_state" session_instance_id)" == "$session_instance_id" ]]
 
 # A malformed client must not kill the daemon.
@@ -273,11 +327,8 @@ wait_for_absence "$recovery_artifact" 5
 # Restarting the authority for the same session must advance generation.
 echo "==> Restarting managed sessiond"
 stop_managed_sessiond
-start_managed_sessiond "$WAYBROKER_RUNTIME_DIR/sessiond-second.log"
+start_managed_sessiond "$WAYBROKER_RUNTIME_DIR/sessiond-second.log" "$first_generation"
 second_generation="$(json_field "$authority_state" stream_generation)"
-[[ "$second_generation" -gt "$first_generation" ]]
-[[ "$(json_field "$launch_state" generation)" == "$second_generation" ]]
-[[ "$(json_field "$authority_state" stream_sequence)" == "1" ]]
 
 # Corrupt durable authority must fail closed rather than restarting at generation 1.
 stop_managed_sessiond

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use waybroker_common::{FocusTarget, SurfacePlacement, SurfaceSnapshot, WaylandSelectionState};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,6 +12,80 @@ pub struct X11RootlessScene {
 }
 
 impl X11RootlessScene {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.output.name.is_empty() {
+            return Err("output name must not be empty".into());
+        }
+        if !(1..=16_384).contains(&self.output.width) || !(1..=16_384).contains(&self.output.height)
+        {
+            return Err("output dimensions must be between 1 and 16384".into());
+        }
+        let pixels = u64::from(self.output.width) * u64::from(self.output.height);
+        if pixels > 67_108_864 {
+            return Err("output pixel budget exceeded".into());
+        }
+        if self.windows.len() > 4096 {
+            return Err("window budget exceeded".into());
+        }
+
+        let mut ids = BTreeSet::new();
+        for window in &self.windows {
+            if window.id.is_empty() || !ids.insert(window.id.as_str()) {
+                return Err("window ids must be non-empty and unique".into());
+            }
+            if window.mapped {
+                if window.width == 0 || window.height == 0 {
+                    return Err(format!(
+                        "mapped window {} must have non-zero dimensions",
+                        window.id
+                    ));
+                }
+                let width = i32::try_from(window.width)
+                    .map_err(|_| format!("window {} width overflows i32", window.id))?;
+                let height = i32::try_from(window.height)
+                    .map_err(|_| format!("window {} height overflows i32", window.id))?;
+                window
+                    .x
+                    .checked_add(width)
+                    .ok_or_else(|| format!("window {} x coordinate overflows i32", window.id))?;
+                window
+                    .y
+                    .checked_add(height)
+                    .ok_or_else(|| format!("window {} y coordinate overflows i32", window.id))?;
+            }
+        }
+
+        for (label, owner, payload, serial) in [
+            (
+                "clipboard",
+                self.selection.clipboard_owner.as_deref(),
+                self.selection.clipboard_payload_id.as_ref(),
+                self.selection.clipboard_source_serial,
+            ),
+            (
+                "primary selection",
+                self.selection.primary_selection_owner.as_deref(),
+                self.selection.primary_selection_payload_id.as_ref(),
+                self.selection.primary_selection_source_serial,
+            ),
+        ] {
+            match owner {
+                Some(owner) => {
+                    let mapped =
+                        self.windows.iter().any(|window| window.mapped && window.id == owner);
+                    if !mapped {
+                        return Err(format!("{label} owner {owner} is not a mapped window"));
+                    }
+                }
+                None if payload.is_some() || serial.is_some() => {
+                    return Err(format!("{label} metadata requires an owner"));
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn mapped_windows(&self) -> impl Iterator<Item = &X11Window> {
         self.windows.iter().filter(|window| window.mapped)
     }
@@ -228,5 +303,40 @@ mod tests {
         assert!(dock_snap.placement.visible);
         assert_eq!(dock_snap.placement.width, 1920);
         assert_eq!(dock_snap.placement.height, 32);
+    }
+
+    #[test]
+    fn validates_sample_and_rejects_invalid_rootless_scenes() {
+        assert!(sample_rootless_scene().validate().is_ok());
+        let mut scene = sample_rootless_scene();
+        scene.output.name.clear();
+        assert!(scene.validate().is_err());
+        let mut scene = sample_rootless_scene();
+        scene.output.width = 16_385;
+        assert!(scene.validate().is_err());
+        let mut scene = sample_rootless_scene();
+        scene.windows[1].id = scene.windows[0].id.clone();
+        assert!(scene.validate().is_err());
+        let mut scene = sample_rootless_scene();
+        scene.windows[0].width = 0;
+        assert!(scene.validate().is_err());
+        let mut scene = sample_rootless_scene();
+        scene.windows[0].x = i32::MAX;
+        assert!(scene.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_dangling_and_orphaned_selection_metadata() {
+        let mut scene = sample_rootless_scene();
+        scene.selection.clipboard_owner = Some("ghost".into());
+        assert!(scene.validate().is_err());
+        let mut scene = sample_rootless_scene();
+        scene.selection.clipboard_owner = None;
+        assert!(scene.validate().is_err());
+        let mut scene = sample_rootless_scene();
+        scene.selection.primary_selection_owner = None;
+        scene.selection.primary_selection_payload_id = None;
+        scene.selection.primary_selection_source_serial = None;
+        assert!(scene.validate().is_ok());
     }
 }
