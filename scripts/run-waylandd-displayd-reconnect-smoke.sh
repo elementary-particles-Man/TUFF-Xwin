@@ -41,7 +41,7 @@ wait_for_log() {
   local pattern=$1
   local path=$2
   for _ in $(seq 1 240); do
-    [[ -f "$path" ]] && rg -q "$pattern" "$path" && return 0
+    [[ -f "$path" ]] && grep -Fq -- "$pattern" "$path" && return 0
     sleep 0.05
   done
   echo "timeout waiting for '$pattern' in $path" >&2
