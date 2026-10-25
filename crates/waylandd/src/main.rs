@@ -3,7 +3,7 @@ use std::{
     io::{BufReader, Read, Write},
     path::{Path, PathBuf},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
@@ -80,6 +80,9 @@ const MAX_WAYLAND_CLIENT_RECEIVE_BYTES: usize = wayland_wire::codec::MAX_WIRE_ME
 const SIMD_COPY_THRESHOLD: usize = 512;
 const IPC_SCENE_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const IPC_CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const SCENE_RETRY_INITIAL: Duration = Duration::from_millis(250);
+const SCENE_RETRY_MAX: Duration = Duration::from_millis(2000);
+const WAYLAND_CLIENT_POLL_TIMEOUT_MS: i32 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SceneResourceUsage {
@@ -2165,6 +2168,34 @@ fn handle_production_client(
                 }
             }
         }
+        if let Some((presented_generation, event)) =
+            retry_pending_canonical_scene(&outputs, scene_epoch)?
+        {
+            release_presented_callbacks(
+                &stream,
+                &mut pending_callbacks,
+                client_id,
+                presented_generation,
+                &event,
+                outputs.first().map(|output| output.name.as_str()).unwrap_or_default(),
+            )?;
+        }
+
+        let mut poll_fd = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let poll_result = unsafe { libc::poll(&mut poll_fd, 1, WAYLAND_CLIENT_POLL_TIMEOUT_MS) };
+        if poll_result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            bail!("Wayland client poll failed: {error}");
+        }
+        if poll_result == 0 {
+            continue;
+        }
+        if poll_fd.revents & libc::POLLNVAL != 0 || poll_fd.revents & libc::POLLERR != 0 {
+            bail!("Wayland client poll reported an invalid or failed socket");
+        }
         let (n, fds) = wayland_wire::fd::recv_with_fds(&stream, &mut read_buf)?;
         if n == 0 && fds.is_empty() {
             break;
@@ -2231,23 +2262,25 @@ fn handle_production_client(
                             )?;
                         }
 
-                        let _presented = commit_canonical_scene(&outputs, scene_epoch)?;
-                        let presented_output =
-                            outputs.first().map(|output| output.name.as_str()).unwrap_or_default();
-                        for callback_id in pending_callbacks.release_for_presented(
-                            client_id,
-                            scene_generation,
-                            presented_output,
-                        ) {
-                            let mut payload = vec![0u8; 4];
-                            byteorder::LittleEndian::write_u32(&mut payload, 0);
-                            let event = wayland_wire::WaylandMessage::new(
-                                wayland_wire::WaylandObjectId(callback_id),
-                                wayland_wire::WaylandOpcode(0),
-                                payload,
-                            );
-                            let mut s = &stream;
-                            s.write_all(&wayland_wire::codec::encode_message(&event)?)?;
+                        match commit_canonical_scene(&outputs, scene_epoch) {
+                            Ok(presentation) => {
+                                release_presented_callbacks(
+                                    &stream,
+                                    &mut pending_callbacks,
+                                    client_id,
+                                    scene_generation,
+                                    &presentation,
+                                    outputs
+                                        .first()
+                                        .map(|output| output.name.as_str())
+                                        .unwrap_or_default(),
+                                )?;
+                            }
+                            Err(CommitProductionSceneError::Recoverable(_)) => {
+                                // Keep the Wayland connection and callback alive while the
+                                // canonical scene waits for compd to return.
+                            }
+                            Err(CommitProductionSceneError::Fatal(error)) => return Err(error),
                         }
                     }
                     if !core.surfaces.surfaces.contains_key(&committed_surface) {
@@ -2482,13 +2515,16 @@ impl ClientRegistryGuard {
         remove_client_scene(self.client_id);
         invalidate_client_pixel_payloads(self.client_id);
         self.finalized = true;
-        commit_canonical_scene(&self.outputs, self.scene_epoch).map(|_| ()).map_err(|err| {
-            eprintln!(
-                "service=waylandd op=canonical_recommit event=failed client_id={} reason={:?}",
-                self.client_id, err
-            );
-            err
-        })
+        commit_canonical_scene(&self.outputs, self.scene_epoch)
+            .map(|_| ())
+            .map_err(|err| anyhow::anyhow!(err))
+            .map_err(|err| {
+                eprintln!(
+                    "service=waylandd op=canonical_recommit event=failed client_id={} reason={:?}",
+                    self.client_id, err
+                );
+                err
+            })
     }
 }
 
@@ -2696,13 +2732,28 @@ fn remove_client_scene(client_id: u64) {
     }
 }
 
-#[derive(Default)]
 struct CanonicalSceneState {
     generation: u64,
     clients: std::collections::BTreeMap<u64, Vec<SurfaceSnapshot>>,
     pending: Option<PendingCanonicalCommit>,
     last_presented_generation: u64,
     last_presentation: Option<DisplayEvent>,
+    retry_delay: Duration,
+    next_retry_at: Option<Instant>,
+}
+
+impl Default for CanonicalSceneState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            clients: BTreeMap::new(),
+            pending: None,
+            last_presented_generation: 0,
+            last_presentation: None,
+            retry_delay: SCENE_RETRY_INITIAL,
+            next_retry_at: None,
+        }
+    }
 }
 
 struct PendingCanonicalCommit {
@@ -2713,6 +2764,25 @@ struct PendingCanonicalCommit {
     reason: String,
 }
 
+#[derive(Debug)]
+enum CommitProductionSceneError {
+    Recoverable(anyhow::Error),
+    Fatal(anyhow::Error),
+}
+
+impl std::fmt::Display for CommitProductionSceneError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Recoverable(error) => {
+                write!(formatter, "recoverable scene transport failure: {error}")
+            }
+            Self::Fatal(error) => write!(formatter, "scene publication failure: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for CommitProductionSceneError {}
+
 fn coalesce_pending_commit(scene: &mut CanonicalSceneState, candidate: PendingCanonicalCommit) {
     let replace = scene
         .pending
@@ -2722,6 +2792,16 @@ fn coalesce_pending_commit(scene: &mut CanonicalSceneState, candidate: PendingCa
     if replace {
         scene.pending = Some(candidate);
     }
+}
+
+fn schedule_scene_retry(scene: &mut CanonicalSceneState) {
+    scene.next_retry_at = Some(Instant::now() + scene.retry_delay);
+    scene.retry_delay = std::cmp::min(scene.retry_delay.saturating_mul(2), SCENE_RETRY_MAX);
+}
+
+fn reset_scene_retry(scene: &mut CanonicalSceneState) {
+    scene.retry_delay = SCENE_RETRY_INITIAL;
+    scene.next_retry_at = None;
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -2750,7 +2830,10 @@ fn order_scene_surfaces(mut surfaces: Vec<SurfaceSnapshot>) -> Vec<SurfaceSnapsh
     surfaces
 }
 
-fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<DisplayEvent> {
+fn commit_canonical_scene(
+    outputs: &[OutputMode],
+    scene_epoch: u64,
+) -> std::result::Result<DisplayEvent, CommitProductionSceneError> {
     // Only one canonical scene publication owns a large transport snapshot at a
     // time. The permit is not a mutex guard and no mutex is held across IPC.
     let _commit_permit = SceneCommitPermit::acquire();
@@ -2793,7 +2876,8 @@ fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<Di
         (generation, surfaces, pixel_payloads)
     };
 
-    let usage = validate_scene_budget(&surfaces, &pixel_payloads)?;
+    let usage = validate_scene_budget(&surfaces, &pixel_payloads)
+        .map_err(CommitProductionSceneError::Fatal)?;
     if usage.pixel_payloads > 0 {
         println!(
             "service=waylandd op=scene_admission event=accepted generation={} surfaces={} payloads={} bytes={}",
@@ -2801,7 +2885,9 @@ fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<Di
         );
     }
 
-    match commit_production_scene(&surfaces, pixel_payloads, generation, scene_epoch, outputs) {
+    let publication_epoch = if generation == 0 { 0 } else { scene_epoch };
+    match commit_production_scene(&surfaces, pixel_payloads, generation, publication_epoch, outputs)
+    {
         Ok(event) => {
             let mut scene = CANONICAL_SCENE.lock().unwrap();
             if scene
@@ -2816,9 +2902,10 @@ fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<Di
                 scene.last_presented_generation = generation;
                 scene.last_presentation = Some(event.clone());
             }
+            reset_scene_retry(&mut scene);
             Ok(event)
         }
-        Err(err) => {
+        Err(err @ CommitProductionSceneError::Recoverable(_)) => {
             let mut scene = CANONICAL_SCENE.lock().unwrap();
             let current_generation = scene.generation;
             let current_pending_generation =
@@ -2839,9 +2926,54 @@ fn commit_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> Result<Di
                     },
                 );
             }
+            schedule_scene_retry(&mut scene);
             Err(err)
         }
+        Err(err @ CommitProductionSceneError::Fatal(_)) => Err(err),
     }
+}
+
+fn retry_pending_canonical_scene(
+    outputs: &[OutputMode],
+    scene_epoch: u64,
+) -> std::result::Result<Option<(u64, DisplayEvent)>, CommitProductionSceneError> {
+    let due = {
+        let scene = CANONICAL_SCENE.lock().unwrap();
+        scene.pending.is_some()
+            && scene.next_retry_at.map(|deadline| Instant::now() >= deadline).unwrap_or(false)
+    };
+    if !due {
+        return Ok(None);
+    }
+    let event = commit_canonical_scene(outputs, scene_epoch)?;
+    let generation = CANONICAL_SCENE.lock().unwrap().last_presented_generation;
+    Ok(Some((generation, event)))
+}
+
+fn release_presented_callbacks(
+    stream: &UnixStream,
+    pending_callbacks: &mut PendingFrameCallbacks,
+    client_id: u64,
+    scene_generation: u64,
+    presentation: &DisplayEvent,
+    output_id: &str,
+) -> Result<()> {
+    let DisplayEvent::FramePresented { .. } = presentation else {
+        return Ok(());
+    };
+    let generation = scene_generation;
+    for callback_id in pending_callbacks.release_for_presented(client_id, generation, output_id) {
+        let mut payload = vec![0u8; 4];
+        byteorder::LittleEndian::write_u32(&mut payload, 0);
+        let event = wayland_wire::WaylandMessage::new(
+            wayland_wire::WaylandObjectId(callback_id),
+            wayland_wire::WaylandOpcode(0),
+            payload,
+        );
+        let mut writer = stream;
+        writer.write_all(&wayland_wire::codec::encode_message(&event)?)?;
+    }
+    Ok(())
 }
 
 fn pending_replay_commit(
@@ -2925,13 +3057,20 @@ fn commit_production_scene(
     scene_generation: u64,
     scene_epoch: u64,
     outputs: &[OutputMode],
-) -> Result<DisplayEvent> {
-    validate_scene_budget(surfaces, &pixel_payloads)?;
-    let mut stream =
-        connect_service_socket(ServiceRole::Compd).context("production Wayland requires compd")?;
-    stream.set_read_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
-    let output = outputs.first().context("displayd returned no output")?;
+) -> std::result::Result<DisplayEvent, CommitProductionSceneError> {
+    validate_scene_budget(surfaces, &pixel_payloads).map_err(CommitProductionSceneError::Fatal)?;
+    let mut stream = connect_service_socket(ServiceRole::Compd)
+        .context("production Wayland requires compd")
+        .map_err(CommitProductionSceneError::Recoverable)?;
+    stream
+        .set_read_timeout(Some(IPC_SCENE_IO_TIMEOUT))
+        .map_err(|error| CommitProductionSceneError::Recoverable(error.into()))?;
+    stream
+        .set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))
+        .map_err(|error| CommitProductionSceneError::Recoverable(error.into()))?;
+    let output = outputs.first().ok_or_else(|| {
+        CommitProductionSceneError::Fatal(anyhow::anyhow!("displayd returned no output"))
+    })?;
     let command = DisplayCommand::CommitScene {
         target: CommitTarget::Output { name: output.name.clone() },
         focus: FocusTarget::None,
@@ -2941,28 +3080,65 @@ fn commit_production_scene(
         scene_epoch,
         scene_generation,
     };
-    send_ipc_display_command(&mut stream, ServiceRole::Waylandd, ServiceRole::Compd, &command)?;
+    send_ipc_display_command(&mut stream, ServiceRole::Waylandd, ServiceRole::Compd, &command)
+        .map_err(CommitProductionSceneError::Recoverable)?;
     let mut reader = BufReader::new(stream);
-    let response: IpcEnvelope = read_ipc_envelope(&mut reader)?;
+    let response: IpcEnvelope =
+        read_ipc_envelope(&mut reader).map_err(CommitProductionSceneError::Recoverable)?;
+    if response.source != ServiceRole::Compd || response.destination != ServiceRole::Waylandd {
+        return Err(CommitProductionSceneError::Fatal(anyhow::anyhow!(
+            "invalid compd response routing: {:?} -> {:?}",
+            response.source,
+            response.destination
+        )));
+    }
     let commit_id = match response.kind {
         MessageKind::DisplayEvent(DisplayEvent::SceneCommitted { commit_id, .. }) => commit_id,
-        other => bail!("scene commit failed before presentation: {other:?}"),
+        MessageKind::DisplayEvent(DisplayEvent::Rejected { reason }) => {
+            return Err(CommitProductionSceneError::Fatal(anyhow::anyhow!(
+                "scene commit rejected: {reason}"
+            )));
+        }
+        other => {
+            return Err(CommitProductionSceneError::Fatal(anyhow::anyhow!(
+                "scene commit failed before presentation: {other:?}"
+            )));
+        }
     };
 
-    let mut feedback_stream = connect_service_socket(ServiceRole::Compd)?;
-    feedback_stream.set_read_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
-    feedback_stream.set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))?;
+    let mut feedback_stream = connect_service_socket(ServiceRole::Compd)
+        .map_err(CommitProductionSceneError::Recoverable)?;
+    feedback_stream
+        .set_read_timeout(Some(IPC_SCENE_IO_TIMEOUT))
+        .map_err(|error| CommitProductionSceneError::Recoverable(error.into()))?;
+    feedback_stream
+        .set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))
+        .map_err(|error| CommitProductionSceneError::Recoverable(error.into()))?;
     let feedback_request = IpcEnvelope::new(
         ServiceRole::Waylandd,
         ServiceRole::Compd,
         MessageKind::DisplayCommand(DisplayCommand::GetPresentationFeedback { commit_id }),
     );
-    send_ipc_envelope(&mut feedback_stream, &feedback_request)?;
+    send_ipc_envelope(&mut feedback_stream, &feedback_request)
+        .map_err(CommitProductionSceneError::Recoverable)?;
     let mut feedback_reader = BufReader::new(feedback_stream);
-    let feedback: IpcEnvelope = read_ipc_envelope(&mut feedback_reader)?;
+    let feedback: IpcEnvelope =
+        read_ipc_envelope(&mut feedback_reader).map_err(CommitProductionSceneError::Recoverable)?;
+    if feedback.source != ServiceRole::Compd || feedback.destination != ServiceRole::Waylandd {
+        return Err(CommitProductionSceneError::Fatal(anyhow::anyhow!(
+            "invalid presentation response routing: {:?} -> {:?}",
+            feedback.source,
+            feedback.destination
+        )));
+    }
     match feedback.kind {
         MessageKind::DisplayEvent(event @ DisplayEvent::FramePresented { .. }) => Ok(event),
-        other => bail!("scene commit did not reach presentation: {other:?}"),
+        MessageKind::DisplayEvent(DisplayEvent::Rejected { reason }) => Err(
+            CommitProductionSceneError::Fatal(anyhow::anyhow!("presentation rejected: {reason}")),
+        ),
+        other => Err(CommitProductionSceneError::Fatal(anyhow::anyhow!(
+            "scene commit did not reach presentation: {other:?}"
+        ))),
     }
 }
 
@@ -3963,6 +4139,35 @@ mod tests {
     }
 
     #[test]
+    fn scene_retry_backoff_is_bounded_and_resets_after_success() {
+        let mut scene = super::CanonicalSceneState::default();
+        assert_eq!(scene.retry_delay, super::SCENE_RETRY_INITIAL);
+        super::schedule_scene_retry(&mut scene);
+        assert_eq!(scene.retry_delay, Duration::from_millis(500));
+        super::schedule_scene_retry(&mut scene);
+        assert_eq!(scene.retry_delay, Duration::from_millis(1000));
+        super::schedule_scene_retry(&mut scene);
+        assert_eq!(scene.retry_delay, Duration::from_millis(2000));
+        super::schedule_scene_retry(&mut scene);
+        assert_eq!(scene.retry_delay, super::SCENE_RETRY_MAX);
+        super::reset_scene_retry(&mut scene);
+        assert_eq!(scene.retry_delay, Duration::from_millis(250));
+        assert!(scene.next_retry_at.is_none());
+    }
+
+    #[test]
+    fn recoverable_scene_failure_is_distinct_from_protocol_failure() {
+        assert!(matches!(
+            super::CommitProductionSceneError::Recoverable(anyhow::anyhow!("EOF")),
+            super::CommitProductionSceneError::Recoverable(_)
+        ));
+        assert!(matches!(
+            super::CommitProductionSceneError::Fatal(anyhow::anyhow!("rejected")),
+            super::CommitProductionSceneError::Fatal(_)
+        ));
+    }
+
+    #[test]
     fn canonical_scene_metadata_survives_without_transport_payload() {
         let scene = super::CanonicalSceneState {
             generation: 4,
@@ -3986,6 +4191,8 @@ mod tests {
             pending: None,
             last_presented_generation: 0,
             last_presentation: None,
+            retry_delay: super::SCENE_RETRY_INITIAL,
+            next_retry_at: None,
         };
 
         let (generation, surfaces) = super::canonical_scene_surfaces_from(&scene);
