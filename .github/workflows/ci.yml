@@ -61,6 +61,8 @@ jobs:
         run: bash scripts/run-waylandd-displayd-reconnect-smoke.sh
       - name: Wayland Client Compd Outage Smoke Test
         run: bash scripts/run-wayland-client-compd-outage-smoke.sh
+      - name: Wayland Canonical Replay Isolation Smoke Test
+        run: bash scripts/run-wayland-canonical-replay-isolation-smoke.sh
       - name: LeyerX11 Rootless Isolation Smoke Test
         run: bash LeyerX11/scripts/run-rootless-isolation-smoke.sh
       - name: Resume Scenarios Smoke Test

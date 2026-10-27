@@ -2353,6 +2353,7 @@ fn handle_production_client(
         ClientRegistryGuard { client_id, outputs: outputs.clone(), scene_epoch, finalized: false };
     let mut received_fds = Vec::new();
     let mut pending_callbacks = PendingFrameCallbacks::default();
+    let mut last_observed_presentation_generation = 0u64;
     let mut command_epoch = 0u64;
     let mut command_sequence = 0u64;
     command_sender
@@ -2385,8 +2386,24 @@ fn handle_production_client(
                 }
             }
         }
+        match retry_pending_canonical_scene(&outputs, scene_epoch) {
+            RetryPendingOutcome::Success { generation, event } => {
+                release_presented_callbacks(
+                    &stream,
+                    &mut pending_callbacks,
+                    client_id,
+                    generation,
+                    &event,
+                    outputs.first().map(|output| output.name.as_str()).unwrap_or_default(),
+                )?;
+                last_observed_presentation_generation =
+                    last_observed_presentation_generation.max(generation);
+            }
+            RetryPendingOutcome::Recoverable | RetryPendingOutcome::NotDue => {}
+            RetryPendingOutcome::Fatal(error) => return Err(error),
+        }
         if let Some((presented_generation, event)) =
-            retry_pending_canonical_scene(&outputs, scene_epoch)?
+            shared_presentation_since(last_observed_presentation_generation)
         {
             release_presented_callbacks(
                 &stream,
@@ -2396,6 +2413,7 @@ fn handle_production_client(
                 &event,
                 outputs.first().map(|output| output.name.as_str()).unwrap_or_default(),
             )?;
+            last_observed_presentation_generation = presented_generation;
         }
 
         let mut poll_fd = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
@@ -2448,7 +2466,21 @@ fn handle_production_client(
                             .unwrap_or(false);
                     let committed_surface = msg.header.object_id;
 
-                    let result = core.dispatch_with_fds(msg, &mut received_fds)?;
+                    let result = match core.dispatch_with_fds(msg.clone(), &mut received_fds) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            eprintln!(
+                                "service=waylandd op=dispatch event=failed client_id={} object_id={} opcode={} size={} payload={} error={:?}",
+                                client_id,
+                                msg.header.object_id.0,
+                                msg.header.opcode.0,
+                                msg.header.size,
+                                msg.payload.len(),
+                                error,
+                            );
+                            return Err(error.into());
+                        }
+                    };
                     for ev in result.events {
                         let encoded = wayland_wire::codec::encode_message(&ev)?;
                         use std::io::Write;
@@ -2492,6 +2524,7 @@ fn handle_production_client(
                                         .map(|output| output.name.as_str())
                                         .unwrap_or_default(),
                                 )?;
+                                last_observed_presentation_generation = scene_generation;
                             }
                             Err(CommitProductionSceneError::Recoverable(_)) => {
                                 // Keep the Wayland connection and callback alive while the
@@ -3147,21 +3180,43 @@ fn commit_canonical_scene(
     }
 }
 
-fn retry_pending_canonical_scene(
-    outputs: &[OutputMode],
-    scene_epoch: u64,
-) -> std::result::Result<Option<(u64, DisplayEvent)>, CommitProductionSceneError> {
+enum RetryPendingOutcome {
+    Recoverable,
+    Fatal(anyhow::Error),
+    Success { generation: u64, event: Box<DisplayEvent> },
+    NotDue,
+}
+
+fn retry_pending_canonical_scene(outputs: &[OutputMode], scene_epoch: u64) -> RetryPendingOutcome {
     let due = {
         let scene = CANONICAL_SCENE.lock().unwrap();
         scene.pending.is_some()
             && scene.next_retry_at.map(|deadline| Instant::now() >= deadline).unwrap_or(false)
     };
     if !due {
-        return Ok(None);
+        return RetryPendingOutcome::NotDue;
     }
-    let event = commit_canonical_scene(outputs, scene_epoch)?;
-    let generation = CANONICAL_SCENE.lock().unwrap().last_presented_generation;
-    Ok(Some((generation, event)))
+    match commit_canonical_scene(outputs, scene_epoch) {
+        Ok(event) => {
+            let generation = CANONICAL_SCENE.lock().unwrap().last_presented_generation;
+            RetryPendingOutcome::Success { generation, event: Box::new(event) }
+        }
+        Err(CommitProductionSceneError::Recoverable(_)) => RetryPendingOutcome::Recoverable,
+        Err(CommitProductionSceneError::Fatal(error)) => RetryPendingOutcome::Fatal(error),
+    }
+}
+
+fn shared_presentation_since(last_generation: u64) -> Option<(u64, DisplayEvent)> {
+    let scene = CANONICAL_SCENE.lock().unwrap();
+    if scene.last_presented_generation <= last_generation {
+        return None;
+    }
+    match scene.last_presentation.clone() {
+        Some(event @ DisplayEvent::FramePresented { .. }) => {
+            Some((scene.last_presented_generation, event))
+        }
+        _ => None,
+    }
 }
 
 fn release_presented_callbacks(
@@ -3646,7 +3701,7 @@ fn run_readiness_check(socket_path: &Path) -> Result<()> {
     let configure_serial = read_xdg_surface_configure(&mut stream, &mut buf, &mut temp_buf, 11)?;
     let ack = WaylandMessage::new(
         WaylandObjectId(11),
-        WaylandOpcode(3),
+        WaylandOpcode(4),
         configure_serial.to_le_bytes().to_vec(),
     );
     stream.write_all(&wayland_wire::codec::encode_message(&ack)?)?;
