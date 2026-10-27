@@ -2466,7 +2466,21 @@ fn handle_production_client(
                             .unwrap_or(false);
                     let committed_surface = msg.header.object_id;
 
-                    let result = core.dispatch_with_fds(msg, &mut received_fds)?;
+                    let result = match core.dispatch_with_fds(msg.clone(), &mut received_fds) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            eprintln!(
+                                "service=waylandd op=dispatch event=failed client_id={} object_id={} opcode={} size={} payload={} error={:?}",
+                                client_id,
+                                msg.header.object_id.0,
+                                msg.header.opcode.0,
+                                msg.header.size,
+                                msg.payload.len(),
+                                error,
+                            );
+                            return Err(error.into());
+                        }
+                    };
                     for ev in result.events {
                         let encoded = wayland_wire::codec::encode_message(&ev)?;
                         use std::io::Write;
@@ -3687,7 +3701,7 @@ fn run_readiness_check(socket_path: &Path) -> Result<()> {
     let configure_serial = read_xdg_surface_configure(&mut stream, &mut buf, &mut temp_buf, 11)?;
     let ack = WaylandMessage::new(
         WaylandObjectId(11),
-        WaylandOpcode(3),
+        WaylandOpcode(4),
         configure_serial.to_le_bytes().to_vec(),
     );
     stream.write_all(&wayland_wire::codec::encode_message(&ack)?)?;

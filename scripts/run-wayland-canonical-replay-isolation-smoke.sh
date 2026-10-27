@@ -103,4 +103,10 @@ kill -0 "$waylandd_pid_before"
 kill -0 "$displayd_pid_before"
 wait "$client_pid"
 client_pid=""
+retry_failures="$(grep -Fc 'op=canonical_recommit event=retry' "$runtime_dir/waylandd.log" || true)"
+callback_a="$(grep -Fc 'client=A callback_done' "$runtime_dir/client.log" || true)"
+callback_b="$(grep -Fc 'client=B callback_done' "$runtime_dir/client.log" || true)"
+[[ "$retry_failures" -ge 2 ]] || { dump_logs; echo "expected at least 2 recoverable retry failures, got $retry_failures" >&2; exit 1; }
+[[ "$callback_a" -eq 1 && "$callback_b" -eq 1 ]] || { dump_logs; echo "expected one callback per client, got A=$callback_a B=$callback_b" >&2; exit 1; }
+echo "canonical_replay retry_failures=$retry_failures callback_A=$callback_a callback_B=$callback_b"
 echo 'WAYLAND CANONICAL REPLAY ISOLATION SMOKE TEST PASSED'

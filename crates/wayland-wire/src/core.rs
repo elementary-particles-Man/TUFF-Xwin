@@ -537,7 +537,8 @@ impl HeadlessWireCore {
             ("xdg_wm_base", 1) => self.handle_xdg_wm_base_create_positioner(message)?,
             ("xdg_surface", 0) => self.handle_xdg_surface_destroy(message)?,
             ("xdg_surface", 1) => self.handle_xdg_surface_get_toplevel(message)?,
-            ("xdg_surface", 3) => self.handle_xdg_surface_ack_configure(message)?,
+            ("xdg_surface", 3) => self.handle_xdg_surface_set_window_geometry(message)?,
+            ("xdg_surface", 4) => self.handle_xdg_surface_ack_configure(message)?,
             ("xdg_toplevel", 0) => self.handle_xdg_toplevel_destroy(message)?,
             ("xdg_toplevel", 1) => self.handle_xdg_toplevel_set_parent(message)?,
             ("xdg_toplevel", 2) => self.handle_xdg_toplevel_set_title(message, &args)?,
@@ -805,6 +806,19 @@ impl HeadlessWireCore {
         }
         let serial = LittleEndian::read_u32(&message.payload[0..4]);
         self.xdg_shell.ack_configure(message.header.object_id, serial)
+    }
+
+    fn handle_xdg_surface_set_window_geometry(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 16 {
+            return Err(WireError::Incomplete);
+        }
+        let geometry = (
+            LittleEndian::read_i32(&message.payload[0..4]),
+            LittleEndian::read_i32(&message.payload[4..8]),
+            LittleEndian::read_i32(&message.payload[8..12]),
+            LittleEndian::read_i32(&message.payload[12..16]),
+        );
+        self.xdg_shell.set_window_geometry(message.header.object_id, geometry)
     }
 
     fn handle_xdg_toplevel_set_title(

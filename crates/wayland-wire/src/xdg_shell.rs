@@ -6,6 +6,7 @@ pub struct XdgSurfaceState {
     pub wl_surface_id: WaylandObjectId,
     pub configure_serial: u32,
     pub acked_serial: u32,
+    pub window_geometry: Option<(i32, i32, i32, i32)>,
     pub title: Option<String>,
     pub app_id: Option<String>,
 }
@@ -74,7 +75,40 @@ impl XdgShellManager {
 
 impl XdgSurfaceState {
     pub fn new(wl_surface_id: WaylandObjectId) -> Self {
-        Self { wl_surface_id, configure_serial: 0, acked_serial: 0, title: None, app_id: None }
+        Self {
+            wl_surface_id,
+            configure_serial: 0,
+            acked_serial: 0,
+            window_geometry: None,
+            title: None,
+            app_id: None,
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_geometry_is_positive_and_retained() {
+        let mut manager = XdgShellManager::new();
+        let id = WaylandObjectId(7);
+        manager.create_xdg_surface(id, WaylandObjectId(8));
+        assert!(manager.set_window_geometry(id, (0, 0, 0, 1)).is_err());
+        assert!(manager.set_window_geometry(id, (0, 0, 1, 1)).is_ok());
+        assert_eq!(manager.surfaces[&id].window_geometry, Some((0, 0, 1, 1)));
+    }
+
+    #[test]
+    fn ack_configure_remains_serial_validated() {
+        let mut manager = XdgShellManager::new();
+        let id = WaylandObjectId(7);
+        manager.create_xdg_surface(id, WaylandObjectId(8));
+        manager.surfaces.get_mut(&id).unwrap().configure_serial = 9;
+        assert!(manager.ack_configure(id, 9).is_ok());
+        assert!(manager.ack_configure(id, 10).is_err());
     }
 }
 
@@ -97,6 +131,22 @@ impl XdgShellManager {
             )));
         }
         surface.acked_serial = serial;
+        Ok(())
+    }
+
+    pub fn set_window_geometry(
+        &mut self,
+        id: WaylandObjectId,
+        geometry: (i32, i32, i32, i32),
+    ) -> Result<()> {
+        let (_, _, width, height) = geometry;
+        if width <= 0 || height <= 0 {
+            return Err(WireError::ProtocolError(
+                "xdg_surface.set_window_geometry requires positive width and height".into(),
+            ));
+        }
+        let surface = self.surfaces.get_mut(&id).ok_or(WireError::InvalidObjectId(id.0))?;
+        surface.window_geometry = Some(geometry);
         Ok(())
     }
 }

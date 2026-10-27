@@ -5,12 +5,15 @@ import os
 import socket
 import struct
 import sys
-import tempfile
 import time
 
 
 def msg(obj, opcode, *words):
     payload = b"".join(struct.pack("<I", word & 0xFFFFFFFF) for word in words)
+    return struct.pack("<II", obj, (8 + len(payload)) << 16 | opcode) + payload
+
+
+def raw_msg(obj, opcode, payload=b""):
     return struct.pack("<II", obj, (8 + len(payload)) << 16 | opcode) + payload
 
 
@@ -39,11 +42,26 @@ class Client:
         return value
 
     def send(self, data, fd=None):
+        obj, word = struct.unpack_from("<II", data)
+        declared_size, opcode = word >> 16, word & 0xFFFF
+        payload_len = len(data) - 8
+        if declared_size != len(data):
+            raise RuntimeError(
+                f"client {self.tag} malformed outbound object={obj} opcode={opcode} "
+                f"size={declared_size} payload={payload_len} bytes={len(data)}"
+            )
+        print(
+            f"client={self.tag} request object={obj} opcode={opcode} size={declared_size} "
+            f"payload={payload_len} fds={1 if fd is not None else 0}",
+            flush=True,
+        )
         if fd is None:
             self.sock.sendall(data)
         else:
             fds = array.array("i", [fd])
-            self.sock.sendmsg([data], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)])
+            sent = self.sock.sendmsg([data], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)])
+            if sent != len(data):
+                raise RuntimeError(f"client {self.tag} short SCM_RIGHTS send {sent}/{len(data)}")
 
     def receive(self, timeout=2.0):
         deadline = time.monotonic() + timeout
@@ -76,7 +94,8 @@ class Client:
 
     def _registry_roundtrip(self):
         print(f"client {self.tag}: registry", flush=True)
-        self.send(msg(1, 1, 2) + msg(1, 0, 3))
+        self.send(msg(1, 1, 2))
+        self.send(msg(1, 0, 3))
         def global_event(obj, opcode, payload):
             if obj != 2 or opcode != 0 or len(payload) < 8:
                 return False
@@ -98,13 +117,39 @@ class Client:
         name = self.globals[interface][0]
         payload = struct.pack("<I", name) + string_arg(interface)
         payload += struct.pack("<II", min(version, self.globals[interface][1]), new_id)
-        self.send(msg(2, 0, *struct.unpack("<" + "I" * (len(payload) // 4), payload)))
+        self.send(raw_msg(2, 0, payload))
 
     def _bind_and_surface(self):
-        print(f"client {self.tag}: registry-ready", flush=True)
+        print(f"client {self.tag}: bind and surface", flush=True)
+        base = 4 if self.tag == "A" else 20
+        self.compositor, self.shm, self.xdg = base, base + 3, base + 6
+        self.surface, self.pool, self.buffer = base + 1, base + 4, base + 7
+        self.xdg_surface, self.toplevel = base + 2, base + 5
+        self._bind("wl_compositor", 4, self.compositor)
+        self._bind("wl_shm", 1, self.shm)
+        self._bind("xdg_wm_base", 6, self.xdg)
+        self.send(raw_msg(self.compositor, 0, struct.pack("<I", self.surface)))
+        temp = open(os.path.join("/tmp", f"wayland-replay-{os.getpid()}-{self.tag}"), "w+b")
+        # Keep a valid shm buffer object while leaving its optional pixel
+        # transport empty; canonical replay then exercises metadata and
+        # callback recovery without cross-client payload generations.
+        temp.truncate(0)
+        self.temp = temp
+        self.send(raw_msg(self.shm, 0, struct.pack("<II", self.pool, 4096)), temp.fileno())
+        self.send(raw_msg(self.pool, 0, struct.pack("<IIIIII", self.buffer, 0, 1, 1, 4, 0)))
+        self.send(raw_msg(self.xdg, 2, struct.pack("<II", self.xdg_surface, self.surface)))
+        self.send(raw_msg(self.xdg_surface, 1, struct.pack("<I", self.toplevel)))
+        serial = self.wait_for(lambda obj, opcode, payload: obj == self.xdg_surface and opcode == 0)[2]
+        self.send(raw_msg(self.xdg_surface, 3, struct.pack("<iiii", 0, 0, 1, 1)))
+        self.send(raw_msg(self.xdg_surface, 4, serial[:4]))
 
     def commit(self):
-        raise RuntimeError("surface commit is driven by the authoritative Wayland readiness client")
+        print(f"client {self.tag}: commit", flush=True)
+        self.callback = self.alloc()
+        self.send(raw_msg(self.surface, 1, struct.pack("<III", self.buffer, 0, 0)))
+        self.send(raw_msg(self.surface, 2, struct.pack("<iiii", 0, 0, 1, 1)))
+        self.send(raw_msg(self.surface, 3, struct.pack("<I", self.callback)))
+        self.send(raw_msg(self.surface, 6))
 
     def sync(self):
         callback = self.alloc()
@@ -116,6 +161,10 @@ class Client:
             return False
         try:
             self.wait_for(lambda obj, opcode, payload: obj == self.callback and opcode == 0, timeout)
+            print(
+                f"client={self.tag} callback_done object={self.callback} opcode=0",
+                flush=True,
+            )
             self.callback = None
             return True
         except RuntimeError:
@@ -128,16 +177,17 @@ def main():
     open(ready, "w").close()
     while not os.path.exists(outage):
         time.sleep(0.02)
-    # The shell has already exercised real scene commits and callbacks with
-    # the authoritative readiness client. Keep both independent connections
-    # alive through the outage and use sync roundtrips as the liveness fence.
+    for client in clients:
+        client.commit()
+    if any(client.callback_done(1.5) for client in clients):
+        raise RuntimeError("callback completed while compd was stopped")
     for client in clients:
         client.sync()
     open(outage_ok, "w").close()
     while not os.path.exists(resume):
         time.sleep(0.02)
     deadline = time.monotonic() + 10
-    completed = [True, True]
+    completed = [False, False]
     while sum(completed) < 2 and time.monotonic() < deadline:
         for index, client in enumerate(clients):
             if not completed[index]:
