@@ -2340,15 +2340,12 @@ fn handle_production_client(
         (reg.epoch, reg.sequence, topology)
     };
 
-    let outputs = topology
+    let mut live_projection = topology
         .iter()
-        .map(|entry| OutputMode {
-            name: entry.geometry.output_id.clone(),
-            width: entry.geometry.width,
-            height: entry.geometry.height,
-            refresh_hz: entry.refresh_hz,
-        })
-        .collect::<Vec<_>>();
+        .cloned()
+        .map(|entry| (entry.geometry.output_id.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut outputs = output_modes_from_projection(&live_projection);
     let mut registry_guard =
         ClientRegistryGuard { client_id, outputs: outputs.clone(), scene_epoch, finalized: false };
     let mut received_fds = Vec::new();
@@ -2372,10 +2369,17 @@ fn handle_production_client(
 
     loop {
         while let Ok(command) = command_receiver.try_recv() {
-            if apply_client_command(&mut core, command, &mut command_epoch, &mut command_sequence)?
-            {
+            if apply_client_command(
+                &mut core,
+                command,
+                &mut command_epoch,
+                &mut command_sequence,
+                &mut live_projection,
+            )? {
                 return Ok(());
             }
+            outputs = output_modes_from_projection(&live_projection);
+            registry_guard.outputs = outputs.clone();
             let events = core.drain_events();
             for ev in events {
                 use std::io::Write;
@@ -2386,6 +2390,8 @@ fn handle_production_client(
                 }
             }
         }
+        outputs = output_modes_from_projection(&live_projection);
+        registry_guard.outputs = outputs.clone();
         match retry_pending_canonical_scene(&outputs, scene_epoch) {
             RetryPendingOutcome::Success { generation, event } => {
                 release_presented_callbacks(
@@ -2561,11 +2567,26 @@ impl Drop for ClientCommandGuard {
     }
 }
 
+fn output_modes_from_projection(
+    projection: &BTreeMap<String, OutputTopologyEntry>,
+) -> Vec<OutputMode> {
+    projection
+        .values()
+        .map(|entry| OutputMode {
+            name: entry.geometry.output_id.clone(),
+            width: entry.geometry.width,
+            height: entry.geometry.height,
+            refresh_hz: entry.refresh_hz,
+        })
+        .collect()
+}
+
 fn apply_client_command(
     core: &mut wayland_wire::core::HeadlessWireCore,
     command: ClientCommand,
     epoch: &mut u64,
     sequence: &mut u64,
+    projection: &mut BTreeMap<String, OutputTopologyEntry>,
 ) -> Result<bool> {
     let (command_epoch, command_sequence) = match &command {
         ClientCommand::InitialTopology { epoch, sequence, .. }
@@ -2576,7 +2597,18 @@ fn apply_client_command(
         | ClientCommand::TopologyReset { epoch, sequence }
         | ClientCommand::Disconnect { epoch, sequence } => (*epoch, *sequence),
     };
+    if matches!(command, ClientCommand::TopologyReset { .. }) {
+        if *epoch != 0 && command_epoch == *epoch && command_sequence < *sequence {
+            return Ok(false);
+        }
+        *epoch = command_epoch;
+        *sequence = command_sequence;
+        return Ok(false);
+    }
     if *epoch != 0 && command_epoch != *epoch {
+        if command_epoch < *epoch {
+            return Ok(false);
+        }
         bail!("client topology command epoch mismatch");
     }
     if command_sequence < *sequence {
@@ -2587,8 +2619,9 @@ fn apply_client_command(
     match command {
         ClientCommand::InitialTopology { outputs, .. } => {
             for output in outputs {
+                projection.insert(output.geometry.output_id.clone(), output.clone());
                 core.add_topology_output(
-                    &output.name,
+                    &output.geometry.output_id,
                     output.geometry.origin_x,
                     output.geometry.origin_y,
                     output.geometry.width as i32,
@@ -2598,19 +2631,10 @@ fn apply_client_command(
                 );
             }
         }
-        ClientCommand::AddGlobal { output, .. } => core.add_topology_output(
-            &output.name,
-            output.geometry.origin_x,
-            output.geometry.origin_y,
-            output.geometry.width as i32,
-            output.geometry.height as i32,
-            (1_000_000_000u64 / output.refresh_hz.max(1) as u64) as u32,
-            output.scale,
-        ),
-        ClientCommand::RemoveGlobal { output_id, .. } => core.remove_topology_output(&output_id),
-        ClientCommand::ReconfigureOutput { output, .. } => core
-            .reconfigure_topology_output(
-                &output.name,
+        ClientCommand::AddGlobal { output, .. } => {
+            projection.insert(output.geometry.output_id.clone(), output.clone());
+            core.add_topology_output(
+                &output.geometry.output_id,
                 output.geometry.origin_x,
                 output.geometry.origin_y,
                 output.geometry.width as i32,
@@ -2618,10 +2642,28 @@ fn apply_client_command(
                 (1_000_000_000u64 / output.refresh_hz.max(1) as u64) as u32,
                 output.scale,
             )
-            .map_err(|error| anyhow::anyhow!(error))?,
-        ClientCommand::RecalculateMembership { .. } | ClientCommand::TopologyReset { .. } => {
+        }
+        ClientCommand::RemoveGlobal { output_id, .. } => {
+            projection.remove(&output_id);
+            core.remove_topology_output(&output_id)
+        }
+        ClientCommand::ReconfigureOutput { output, .. } => {
+            projection.insert(output.geometry.output_id.clone(), output.clone());
+            core.reconfigure_topology_output(
+                &output.geometry.output_id,
+                output.geometry.origin_x,
+                output.geometry.origin_y,
+                output.geometry.width as i32,
+                output.geometry.height as i32,
+                (1_000_000_000u64 / output.refresh_hz.max(1) as u64) as u32,
+                output.scale,
+            )
+            .map_err(|error| anyhow::anyhow!(error))?
+        }
+        ClientCommand::RecalculateMembership { .. } => {
             core.recalculate_surface_membership().map_err(|error| anyhow::anyhow!(error))?;
         }
+        ClientCommand::TopologyReset { .. } => {}
         ClientCommand::Disconnect { .. } => return Ok(true),
     }
     Ok(false)
@@ -3338,7 +3380,7 @@ fn commit_production_scene(
         .set_write_timeout(Some(IPC_SCENE_IO_TIMEOUT))
         .map_err(|error| CommitProductionSceneError::Recoverable(error.into()))?;
     let output = outputs.first().ok_or_else(|| {
-        CommitProductionSceneError::Fatal(anyhow::anyhow!("displayd returned no output"))
+        CommitProductionSceneError::Recoverable(anyhow::anyhow!("displayd returned no output"))
     })?;
     let command = DisplayCommand::CommitScene {
         target: CommitTarget::Output { name: output.name.clone() },
