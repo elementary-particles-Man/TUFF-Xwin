@@ -16,9 +16,9 @@ use std::os::unix::{
 use anyhow::{Context, Result, bail};
 use byteorder::ByteOrder;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{
-    LazyLock, Mutex,
+    Arc, LazyLock, Mutex,
     mpsc::{Receiver, SyncSender, sync_channel},
 };
 static GLOBAL_REGISTRY: Mutex<Option<SurfaceRegistrySnapshot>> = Mutex::new(None);
@@ -31,10 +31,16 @@ static TOPOLOGY_RECEIVER: LazyLock<Mutex<Option<Receiver<TopologyInput>>>> =
 static TOPOLOGY_SENDER: LazyLock<Mutex<Option<SyncSender<TopologyInput>>>> =
     LazyLock::new(|| Mutex::new(None));
 struct TopologyRegistry {
-    clients: BTreeMap<u64, SyncSender<ClientCommand>>,
+    clients: BTreeMap<u64, TopologyClientEndpoint>,
     epoch: u64,
     sequence: u64,
     projection: BTreeMap<String, OutputTopologyEntry>,
+}
+
+#[derive(Clone)]
+struct TopologyClientEndpoint {
+    sender: SyncSender<ClientCommand>,
+    resync_requested: Arc<AtomicBool>,
 }
 static TOPOLOGY_REGISTRY: LazyLock<(Mutex<TopologyRegistry>, std::sync::Condvar)> =
     LazyLock::new(|| {
@@ -1964,9 +1970,20 @@ fn replay_buffered_deltas(
 
 fn broadcast_client_command(command: ClientCommand, reg: &mut TopologyRegistry) {
     let mut failed = Vec::new();
-    for (id, sender) in &reg.clients {
-        if sender.try_send(command.clone()).is_err() {
-            failed.push(*id);
+    for (id, endpoint) in &reg.clients {
+        if endpoint.resync_requested.load(Ordering::Acquire)
+            && !matches!(command, ClientCommand::TopologyReset { .. })
+        {
+            continue;
+        }
+        match endpoint.sender.try_send(command.clone()) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                endpoint.resync_requested.store(true, Ordering::Release);
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                failed.push(*id);
+            }
         }
     }
     for id in failed {
@@ -2322,6 +2339,11 @@ fn handle_production_client(
 ) -> Result<()> {
     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let (command_sender, command_receiver) = sync_channel(64);
+    let resync_requested = Arc::new(AtomicBool::new(false));
+    let endpoint = TopologyClientEndpoint {
+        sender: command_sender.clone(),
+        resync_requested: resync_requested.clone(),
+    };
     let _command_guard = ClientCommandGuard { client_id };
     let mut core = wayland_wire::core::HeadlessWireCore::default();
     core.set_defer_frame_callbacks(true);
@@ -2336,7 +2358,7 @@ fn handle_production_client(
         if topology.is_empty() {
             bail!("production Wayland requires at least one real displayd output");
         }
-        reg.clients.insert(client_id, command_sender.clone());
+        reg.clients.insert(client_id, endpoint);
         (reg.epoch, reg.sequence, topology)
     };
 
@@ -2368,6 +2390,19 @@ fn handle_production_client(
     stream.set_read_timeout(None)?;
 
     loop {
+        if resync_requested.load(Ordering::Acquire) {
+            reconcile_client_topology(
+                client_id,
+                &command_receiver,
+                &resync_requested,
+                &mut core,
+                &mut command_epoch,
+                &mut command_sequence,
+                &mut live_projection,
+                &mut outputs,
+                &mut registry_guard,
+            )?;
+        }
         while let Ok(command) = command_receiver.try_recv() {
             if apply_client_command(
                 &mut core,
@@ -2380,6 +2415,9 @@ fn handle_production_client(
             }
             outputs = output_modes_from_projection(&live_projection);
             registry_guard.outputs = outputs.clone();
+            if resync_requested.load(Ordering::Acquire) {
+                break;
+            }
             let events = core.drain_events();
             for ev in events {
                 use std::io::Write;
@@ -2389,6 +2427,9 @@ fn handle_production_client(
                     return Ok(()); // Write failure isolation: just return Ok(()) to drop the client cleanly
                 }
             }
+        }
+        if resync_requested.load(Ordering::Acquire) {
+            continue;
         }
         outputs = output_modes_from_projection(&live_projection);
         registry_guard.outputs = outputs.clone();
@@ -2567,6 +2608,66 @@ impl Drop for ClientCommandGuard {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn reconcile_client_topology(
+    client_id: u64,
+    command_receiver: &Receiver<ClientCommand>,
+    resync_requested: &Arc<AtomicBool>,
+    core: &mut wayland_wire::core::HeadlessWireCore,
+    command_epoch: &mut u64,
+    command_sequence: &mut u64,
+    live_projection: &mut BTreeMap<String, OutputTopologyEntry>,
+    outputs: &mut Vec<OutputMode>,
+    registry_guard: &mut ClientRegistryGuard,
+) -> Result<()> {
+    let (epoch, sequence, authoritative) = {
+        let (lock, _) = &*TOPOLOGY_REGISTRY;
+        let reg = lock.lock().unwrap();
+        while command_receiver.try_recv().is_ok() {}
+        let authoritative = reg.projection.clone();
+        resync_requested.store(false, Ordering::Release);
+        (reg.epoch, reg.sequence, authoritative)
+    };
+
+    apply_client_command(
+        core,
+        ClientCommand::TopologyReset { epoch, sequence },
+        command_epoch,
+        command_sequence,
+        live_projection,
+    )?;
+    let old_ids = live_projection.keys().cloned().collect::<Vec<_>>();
+    for output_id in old_ids {
+        apply_client_command(
+            core,
+            ClientCommand::RemoveGlobal { epoch, sequence, output_id, output_generation: 0 },
+            command_epoch,
+            command_sequence,
+            live_projection,
+        )?;
+    }
+    for output in authoritative.values() {
+        apply_client_command(
+            core,
+            ClientCommand::AddGlobal { epoch, sequence, output: output.clone() },
+            command_epoch,
+            command_sequence,
+            live_projection,
+        )?;
+    }
+    apply_client_command(
+        core,
+        ClientCommand::RecalculateMembership { epoch, sequence },
+        command_epoch,
+        command_sequence,
+        live_projection,
+    )?;
+    *outputs = output_modes_from_projection(live_projection);
+    registry_guard.outputs = outputs.clone();
+    let _ = client_id;
+    Ok(())
+}
+
 fn output_modes_from_projection(
     projection: &BTreeMap<String, OutputTopologyEntry>,
 ) -> Vec<OutputMode> {
@@ -2612,7 +2713,7 @@ fn apply_client_command(
         bail!("client topology command epoch mismatch");
     }
     if command_sequence < *sequence {
-        bail!("client topology command sequence moved backwards");
+        return Ok(false);
     }
     *epoch = command_epoch;
     *sequence = command_sequence;
@@ -4962,6 +5063,105 @@ mod tests {
             reversed.iter().map(|surface| surface.id.as_str()).collect::<Vec<_>>(),
             ordered.iter().map(|surface| surface.id.as_str()).collect::<Vec<_>>()
         );
+    }
+}
+
+#[cfg(test)]
+mod topology_fanout_tests {
+    use super::*;
+
+    fn registry_with(
+        capacity: usize,
+    ) -> (TopologyRegistry, Receiver<ClientCommand>, Arc<AtomicBool>) {
+        let (sender, receiver) = sync_channel(capacity);
+        let resync_requested = Arc::new(AtomicBool::new(false));
+        let endpoint =
+            TopologyClientEndpoint { sender, resync_requested: resync_requested.clone() };
+        let mut clients = BTreeMap::new();
+        clients.insert(1, endpoint);
+        (
+            TopologyRegistry { clients, epoch: 1, sequence: 1, projection: BTreeMap::new() },
+            receiver,
+            resync_requested,
+        )
+    }
+
+    #[test]
+    fn full_fanout_keeps_client_registered_and_requests_resync() {
+        let (mut reg, receiver, resync_requested) = registry_with(1);
+        broadcast_client_command(
+            ClientCommand::RecalculateMembership { epoch: 1, sequence: 1 },
+            &mut reg,
+        );
+        broadcast_client_command(
+            ClientCommand::RecalculateMembership { epoch: 1, sequence: 2 },
+            &mut reg,
+        );
+        assert!(reg.clients.contains_key(&1));
+        assert!(resync_requested.load(Ordering::Acquire));
+        assert!(receiver.try_recv().is_ok());
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn saturated_client_does_not_receive_more_diff_commands() {
+        let (mut reg, _receiver, resync_requested) = registry_with(1);
+        broadcast_client_command(
+            ClientCommand::RecalculateMembership { epoch: 1, sequence: 1 },
+            &mut reg,
+        );
+        broadcast_client_command(
+            ClientCommand::RecalculateMembership { epoch: 1, sequence: 2 },
+            &mut reg,
+        );
+        assert!(resync_requested.load(Ordering::Acquire));
+        broadcast_client_command(
+            ClientCommand::RecalculateMembership { epoch: 1, sequence: 3 },
+            &mut reg,
+        );
+        assert_eq!(reg.clients.len(), 1);
+    }
+
+    #[test]
+    fn disconnected_fanout_endpoint_is_removed_only_on_disconnect() {
+        let (mut reg, receiver, _resync_requested) = registry_with(1);
+        drop(receiver);
+        broadcast_client_command(
+            ClientCommand::RecalculateMembership { epoch: 1, sequence: 1 },
+            &mut reg,
+        );
+        assert!(reg.clients.is_empty());
+    }
+
+    #[test]
+    fn one_saturated_client_does_not_block_a_healthy_client() {
+        let (full_sender, full_receiver) = sync_channel(1);
+        let (healthy_sender, healthy_receiver) = sync_channel(1);
+        let full_flag = Arc::new(AtomicBool::new(false));
+        let healthy_flag = Arc::new(AtomicBool::new(false));
+        let mut clients = BTreeMap::new();
+        clients.insert(
+            1,
+            TopologyClientEndpoint { sender: full_sender, resync_requested: full_flag.clone() },
+        );
+        clients.insert(
+            2,
+            TopologyClientEndpoint { sender: healthy_sender, resync_requested: healthy_flag },
+        );
+        let mut reg =
+            TopologyRegistry { clients, epoch: 1, sequence: 1, projection: BTreeMap::new() };
+        broadcast_client_command(
+            ClientCommand::RecalculateMembership { epoch: 1, sequence: 1 },
+            &mut reg,
+        );
+        broadcast_client_command(
+            ClientCommand::RecalculateMembership { epoch: 1, sequence: 2 },
+            &mut reg,
+        );
+        assert!(full_flag.load(Ordering::Acquire));
+        assert!(full_receiver.try_recv().is_ok());
+        assert!(healthy_receiver.try_recv().is_ok());
+        assert_eq!(reg.clients.len(), 2);
     }
 }
 
