@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{BufReader, Read, Write},
+    io::{self, BufReader, Read, Write},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -2391,6 +2391,7 @@ fn handle_production_client(
 
     loop {
         if resync_requested.load(Ordering::Acquire) {
+            core.drain_events();
             reconcile_client_topology(
                 client_id,
                 &command_receiver,
@@ -2402,6 +2403,10 @@ fn handle_production_client(
                 &mut outputs,
                 &mut registry_guard,
             )?;
+            flush_pending_client_events(&stream, &mut core).map_err(|error| match error {
+                ClientEventFlushError::Write(error) => anyhow::anyhow!(error),
+                ClientEventFlushError::Encode(error) => error,
+            })?;
         }
         while let Ok(command) = command_receiver.try_recv() {
             if apply_client_command(
@@ -2418,13 +2423,10 @@ fn handle_production_client(
             if resync_requested.load(Ordering::Acquire) {
                 break;
             }
-            let events = core.drain_events();
-            for ev in events {
-                use std::io::Write;
-                let encoded = wayland_wire::codec::encode_message(&ev)?;
-                let mut s = &stream;
-                if s.write_all(&encoded).is_err() {
-                    return Ok(()); // Write failure isolation: just return Ok(()) to drop the client cleanly
+            if let Err(error) = flush_pending_client_events(&stream, &mut core) {
+                match error {
+                    ClientEventFlushError::Write(_) => return Ok(()),
+                    ClientEventFlushError::Encode(error) => return Err(error),
                 }
             }
         }
@@ -2513,8 +2515,8 @@ fn handle_production_client(
                             .unwrap_or(false);
                     let committed_surface = msg.header.object_id;
 
-                    let result = match core.dispatch_with_fds(msg.clone(), &mut received_fds) {
-                        Ok(result) => result,
+                    match core.dispatch_with_fds(msg.clone(), &mut received_fds) {
+                        Ok(_) => {}
                         Err(error) => {
                             eprintln!(
                                 "service=waylandd op=dispatch event=failed client_id={} object_id={} opcode={} size={} payload={} error={:?}",
@@ -2527,12 +2529,12 @@ fn handle_production_client(
                             );
                             return Err(error.into());
                         }
-                    };
-                    for ev in result.events {
-                        let encoded = wayland_wire::codec::encode_message(&ev)?;
-                        use std::io::Write;
-                        let mut s = &stream;
-                        s.write_all(&encoded)?;
+                    }
+                    if let Err(error) = flush_pending_client_events(&stream, &mut core) {
+                        match error {
+                            ClientEventFlushError::Write(_) => return Ok(()),
+                            ClientEventFlushError::Encode(error) => return Err(error),
+                        }
                     }
                     if is_commit {
                         let (scene_generation, committed_surfaces) =
@@ -2600,6 +2602,25 @@ fn handle_production_client(
 
 struct ClientCommandGuard {
     client_id: u64,
+}
+
+#[derive(Debug)]
+enum ClientEventFlushError {
+    Encode(anyhow::Error),
+    Write(io::Error),
+}
+
+fn flush_pending_client_events(
+    stream: &UnixStream,
+    core: &mut wayland_wire::core::HeadlessWireCore,
+) -> std::result::Result<(), ClientEventFlushError> {
+    let mut stream = stream;
+    for event in core.drain_events() {
+        let encoded = wayland_wire::codec::encode_message(&event)
+            .map_err(|error| ClientEventFlushError::Encode(error.into()))?;
+        stream.write_all(&encoded).map_err(ClientEventFlushError::Write)?;
+    }
+    Ok(())
 }
 
 impl Drop for ClientCommandGuard {
@@ -5162,6 +5183,34 @@ mod topology_fanout_tests {
         assert!(full_receiver.try_recv().is_ok());
         assert!(healthy_receiver.try_recv().is_ok());
         assert_eq!(reg.clients.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flush_delivers_a_queued_wayland_event_once_over_the_socket() {
+        let mut core = wayland_wire::core::HeadlessWireCore::default();
+        core.dispatch(wayland_wire::WaylandMessage::new(
+            wayland_wire::WaylandObjectId::DISPLAY,
+            wayland_wire::WaylandOpcode(0),
+            7u32.to_le_bytes().to_vec(),
+        ))
+        .unwrap();
+        let (server, mut client) = UnixStream::pair().unwrap();
+        flush_pending_client_events(&server, &mut core).unwrap();
+        let mut header = [0u8; 8];
+        client.read_exact(&mut header).unwrap();
+        let object_id = u32::from_le_bytes(header[..4].try_into().unwrap());
+        let word = u32::from_le_bytes(header[4..].try_into().unwrap());
+        assert_eq!(object_id, 7);
+        assert_eq!(word & 0xffff, 0);
+        assert_eq!(word >> 16, 12);
+        let mut payload = [0u8; 4];
+        client.read_exact(&mut payload).unwrap();
+        assert_eq!(u32::from_le_bytes(payload), 0);
+        assert!(core.drain_events().is_empty());
+        client.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+        let mut duplicate = [0u8; 1];
+        assert!(client.read(&mut duplicate).is_err());
     }
 }
 
