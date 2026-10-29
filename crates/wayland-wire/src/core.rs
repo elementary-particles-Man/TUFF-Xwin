@@ -277,7 +277,7 @@ impl HeadlessWireCore {
             }
         }
         for id in to_send {
-            self.send_output_state(id, x, y, width, height, refresh_nsec, scale, name);
+            self.send_output_state(id, x, y, width, height, refresh_nsec, scale, name)?;
         }
         let surface_ids: Vec<_> = self.surfaces.surfaces.keys().copied().collect();
         for surface_id in surface_ids {
@@ -615,28 +615,59 @@ impl HeadlessWireCore {
     }
 
     fn handle_registry_bind(&mut self, message: WaylandMessage) -> Result<()> {
-        if message.payload.len() < 12 {
+        if message.payload.len() < 8 {
             return Err(WireError::Incomplete);
         }
         let name = LittleEndian::read_u32(&message.payload[0..4]);
 
-        // Simplified bind for P2: assume id is at offset 8 if payload is short,
-        // or try to find it after the interface string.
-        let new_id = if message.payload.len() == 12 {
-            WaylandObjectId(LittleEndian::read_u32(&message.payload[8..12]))
-        } else {
-            let interface_len = LittleEndian::read_u32(&message.payload[4..8]) as usize;
-            let padded_interface_len = (interface_len + 3) & !3;
-            let pos_new_id = 8 + padded_interface_len + 4;
-            if message.payload.len() < pos_new_id + 4 {
-                return Err(WireError::Incomplete);
-            }
-            WaylandObjectId(LittleEndian::read_u32(&message.payload[pos_new_id..pos_new_id + 4]))
-        };
+        let interface_len = LittleEndian::read_u32(&message.payload[4..8]) as usize;
+        if interface_len == 0 {
+            return Err(WireError::ProtocolError("wl_registry.bind interface is empty".into()));
+        }
+        let interface_end = 8usize.checked_add(interface_len).ok_or_else(|| {
+            WireError::ProtocolError("wl_registry.bind interface overflows".into())
+        })?;
+        if message.payload.len() < interface_end {
+            return Err(WireError::Incomplete);
+        }
+        if message.payload[interface_end - 1] != 0 {
+            return Err(WireError::ProtocolError(
+                "wl_registry.bind interface is not nul terminated".into(),
+            ));
+        }
+        std::str::from_utf8(&message.payload[8..interface_end - 1]).map_err(|_| {
+            WireError::ProtocolError("wl_registry.bind interface is not utf8".into())
+        })?;
+
+        let mut offset = 4;
+        let interface = crate::args::decode_string(&message.payload, &mut offset)?;
+        if message.payload.len() < offset + 8 {
+            return Err(WireError::Incomplete);
+        }
+        if message.payload.len() != offset + 8 {
+            return Err(WireError::ProtocolError(
+                "wl_registry.bind has an invalid payload layout".into(),
+            ));
+        }
+        let version = LittleEndian::read_u32(&message.payload[offset..offset + 4]);
+        let new_id =
+            WaylandObjectId(LittleEndian::read_u32(&message.payload[offset + 4..offset + 8]));
 
         let global =
             self.globals.iter().find(|g| g.name == name).ok_or(WireError::InvalidObjectId(name))?;
-        self.registry.register_client_object(new_id, &global.interface, global.version)?;
+        if interface != global.interface {
+            return Err(WireError::ProtocolError(format!(
+                "wl_registry.bind interface mismatch: requested {interface}, advertised {}",
+                global.interface
+            )));
+        }
+        if version == 0 || version > global.version {
+            return Err(WireError::ProtocolError(format!(
+                "wl_registry.bind version {version} is outside advertised range 1..={}",
+                global.version
+            )));
+        }
+        self.registry.register_client_object(new_id, &global.interface, version)?;
 
         if global.interface == "wl_shm" {
             self.send_shm_formats(new_id);
@@ -670,7 +701,7 @@ impl HeadlessWireCore {
                     output.scale = scale as i32;
                 }
                 self.output.set_mode(new_id, width, height, refresh);
-                self.send_output_state(new_id, x, y, width, height, refresh, scale, &output_name);
+                self.send_output_state(new_id, x, y, width, height, refresh, scale, &output_name)?;
             }
         }
         Ok(())
@@ -687,7 +718,8 @@ impl HeadlessWireCore {
         refresh: u32,
         scale: u32,
         name: &str,
-    ) {
+    ) -> Result<()> {
+        let version = self.registry.get_object(output_id)?.version;
         let mut p = Vec::with_capacity(64);
         let mut b = [0u8; 4];
         byteorder::LittleEndian::write_i32(&mut b, x);
@@ -713,19 +745,23 @@ impl HeadlessWireCore {
         byteorder::LittleEndian::write_i32(&mut p[12..16], refresh as i32);
         self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(1), p));
 
-        let mut p = vec![0u8; 4];
-        byteorder::LittleEndian::write_i32(&mut p[0..4], scale as i32);
-        self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(3), p));
+        if version >= 2 {
+            self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(2), vec![]));
 
-        let mut p = Vec::new();
-        crate::args::encode_string(name, &mut p);
-        self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(4), p));
+            let mut p = vec![0u8; 4];
+            byteorder::LittleEndian::write_i32(&mut p[0..4], scale as i32);
+            self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(3), p));
+        }
+        if version >= 4 {
+            let mut p = Vec::new();
+            crate::args::encode_string(name, &mut p);
+            self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(4), p));
 
-        let mut p = Vec::new();
-        crate::args::encode_string("TUFF Virtual Display", &mut p);
-        self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(5), p));
-
-        self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(2), vec![]));
+            let mut p = Vec::new();
+            crate::args::encode_string("TUFF Virtual Display", &mut p);
+            self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(5), p));
+        }
+        Ok(())
     }
 
     fn send_xdg_ping(&mut self, wm_base_id: WaylandObjectId) {
@@ -1204,6 +1240,27 @@ impl HeadlessWireCore {
 mod tests {
     use super::*;
 
+    fn registry_bind_payload(name: u32, interface: &str, version: u32, new_id: u32) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&name.to_le_bytes());
+        crate::args::encode_string(interface, &mut payload);
+        payload.extend_from_slice(&version.to_le_bytes());
+        payload.extend_from_slice(&new_id.to_le_bytes());
+        payload
+    }
+
+    fn core_with_registry() -> HeadlessWireCore {
+        let mut core = HeadlessWireCore::default();
+        core.dispatch(WaylandMessage::new(
+            WaylandObjectId::DISPLAY,
+            WaylandOpcode(1),
+            10u32.to_le_bytes().to_vec(),
+        ))
+        .unwrap();
+        core.drain_events();
+        core
+    }
+
     #[test]
     fn test_create_surface_and_region() {
         let mut core = HeadlessWireCore::default();
@@ -1227,6 +1284,88 @@ mod tests {
             core.registry.get_object(WaylandObjectId(11)).unwrap().interface,
             "wl_compositor"
         );
+    }
+
+    #[test]
+    fn registry_bind_uses_formal_interface_version_and_rejects_invalid_requests() {
+        let mut core = core_with_registry();
+        let result = core
+            .dispatch(WaylandMessage::new(
+                WaylandObjectId(10),
+                WaylandOpcode(0),
+                registry_bind_payload(1, "wl_compositor", 1, 11),
+            ))
+            .unwrap();
+        assert!(result.events.is_empty());
+        assert_eq!(core.registry.get_object(WaylandObjectId(11)).unwrap().version, 1);
+
+        let cases = [
+            (2, "wl_compositor", 0, 12),
+            (2, "wl_compositor", 2, 13),
+            (2, "wl_compositor", 1, 14),
+            (999, "wl_compositor", 1, 15),
+        ];
+        for (name, interface, version, new_id) in cases {
+            let mut candidate = core_with_registry();
+            let error = match candidate.dispatch(WaylandMessage::new(
+                WaylandObjectId(10),
+                WaylandOpcode(0),
+                registry_bind_payload(name, interface, version, new_id),
+            )) {
+                Ok(_) => panic!("invalid registry bind was accepted"),
+                Err(error) => error,
+            };
+            assert!(matches!(error, WireError::ProtocolError(_) | WireError::InvalidObjectId(_)));
+            assert!(candidate.registry.get_object(WaylandObjectId(new_id)).is_err());
+        }
+
+        let mut malformed = core_with_registry();
+        let mut payload = registry_bind_payload(1, "wl_compositor", 1, 16);
+        payload.pop();
+        assert!(matches!(
+            malformed.dispatch(WaylandMessage::new(WaylandObjectId(10), WaylandOpcode(0), payload)),
+            Err(WireError::Incomplete | WireError::ProtocolError(_))
+        ));
+        assert!(malformed.registry.get_object(WaylandObjectId(16)).is_err());
+
+        let mut duplicate = core_with_registry();
+        let duplicate_error = match duplicate.dispatch(WaylandMessage::new(
+            WaylandObjectId(10),
+            WaylandOpcode(0),
+            registry_bind_payload(1, "wl_compositor", 1, 10),
+        )) {
+            Ok(_) => panic!("duplicate object id was accepted"),
+            Err(error) => error,
+        };
+        assert!(matches!(duplicate_error, WireError::InvalidObjectId(10)));
+    }
+
+    #[test]
+    fn wl_output_events_follow_each_bound_version_and_reconfigure() {
+        for (version, expected_opcodes) in [
+            (1, vec![0, 1]),
+            (2, vec![0, 1, 2, 3]),
+            (3, vec![0, 1, 2, 3]),
+            (4, vec![0, 1, 2, 3, 4, 5]),
+        ] {
+            let mut core = core_with_registry();
+            core.add_topology_output("eDP-1", 500, 200, 1920, 1080, 60_000, 2);
+            core.drain_events();
+            core.dispatch(WaylandMessage::new(
+                WaylandObjectId(10),
+                WaylandOpcode(0),
+                registry_bind_payload(100, "wl_output", version, 20),
+            ))
+            .unwrap();
+            let opcodes: Vec<_> =
+                core.drain_events().iter().map(|event| event.header.opcode.0).collect();
+            assert_eq!(opcodes, expected_opcodes);
+
+            core.reconfigure_topology_output("eDP-1", -10, -20, 1280, 720, 75_000, 1).unwrap();
+            let reconfigured: Vec<_> =
+                core.drain_events().iter().map(|event| event.header.opcode.0).collect();
+            assert_eq!(reconfigured, expected_opcodes);
+        }
     }
 
     #[test]
