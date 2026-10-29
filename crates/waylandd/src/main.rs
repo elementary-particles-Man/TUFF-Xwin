@@ -2543,7 +2543,7 @@ fn handle_production_client(
                             surface.id
                                 == format!("client-{client_id}-surface-{}", committed_surface.0)
                         });
-                        let output_viewports = output_viewports(&outputs);
+                        let output_viewports = output_viewports_from_projection(&live_projection);
                         for callback_id in core.take_frame_callbacks(committed_surface) {
                             let intersecting_outputs = surface
                                 .as_ref()
@@ -2872,19 +2872,21 @@ impl PendingFrameCallbacks {
     }
 }
 
-fn output_viewports(outputs: &[OutputMode]) -> Vec<(String, waybroker_common::Rect)> {
-    let mut origin_x = 0i32;
-    outputs
-        .iter()
+fn output_viewports_from_projection(
+    projection: &BTreeMap<String, OutputTopologyEntry>,
+) -> Vec<(String, waybroker_common::Rect)> {
+    projection
+        .values()
         .map(|output| {
-            let viewport = waybroker_common::Rect {
-                x: origin_x,
-                y: 0,
-                width: output.width,
-                height: output.height,
-            };
-            origin_x = origin_x.saturating_add(output.width.min(i32::MAX as u32) as i32);
-            (output.name.clone(), viewport)
+            (
+                output.geometry.output_id.clone(),
+                waybroker_common::Rect {
+                    x: output.geometry.origin_x,
+                    y: output.geometry.origin_y,
+                    width: output.geometry.width,
+                    height: output.geometry.height,
+                },
+            )
         })
         .collect()
 }
@@ -4065,16 +4067,17 @@ mod tests {
         Config, MAX_PRODUCTION_WAYLAND_CLIENTS, PendingFrameCallbacks, ProductionClientPermit,
         ResyncState, SNAPSHOT_RETRY_LIMIT, TOPOLOGY_DELTA_BUFFER_LIMIT, TOPOLOGY_QUEUE_CAPACITY,
         handle_wayland_command, intersecting_output_ids, mock_surface_registry,
-        next_topology_reconnect_backoff, output_viewports, projection_diff_commands,
-        should_clear_pending_commit, should_store_pending_commit, socket_lock_is_stale,
+        next_topology_reconnect_backoff, output_viewports_from_projection,
+        projection_diff_commands, should_clear_pending_commit, should_store_pending_commit,
+        socket_lock_is_stale,
     };
     use std::collections::BTreeMap;
     use std::fs;
 
     use waybroker_common::{
-        FocusTarget, OutputGeometry, OutputMode, OutputTopologyEntry, SurfacePlacement,
-        SurfaceSnapshot, WaylandCommand, WaylandEvent, WaylandSelectionHandoff,
-        WaylandSelectionState, WaylandSurfaceRole,
+        FocusTarget, OutputGeometry, OutputTopologyEntry, SurfacePlacement, SurfaceSnapshot,
+        WaylandCommand, WaylandEvent, WaylandSelectionHandoff, WaylandSelectionState,
+        WaylandSurfaceRole,
     };
 
     use super::{TopologyInput, start_topology_supervisor_loop};
@@ -4501,17 +4504,81 @@ mod tests {
 
     #[test]
     fn output_intersection_is_deterministic_and_excludes_empty_viewports() {
-        let outputs = vec![
-            OutputMode { name: "eDP-1".into(), width: 100, height: 100, refresh_hz: 60 },
-            OutputMode { name: "HDMI-A-1".into(), width: 100, height: 100, refresh_hz: 60 },
-        ];
-        let viewports = output_viewports(&outputs);
+        let mut projection = BTreeMap::new();
+        let mut left = test_entry(1);
+        left.geometry.output_id = "eDP-1".into();
+        left.name = "eDP-1".into();
+        left.geometry.width = 100;
+        left.geometry.height = 100;
+        let mut right = left.clone();
+        right.geometry.output_id = "HDMI-A-1".into();
+        right.name = "HDMI-A-1".into();
+        right.geometry.origin_x = 100;
+        projection.insert(left.geometry.output_id.clone(), left);
+        projection.insert(right.geometry.output_id.clone(), right);
+        let viewports = output_viewports_from_projection(&projection);
         let placement =
             SurfacePlacement { x: 90, y: 10, width: 30, height: 20, z: 0, visible: true };
-        assert_eq!(intersecting_output_ids(&placement, &viewports), vec!["eDP-1", "HDMI-A-1"]);
+        assert_eq!(intersecting_output_ids(&placement, &viewports), vec!["HDMI-A-1", "eDP-1"]);
         assert!(
             intersecting_output_ids(&SurfacePlacement { visible: false, ..placement }, &viewports)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn output_intersection_uses_authoritative_origins_gaps_negative_coordinates_and_overlap() {
+        let mut projection = BTreeMap::new();
+        let mut upper = test_entry(1);
+        upper.geometry.output_id = "A".into();
+        upper.name = "A".into();
+        upper.geometry.origin_x = -200;
+        upper.geometry.origin_y = -100;
+        upper.geometry.width = 100;
+        upper.geometry.height = 100;
+        let mut lower = upper.clone();
+        lower.geometry.output_id = "B".into();
+        lower.name = "B".into();
+        lower.geometry.origin_x = 500;
+        lower.geometry.origin_y = 200;
+        projection.insert("A".into(), upper);
+        projection.insert("B".into(), lower);
+        let viewports = output_viewports_from_projection(&projection);
+        assert_eq!(
+            intersecting_output_ids(
+                &SurfacePlacement { x: -150, y: -50, width: 10, height: 10, z: 0, visible: true },
+                &viewports,
+            ),
+            vec!["A"]
+        );
+        assert!(
+            intersecting_output_ids(
+                &SurfacePlacement { x: 300, y: 0, width: 100, height: 100, z: 0, visible: true },
+                &viewports,
+            )
+            .is_empty()
+        );
+
+        let mut overlap = BTreeMap::new();
+        let mut first = test_entry(1);
+        first.geometry.output_id = "A".into();
+        first.name = "A".into();
+        first.geometry.origin_x = 0;
+        first.geometry.origin_y = 0;
+        first.geometry.width = 100;
+        first.geometry.height = 100;
+        let mut second = first.clone();
+        second.geometry.output_id = "B".into();
+        second.name = "B".into();
+        second.geometry.origin_x = 50;
+        overlap.insert("A".into(), first);
+        overlap.insert("B".into(), second);
+        assert_eq!(
+            intersecting_output_ids(
+                &SurfacePlacement { x: 60, y: 10, width: 10, height: 10, z: 0, visible: true },
+                &output_viewports_from_projection(&overlap),
+            ),
+            vec!["A", "B"]
         );
     }
 
