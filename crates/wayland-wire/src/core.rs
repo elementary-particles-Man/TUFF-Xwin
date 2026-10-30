@@ -31,6 +31,15 @@ const MAX_CLIENT_REGIONS: usize = 4096;
 const MAX_CLIENT_PENDING_DAMAGE_RECTS: usize = 4096;
 const MAX_CLIENT_FRAME_CALLBACKS: usize = 4096;
 
+fn refresh_period_to_millihz(refresh_ns: u32) -> Result<i32> {
+    if refresh_ns == 0 {
+        return Ok(0);
+    }
+    let millihz = (1_000_000_000_000u64 + u64::from(refresh_ns) / 2) / u64::from(refresh_ns);
+    i32::try_from(millihz)
+        .map_err(|_| WireError::ProtocolError("wl_output.mode refresh exceeds i32".into()))
+}
+
 #[derive(Clone)]
 pub struct WireGlobal {
     pub name: u32,
@@ -720,6 +729,7 @@ impl HeadlessWireCore {
         name: &str,
     ) -> Result<()> {
         let version = self.registry.get_object(output_id)?.version;
+        let refresh_millihz = refresh_period_to_millihz(refresh)?;
         let mut p = Vec::with_capacity(64);
         let mut b = [0u8; 4];
         byteorder::LittleEndian::write_i32(&mut b, x);
@@ -742,12 +752,10 @@ impl HeadlessWireCore {
         byteorder::LittleEndian::write_u32(&mut p[0..4], 1);
         byteorder::LittleEndian::write_i32(&mut p[4..8], width);
         byteorder::LittleEndian::write_i32(&mut p[8..12], height);
-        byteorder::LittleEndian::write_i32(&mut p[12..16], refresh as i32);
+        byteorder::LittleEndian::write_i32(&mut p[12..16], refresh_millihz);
         self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(1), p));
 
         if version >= 2 {
-            self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(2), vec![]));
-
             let mut p = vec![0u8; 4];
             byteorder::LittleEndian::write_i32(&mut p[0..4], scale as i32);
             self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(3), p));
@@ -760,6 +768,9 @@ impl HeadlessWireCore {
             let mut p = Vec::new();
             crate::args::encode_string("TUFF Virtual Display", &mut p);
             self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(5), p));
+        }
+        if version >= 2 {
+            self.events_out.push(WaylandMessage::new(output_id, WaylandOpcode(2), vec![]));
         }
         Ok(())
     }
@@ -1344,12 +1355,12 @@ mod tests {
     fn wl_output_events_follow_each_bound_version_and_reconfigure() {
         for (version, expected_opcodes) in [
             (1, vec![0, 1]),
-            (2, vec![0, 1, 2, 3]),
-            (3, vec![0, 1, 2, 3]),
-            (4, vec![0, 1, 2, 3, 4, 5]),
+            (2, vec![0, 1, 3, 2]),
+            (3, vec![0, 1, 3, 2]),
+            (4, vec![0, 1, 3, 4, 5, 2]),
         ] {
             let mut core = core_with_registry();
-            core.add_topology_output("eDP-1", 500, 200, 1920, 1080, 60_000, 2);
+            core.add_topology_output("eDP-1", 500, 200, 1920, 1080, 16_666_667, 2);
             core.drain_events();
             core.dispatch(WaylandMessage::new(
                 WaylandObjectId(10),
@@ -1357,15 +1368,27 @@ mod tests {
                 registry_bind_payload(100, "wl_output", version, 20),
             ))
             .unwrap();
+            let initial_events = core.drain_events();
             let opcodes: Vec<_> =
-                core.drain_events().iter().map(|event| event.header.opcode.0).collect();
+                initial_events.iter().map(|event| event.header.opcode.0).collect();
             assert_eq!(opcodes, expected_opcodes);
+            assert_eq!(LittleEndian::read_i32(&initial_events[1].payload[12..16]), 60_000);
 
-            core.reconfigure_topology_output("eDP-1", -10, -20, 1280, 720, 75_000, 1).unwrap();
+            core.reconfigure_topology_output("eDP-1", -10, -20, 1280, 720, 8_333_333, 1).unwrap();
+            let reconfigured_events = core.drain_events();
             let reconfigured: Vec<_> =
-                core.drain_events().iter().map(|event| event.header.opcode.0).collect();
+                reconfigured_events.iter().map(|event| event.header.opcode.0).collect();
             assert_eq!(reconfigured, expected_opcodes);
+            assert_eq!(LittleEndian::read_i32(&reconfigured_events[1].payload[12..16]), 120_000);
         }
+    }
+
+    #[test]
+    fn output_refresh_period_conversion_handles_unknown_and_range() {
+        assert_eq!(refresh_period_to_millihz(16_666_667).unwrap(), 60_000);
+        assert_eq!(refresh_period_to_millihz(8_333_333).unwrap(), 120_000);
+        assert_eq!(refresh_period_to_millihz(0).unwrap(), 0);
+        assert!(matches!(refresh_period_to_millihz(1), Err(WireError::ProtocolError(_))));
     }
 
     #[test]
