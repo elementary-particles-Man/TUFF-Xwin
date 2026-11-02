@@ -736,9 +736,10 @@ impl HeadlessWireCore {
         p.extend(&b);
         byteorder::LittleEndian::write_i32(&mut b, y);
         p.extend(&b);
-        byteorder::LittleEndian::write_i32(&mut b, 1920);
+        // Virtual outputs do not provide physical dimensions, so advertise unknown size.
+        byteorder::LittleEndian::write_i32(&mut b, 0);
         p.extend(&b);
-        byteorder::LittleEndian::write_i32(&mut b, 1080);
+        byteorder::LittleEndian::write_i32(&mut b, 0);
         p.extend(&b);
         byteorder::LittleEndian::write_i32(&mut b, 0);
         p.extend(&b);
@@ -1372,6 +1373,8 @@ mod tests {
             let opcodes: Vec<_> =
                 initial_events.iter().map(|event| event.header.opcode.0).collect();
             assert_eq!(opcodes, expected_opcodes);
+            assert_eq!(LittleEndian::read_i32(&initial_events[0].payload[8..12]), 0);
+            assert_eq!(LittleEndian::read_i32(&initial_events[0].payload[12..16]), 0);
             assert_eq!(LittleEndian::read_i32(&initial_events[1].payload[12..16]), 60_000);
 
             core.reconfigure_topology_output("eDP-1", -10, -20, 1280, 720, 8_333_333, 1).unwrap();
@@ -1379,6 +1382,8 @@ mod tests {
             let reconfigured: Vec<_> =
                 reconfigured_events.iter().map(|event| event.header.opcode.0).collect();
             assert_eq!(reconfigured, expected_opcodes);
+            assert_eq!(LittleEndian::read_i32(&reconfigured_events[0].payload[8..12]), 0);
+            assert_eq!(LittleEndian::read_i32(&reconfigured_events[0].payload[12..16]), 0);
             assert_eq!(LittleEndian::read_i32(&reconfigured_events[1].payload[12..16]), 120_000);
         }
     }
