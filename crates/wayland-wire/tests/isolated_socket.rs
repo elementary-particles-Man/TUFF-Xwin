@@ -242,6 +242,12 @@ fn test_reject_xdg_request_after_destroy() {
     );
     client.send_message(&msg).unwrap();
 
+    // Destruction now has a required terminal wl_display.delete_id event.
+    thread::sleep(std::time::Duration::from_millis(50));
+    let delete_events = client.receive_events().unwrap();
+    assert!(delete_events.iter().any(|event| event.header.object_id == WaylandObjectId::DISPLAY
+        && event.header.opcode == WaylandOpcode(1)));
+
     // Try set_title (opcode 2) on destroyed toplevel -> should fail
     client.xdg_toplevel_set_title(9, "After Destroy").unwrap();
 

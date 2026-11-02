@@ -254,6 +254,21 @@ impl HeadlessWireCore {
         events
     }
 
+    pub fn acknowledge_event_delivery(&mut self, event: &WaylandMessage) -> Result<()> {
+        if event.header.object_id == WaylandObjectId::DISPLAY
+            && event.header.opcode == WaylandOpcode(1)
+        {
+            if event.payload.len() != 4 {
+                return Err(WireError::ProtocolError(
+                    "wl_display.delete_id payload is invalid".into(),
+                ));
+            }
+            let id = WaylandObjectId(LittleEndian::read_u32(&event.payload));
+            self.registry.acknowledge_delete_id(id)?;
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn add_topology_output(
         &mut self,
@@ -621,6 +636,15 @@ impl HeadlessWireCore {
                 )))
             }
         }
+        for id in self.registry.take_delete_id_events() {
+            let mut payload = vec![0u8; 4];
+            LittleEndian::write_u32(&mut payload, id.0);
+            self.events_out.push(WaylandMessage::new(
+                WaylandObjectId::DISPLAY,
+                WaylandOpcode(1),
+                payload,
+            ));
+        }
         Ok(DispatchResult { events: self.events_out.clone() })
     }
 }
@@ -647,6 +671,7 @@ impl HeadlessWireCore {
         let mut payload = vec![0u8; 4];
         LittleEndian::write_u32(&mut payload[0..4], 0); // serial
         self.events_out.push(WaylandMessage::new(callback_id, WaylandOpcode(0), payload));
+        self.registry.destroy_object(callback_id)?;
         Ok(())
     }
 
@@ -1002,6 +1027,16 @@ impl HeadlessWireCore {
             self.presentation.destroy(fid);
         }
 
+        let callback_ids = self
+            .surfaces
+            .surfaces
+            .get(&surface_id)
+            .map(|surface| surface.callbacks.clone())
+            .unwrap_or_default();
+        for callback_id in callback_ids {
+            self.registry.destroy_object(callback_id)?;
+        }
+
         for event in self.layer_shell.surface_destroyed(surface_id) {
             self.events_out.push(event);
         }
@@ -1094,6 +1129,7 @@ impl HeadlessWireCore {
                 let mut payload = vec![0u8; 4];
                 LittleEndian::write_u32(&mut payload[0..4], 0); // serial
                 self.events_out.push(WaylandMessage::new(callback_id, WaylandOpcode(0), payload));
+                self.registry.destroy_object(callback_id)?;
             }
         }
 

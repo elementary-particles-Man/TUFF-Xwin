@@ -42,7 +42,18 @@ impl WireServer {
         let mut buffer = Vec::with_capacity(4096);
         let mut read_buf = [0u8; 4096];
         loop {
-            let (n, fds) = crate::fd::recv_with_fds(&stream, &mut read_buf)?;
+            let (n, fds) = match crate::fd::recv_with_fds(&stream, &mut read_buf) {
+                Ok(value) => value,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    ) =>
+                {
+                    break
+                }
+                Err(error) => return Err(crate::WireError::Io(error)),
+            };
             if n == 0 && fds.is_empty() {
                 break;
             }
@@ -89,6 +100,7 @@ impl WireServer {
                             use std::io::Write;
                             let mut s = &stream;
                             s.write_all(&encoded)?;
+                            self.core.acknowledge_event_delivery(&ev)?;
                         }
                     }
                     Err(WireError::Incomplete) => break,
