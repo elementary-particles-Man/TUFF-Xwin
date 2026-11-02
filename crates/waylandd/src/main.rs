@@ -80,6 +80,7 @@ const MAX_SCENE_PIXEL_PAYLOADS: usize = MAX_SCENE_SURFACES;
 const MAX_SCENE_PIXEL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_SINGLE_PIXEL_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PENDING_FRAME_CALLBACKS: usize = 4096;
+const MAX_PENDING_PRESENTATION_FEEDBACKS: usize = 4096;
 const MAX_PRODUCTION_WAYLAND_CLIENTS: usize = 256;
 const MAX_PENDING_WAYLAND_FDS: usize = 64;
 const MAX_WAYLAND_CLIENT_RECEIVE_BYTES: usize = wayland_wire::codec::MAX_WIRE_MESSAGE_BYTES + 4096;
@@ -2347,6 +2348,7 @@ fn handle_production_client(
     let _command_guard = ClientCommandGuard { client_id };
     let mut core = wayland_wire::core::HeadlessWireCore::default();
     core.set_defer_frame_callbacks(true);
+    core.set_defer_presentation_feedback(true);
 
     let (initial_epoch, initial_sequence, topology) = {
         let (lock, cvar) = &*TOPOLOGY_REGISTRY;
@@ -2372,6 +2374,7 @@ fn handle_production_client(
         ClientRegistryGuard { client_id, outputs: outputs.clone(), scene_epoch, finalized: false };
     let mut received_fds = Vec::new();
     let mut pending_callbacks = PendingFrameCallbacks::default();
+    let mut pending_feedbacks = PendingPresentationFeedbacks::default();
     let mut last_observed_presentation_generation = 0u64;
     let mut command_epoch = 0u64;
     let mut command_sequence = 0u64;
@@ -2445,6 +2448,15 @@ fn handle_production_client(
                     &event,
                     outputs.first().map(|output| output.name.as_str()).unwrap_or_default(),
                 )?;
+                release_presentation_feedbacks(
+                    &stream,
+                    &core,
+                    &mut pending_feedbacks,
+                    client_id,
+                    generation,
+                    &event,
+                    outputs.first().map(|output| output.name.as_str()).unwrap_or_default(),
+                )?;
                 last_observed_presentation_generation =
                     last_observed_presentation_generation.max(generation);
             }
@@ -2457,6 +2469,15 @@ fn handle_production_client(
             release_presented_callbacks(
                 &stream,
                 &mut pending_callbacks,
+                client_id,
+                presented_generation,
+                &event,
+                outputs.first().map(|output| output.name.as_str()).unwrap_or_default(),
+            )?;
+            release_presentation_feedbacks(
+                &stream,
+                &core,
+                &mut pending_feedbacks,
                 client_id,
                 presented_generation,
                 &event,
@@ -2513,6 +2534,12 @@ fn handle_production_client(
                             .get_object(msg.header.object_id)
                             .map(|object| object.interface == "wl_surface")
                             .unwrap_or(false);
+                    let is_surface_destroy = msg.header.opcode.0 == 0
+                        && core
+                            .registry
+                            .get_object(msg.header.object_id)
+                            .map(|object| object.interface == "wl_surface")
+                            .unwrap_or(false);
                     let committed_surface = msg.header.object_id;
 
                     match core.dispatch_with_fds(msg.clone(), &mut received_fds) {
@@ -2559,12 +2586,43 @@ fn handle_production_client(
                                 intersecting_outputs,
                             )?;
                         }
+                        for feedback_id in core.take_presentation_feedbacks(committed_surface) {
+                            let intersecting_outputs = surface
+                                .as_ref()
+                                .map(|surface| {
+                                    intersecting_output_ids(&surface.placement, &output_viewports)
+                                })
+                                .unwrap_or_default();
+                            if intersecting_outputs.is_empty() {
+                                emit_discarded_feedback(&stream, &core, feedback_id)?;
+                            } else {
+                                pending_feedbacks.register(
+                                    client_id,
+                                    feedback_id,
+                                    committed_surface.0,
+                                    scene_generation,
+                                    intersecting_outputs,
+                                )?;
+                            }
+                        }
 
                         match commit_canonical_scene(&outputs, scene_epoch) {
                             Ok(presentation) => {
                                 release_presented_callbacks(
                                     &stream,
                                     &mut pending_callbacks,
+                                    client_id,
+                                    scene_generation,
+                                    &presentation,
+                                    outputs
+                                        .first()
+                                        .map(|output| output.name.as_str())
+                                        .unwrap_or_default(),
+                                )?;
+                                release_presentation_feedbacks(
+                                    &stream,
+                                    &core,
+                                    &mut pending_feedbacks,
                                     client_id,
                                     scene_generation,
                                     &presentation,
@@ -2584,6 +2642,17 @@ fn handle_production_client(
                     }
                     if !core.surfaces.surfaces.contains_key(&committed_surface) {
                         pending_callbacks.remove_surface(client_id, committed_surface.0);
+                        if is_surface_destroy {
+                            for feedback_id in
+                                pending_feedbacks.remove_surface(client_id, committed_surface.0)
+                            {
+                                emit_discarded_feedback(
+                                    &stream,
+                                    &core,
+                                    wayland_wire::WaylandObjectId(feedback_id),
+                                )?;
+                            }
+                        }
                     }
                 }
                 Err(wayland_wire::WireError::Incomplete) => break,
@@ -2869,6 +2938,114 @@ impl PendingFrameCallbacks {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.callbacks.len()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingPresentationFeedback {
+    feedback_id: u32,
+    client_id: u64,
+    surface_id: u32,
+    scene_generation: u64,
+    intersecting_outputs: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct PendingPresentationFeedbacks {
+    feedbacks: BTreeMap<(u64, u32), PendingPresentationFeedback>,
+}
+
+impl PendingPresentationFeedbacks {
+    fn register(
+        &mut self,
+        client_id: u64,
+        feedback_id: wayland_wire::WaylandObjectId,
+        surface_id: u32,
+        scene_generation: u64,
+        mut intersecting_outputs: Vec<String>,
+    ) -> Result<()> {
+        intersecting_outputs.sort();
+        intersecting_outputs.dedup();
+        let key = (client_id, feedback_id.0);
+        if self.feedbacks.contains_key(&key) {
+            bail!(
+                "duplicate presentation feedback identity client={client_id} feedback={}",
+                feedback_id.0
+            );
+        }
+        if self.feedbacks.len() >= MAX_PENDING_PRESENTATION_FEEDBACKS {
+            bail!(
+                "pending presentation feedback budget exhausted: {}",
+                MAX_PENDING_PRESENTATION_FEEDBACKS
+            );
+        }
+        self.feedbacks.insert(
+            key,
+            PendingPresentationFeedback {
+                feedback_id: feedback_id.0,
+                client_id,
+                surface_id,
+                scene_generation,
+                intersecting_outputs,
+            },
+        );
+        Ok(())
+    }
+
+    fn resolve_for_presented(
+        &mut self,
+        client_id: u64,
+        presented_generation: u64,
+        output_id: &str,
+    ) -> (Vec<u32>, Vec<u32>) {
+        let keys: Vec<_> = self
+            .feedbacks
+            .iter()
+            .filter(|(_, feedback)| {
+                feedback.client_id == client_id
+                    && (feedback.scene_generation < presented_generation
+                        || (feedback.scene_generation == presented_generation
+                            && feedback
+                                .intersecting_outputs
+                                .iter()
+                                .any(|output| output == output_id)))
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        let mut presented = Vec::new();
+        let mut discarded = Vec::new();
+        for key in keys {
+            if let Some(feedback) = self.feedbacks.remove(&key) {
+                if feedback.scene_generation == presented_generation
+                    && feedback.intersecting_outputs.iter().any(|output| output == output_id)
+                {
+                    presented.push(feedback.feedback_id);
+                } else {
+                    discarded.push(feedback.feedback_id);
+                }
+            }
+        }
+        (presented, discarded)
+    }
+
+    fn remove_surface(&mut self, client_id: u64, surface_id: u32) -> Vec<u32> {
+        let ids = self
+            .feedbacks
+            .iter()
+            .filter(|(_, feedback)| {
+                feedback.client_id == client_id && feedback.surface_id == surface_id
+            })
+            .map(|(_, feedback)| feedback.feedback_id)
+            .collect();
+        self.feedbacks.retain(|_, feedback| {
+            !(feedback.client_id == client_id && feedback.surface_id == surface_id)
+        });
+        ids
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.feedbacks.len()
     }
 }
 
@@ -3383,6 +3560,71 @@ fn shared_presentation_since(last_generation: u64) -> Option<(u64, DisplayEvent)
         }
         _ => None,
     }
+}
+
+fn emit_discarded_feedback(
+    stream: &UnixStream,
+    core: &wayland_wire::core::HeadlessWireCore,
+    feedback_id: wayland_wire::WaylandObjectId,
+) -> Result<()> {
+    let event = wayland_wire::codec::encode_event(
+        feedback_id,
+        wayland_wire::WaylandOpcode(2),
+        &[],
+        &core.registry,
+    )?;
+    let mut writer = stream;
+    writer.write_all(&wayland_wire::codec::encode_message(&event)?)?;
+    Ok(())
+}
+
+fn release_presentation_feedbacks(
+    stream: &UnixStream,
+    core: &wayland_wire::core::HeadlessWireCore,
+    pending: &mut PendingPresentationFeedbacks,
+    client_id: u64,
+    presented_generation: u64,
+    presentation: &DisplayEvent,
+    output_id: &str,
+) -> Result<()> {
+    let DisplayEvent::FramePresented { timestamp, refresh_ns, seq, flags, .. } = presentation
+    else {
+        return Ok(());
+    };
+    let (presented, discarded) =
+        pending.resolve_for_presented(client_id, presented_generation, output_id);
+    let sec_hi = (*timestamp >> 32) as u32;
+    let sec_lo = *timestamp as u32;
+    let nsec = (*timestamp % 1_000_000_000) as u32;
+    let args = [
+        wayland_wire::WireArg::Uint(sec_hi),
+        wayland_wire::WireArg::Uint(sec_lo),
+        wayland_wire::WireArg::Uint(nsec),
+        wayland_wire::WireArg::Uint(*refresh_ns),
+        wayland_wire::WireArg::Uint((*seq >> 32) as u32),
+        wayland_wire::WireArg::Uint(*seq as u32),
+        wayland_wire::WireArg::Uint(*flags),
+    ];
+    let mut writer = stream;
+    for feedback_id in presented {
+        let event = wayland_wire::codec::encode_event(
+            wayland_wire::WaylandObjectId(feedback_id),
+            wayland_wire::WaylandOpcode(1),
+            &args,
+            &core.registry,
+        )?;
+        writer.write_all(&wayland_wire::codec::encode_message(&event)?)?;
+    }
+    for feedback_id in discarded {
+        let event = wayland_wire::codec::encode_event(
+            wayland_wire::WaylandObjectId(feedback_id),
+            wayland_wire::WaylandOpcode(2),
+            &[],
+            &core.registry,
+        )?;
+        writer.write_all(&wayland_wire::codec::encode_message(&event)?)?;
+    }
+    Ok(())
 }
 
 fn release_presented_callbacks(
@@ -4064,15 +4306,19 @@ impl Drop for WaylandDisplaySocket {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, MAX_PRODUCTION_WAYLAND_CLIENTS, PendingFrameCallbacks, ProductionClientPermit,
-        ResyncState, SNAPSHOT_RETRY_LIMIT, TOPOLOGY_DELTA_BUFFER_LIMIT, TOPOLOGY_QUEUE_CAPACITY,
-        handle_wayland_command, intersecting_output_ids, mock_surface_registry,
-        next_topology_reconnect_backoff, output_viewports_from_projection,
-        projection_diff_commands, should_clear_pending_commit, should_store_pending_commit,
-        socket_lock_is_stale,
+        Config, MAX_PRODUCTION_WAYLAND_CLIENTS, PendingFrameCallbacks,
+        PendingPresentationFeedbacks, ProductionClientPermit, ResyncState, SNAPSHOT_RETRY_LIMIT,
+        TOPOLOGY_DELTA_BUFFER_LIMIT, TOPOLOGY_QUEUE_CAPACITY, handle_wayland_command,
+        intersecting_output_ids, mock_surface_registry, next_topology_reconnect_backoff,
+        output_viewports_from_projection, projection_diff_commands, release_presentation_feedbacks,
+        should_clear_pending_commit, should_store_pending_commit, socket_lock_is_stale,
     };
+    use byteorder::ByteOrder;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io::Read;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
 
     use waybroker_common::{
         FocusTarget, OutputGeometry, OutputTopologyEntry, SurfacePlacement, SurfaceSnapshot,
@@ -4447,6 +4693,74 @@ mod tests {
         assert_eq!(callbacks.release_for_presented(7, 11, "eDP-1"), vec![42]);
         assert!(callbacks.release_for_presented(7, 11, "HDMI-A-1").is_empty());
         assert_eq!(callbacks.len(), 0);
+    }
+
+    #[test]
+    fn presentation_feedbacks_are_bounded_and_generation_scoped() {
+        let mut pending = super::PendingPresentationFeedbacks::default();
+        for id in 1..=super::MAX_PENDING_PRESENTATION_FEEDBACKS {
+            pending
+                .register(7, wayland_wire::WaylandObjectId(id as u32), 10, 4, vec!["eDP-1".into()])
+                .unwrap();
+        }
+        assert_eq!(pending.len(), super::MAX_PENDING_PRESENTATION_FEEDBACKS);
+        assert!(
+            pending
+                .register(7, wayland_wire::WaylandObjectId(4097), 10, 4, vec!["eDP-1".into()])
+                .is_err()
+        );
+
+        let (presented, discarded) = pending.resolve_for_presented(7, 5, "eDP-1");
+        assert!(presented.is_empty());
+        assert_eq!(discarded.len(), super::MAX_PENDING_PRESENTATION_FEEDBACKS);
+        assert_eq!(pending.len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn presentation_feedback_payload_uses_actual_frame_presented_values() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let mut core = wayland_wire::core::HeadlessWireCore::default();
+        core.registry
+            .register_client_object(
+                wayland_wire::WaylandObjectId(42),
+                "wp_presentation_feedback",
+                1,
+            )
+            .unwrap();
+        let mut pending = PendingPresentationFeedbacks::default();
+        pending
+            .register(7, wayland_wire::WaylandObjectId(42), 3, 11, vec!["eDP-1".into()])
+            .unwrap();
+        release_presentation_feedbacks(
+            &server,
+            &core,
+            &mut pending,
+            7,
+            11,
+            &DisplayEvent::FramePresented {
+                commit_id: 9,
+                timestamp: 0x0000_0002_1234_5678,
+                refresh_ns: 8_333_333,
+                seq: 0x1122_3344_5566_7788,
+                flags: 5,
+            },
+            "eDP-1",
+        )
+        .unwrap();
+        let mut wire = [0u8; 36];
+        client.read_exact(&mut wire).unwrap();
+        let event = wayland_wire::codec::decode_message(&wire).unwrap();
+        assert_eq!(event.header.object_id.0, 42);
+        assert_eq!(event.header.opcode.0, 1);
+        assert_eq!(byteorder::LittleEndian::read_u32(&event.payload[0..4]), 2);
+        assert_eq!(byteorder::LittleEndian::read_u32(&event.payload[4..8]), 0x1234_5678);
+        assert_eq!(byteorder::LittleEndian::read_u32(&event.payload[8..12]), 895_354_488);
+        assert_eq!(byteorder::LittleEndian::read_u32(&event.payload[12..16]), 8_333_333);
+        assert_eq!(byteorder::LittleEndian::read_u32(&event.payload[16..20]), 0x1122_3344);
+        assert_eq!(byteorder::LittleEndian::read_u32(&event.payload[20..24]), 0x5566_7788);
+        assert_eq!(byteorder::LittleEndian::read_u32(&event.payload[24..28]), 5);
+        assert_eq!(pending.len(), 0);
     }
 
     #[test]

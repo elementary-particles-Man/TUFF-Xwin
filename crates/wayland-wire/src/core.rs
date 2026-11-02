@@ -80,6 +80,7 @@ pub struct HeadlessWireCore {
     runtime_global_names: std::collections::BTreeMap<String, u32>,
     events_out: Vec<WaylandMessage>,
     defer_frame_callbacks: bool,
+    defer_presentation_feedback: bool,
     next_global_name: u32,
 }
 
@@ -117,6 +118,7 @@ impl Default for HeadlessWireCore {
             runtime_global_names: std::collections::BTreeMap::new(),
             events_out: Vec::new(),
             defer_frame_callbacks: false,
+            defer_presentation_feedback: false,
             next_global_name: 100, // start after initial globals
         };
 
@@ -208,12 +210,37 @@ impl HeadlessWireCore {
         self.defer_frame_callbacks = defer;
     }
 
+    /// Production transport resolves feedback only after the broker reports a
+    /// real FramePresented event; standalone headless tests retain eager behavior.
+    pub fn set_defer_presentation_feedback(&mut self, defer: bool) {
+        self.defer_presentation_feedback = defer;
+    }
+
     pub fn take_frame_callbacks(&mut self, surface_id: WaylandObjectId) -> Vec<WaylandObjectId> {
         self.surfaces
             .surfaces
             .get_mut(&surface_id)
             .map(|surface| std::mem::take(&mut surface.callbacks))
             .unwrap_or_default()
+    }
+
+    /// Take feedback requests committed by one surface exactly once, in ID order.
+    pub fn take_presentation_feedbacks(
+        &mut self,
+        surface_id: WaylandObjectId,
+    ) -> Vec<WaylandObjectId> {
+        let mut ids = self
+            .presentation
+            .feedbacks
+            .iter()
+            .filter(|(_, feedback)| feedback.surface_id == surface_id)
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        ids.sort_by_key(|id| id.0);
+        for id in &ids {
+            self.presentation.destroy(*id);
+        }
+        ids
     }
 
     pub fn add_real_output(&mut self, name: &str, width: i32, height: i32) {
@@ -1070,7 +1097,8 @@ impl HeadlessWireCore {
             }
         }
 
-        // Handle presentation feedbacks
+        // Handle presentation feedbacks. Production delays terminal delivery
+        // until waylandd receives an actual broker FramePresented event.
         let feedback_ids: Vec<WaylandObjectId> = self
             .presentation
             .feedbacks
@@ -1079,6 +1107,9 @@ impl HeadlessWireCore {
             .map(|(fid, _)| *fid)
             .collect();
 
+        if self.defer_presentation_feedback {
+            return Ok(());
+        }
         for fid in feedback_ids {
             let now = self.clock.now_nsec();
             let sec_hi = (now >> 32) as u32;
@@ -1394,6 +1425,29 @@ mod tests {
         assert_eq!(refresh_period_to_millihz(8_333_333).unwrap(), 120_000);
         assert_eq!(refresh_period_to_millihz(0).unwrap(), 0);
         assert!(matches!(refresh_period_to_millihz(1), Err(WireError::ProtocolError(_))));
+    }
+
+    #[test]
+    fn production_presentation_feedback_waits_for_explicit_resolution() {
+        let mut core = core_with_registry();
+        core.registry.register_client_object(WaylandObjectId(20), "wl_surface", 4).unwrap();
+        core.surfaces.create_surface(WaylandObjectId(20));
+        core.registry.register_client_object(WaylandObjectId(11), "wp_presentation", 1).unwrap();
+        core.set_defer_presentation_feedback(true);
+
+        let mut feedback = vec![0u8; 8];
+        LittleEndian::write_u32(&mut feedback[0..4], 20);
+        LittleEndian::write_u32(&mut feedback[4..8], 21);
+        core.dispatch(WaylandMessage::new(WaylandObjectId(11), WaylandOpcode(1), feedback))
+            .unwrap();
+        core.dispatch(WaylandMessage::new(WaylandObjectId(20), WaylandOpcode(6), vec![])).unwrap();
+
+        assert!(core.drain_events().is_empty());
+        assert_eq!(
+            core.take_presentation_feedbacks(WaylandObjectId(20)),
+            vec![WaylandObjectId(21)]
+        );
+        assert!(core.drain_events().is_empty());
     }
 
     #[test]
