@@ -78,6 +78,8 @@ impl WireObjectRegistry {
             .filter(|id| !self.queued_delete_ids.contains(id))
             .copied()
             .collect();
+        let mut ids = ids;
+        ids.sort_unstable();
         for id in &ids {
             self.queued_delete_ids.insert(*id);
         }
