@@ -2442,6 +2442,7 @@ fn handle_production_client(
             RetryPendingOutcome::Success { generation, event } => {
                 release_presented_callbacks(
                     &stream,
+                    &mut core,
                     &mut pending_callbacks,
                     client_id,
                     generation,
@@ -2450,7 +2451,7 @@ fn handle_production_client(
                 )?;
                 release_presentation_feedbacks(
                     &stream,
-                    &core,
+                    &mut core,
                     &mut pending_feedbacks,
                     client_id,
                     generation,
@@ -2468,6 +2469,7 @@ fn handle_production_client(
         {
             release_presented_callbacks(
                 &stream,
+                &mut core,
                 &mut pending_callbacks,
                 client_id,
                 presented_generation,
@@ -2476,7 +2478,7 @@ fn handle_production_client(
             )?;
             release_presentation_feedbacks(
                 &stream,
-                &core,
+                &mut core,
                 &mut pending_feedbacks,
                 client_id,
                 presented_generation,
@@ -2594,7 +2596,7 @@ fn handle_production_client(
                                 })
                                 .unwrap_or_default();
                             if intersecting_outputs.is_empty() {
-                                emit_discarded_feedback(&stream, &core, feedback_id)?;
+                                emit_discarded_feedback(&stream, &mut core, feedback_id)?;
                             } else {
                                 pending_feedbacks.register(
                                     client_id,
@@ -2610,6 +2612,7 @@ fn handle_production_client(
                             Ok(presentation) => {
                                 release_presented_callbacks(
                                     &stream,
+                                    &mut core,
                                     &mut pending_callbacks,
                                     client_id,
                                     scene_generation,
@@ -2621,7 +2624,7 @@ fn handle_production_client(
                                 )?;
                                 release_presentation_feedbacks(
                                     &stream,
-                                    &core,
+                                    &mut core,
                                     &mut pending_feedbacks,
                                     client_id,
                                     scene_generation,
@@ -2648,7 +2651,7 @@ fn handle_production_client(
                             {
                                 emit_discarded_feedback(
                                     &stream,
-                                    &core,
+                                    &mut core,
                                     wayland_wire::WaylandObjectId(feedback_id),
                                 )?;
                             }
@@ -2688,6 +2691,8 @@ fn flush_pending_client_events(
         let encoded = wayland_wire::codec::encode_message(&event)
             .map_err(|error| ClientEventFlushError::Encode(error.into()))?;
         stream.write_all(&encoded).map_err(ClientEventFlushError::Write)?;
+        core.acknowledge_event_delivery(&event)
+            .map_err(|error| ClientEventFlushError::Encode(error.into()))?;
     }
     Ok(())
 }
@@ -3564,7 +3569,7 @@ fn shared_presentation_since(last_generation: u64) -> Option<(u64, DisplayEvent)
 
 fn emit_discarded_feedback(
     stream: &UnixStream,
-    core: &wayland_wire::core::HeadlessWireCore,
+    core: &mut wayland_wire::core::HeadlessWireCore,
     feedback_id: wayland_wire::WaylandObjectId,
 ) -> Result<()> {
     let event = wayland_wire::codec::encode_event(
@@ -3575,12 +3580,32 @@ fn emit_discarded_feedback(
     )?;
     let mut writer = stream;
     writer.write_all(&wayland_wire::codec::encode_message(&event)?)?;
+    write_delete_id(stream, core, feedback_id)?;
+    Ok(())
+}
+
+fn write_delete_id(
+    stream: &UnixStream,
+    core: &mut wayland_wire::core::HeadlessWireCore,
+    object_id: wayland_wire::WaylandObjectId,
+) -> Result<()> {
+    core.registry.destroy_object(object_id)?;
+    let mut payload = vec![0u8; 4];
+    byteorder::LittleEndian::write_u32(&mut payload, object_id.0);
+    let event = wayland_wire::WaylandMessage::new(
+        wayland_wire::WaylandObjectId::DISPLAY,
+        wayland_wire::WaylandOpcode(1),
+        payload,
+    );
+    let mut writer = stream;
+    writer.write_all(&wayland_wire::codec::encode_message(&event)?)?;
+    core.acknowledge_event_delivery(&event)?;
     Ok(())
 }
 
 fn release_presentation_feedbacks(
     stream: &UnixStream,
-    core: &wayland_wire::core::HeadlessWireCore,
+    core: &mut wayland_wire::core::HeadlessWireCore,
     pending: &mut PendingPresentationFeedbacks,
     client_id: u64,
     presented_generation: u64,
@@ -3614,6 +3639,7 @@ fn release_presentation_feedbacks(
             &core.registry,
         )?;
         writer.write_all(&wayland_wire::codec::encode_message(&event)?)?;
+        write_delete_id(stream, core, wayland_wire::WaylandObjectId(feedback_id))?;
     }
     for feedback_id in discarded {
         let event = wayland_wire::codec::encode_event(
@@ -3629,6 +3655,7 @@ fn release_presentation_feedbacks(
 
 fn release_presented_callbacks(
     stream: &UnixStream,
+    core: &mut wayland_wire::core::HeadlessWireCore,
     pending_callbacks: &mut PendingFrameCallbacks,
     client_id: u64,
     scene_generation: u64,
@@ -3649,6 +3676,7 @@ fn release_presented_callbacks(
         );
         let mut writer = stream;
         writer.write_all(&wayland_wire::codec::encode_message(&event)?)?;
+        write_delete_id(stream, core, wayland_wire::WaylandObjectId(callback_id))?;
     }
     Ok(())
 }
@@ -4734,7 +4762,7 @@ mod tests {
             .unwrap();
         release_presentation_feedbacks(
             &server,
-            &core,
+            &mut core,
             &mut pending,
             7,
             11,
@@ -5588,6 +5616,15 @@ mod topology_fanout_tests {
         let mut payload = [0u8; 4];
         client.read_exact(&mut payload).unwrap();
         assert_eq!(u32::from_le_bytes(payload), 0);
+        let mut delete_header = [0u8; 8];
+        client.read_exact(&mut delete_header).unwrap();
+        assert_eq!(u32::from_le_bytes(delete_header[..4].try_into().unwrap()), 1);
+        let delete_word = u32::from_le_bytes(delete_header[4..].try_into().unwrap());
+        assert_eq!(delete_word & 0xffff, 1);
+        assert_eq!(delete_word >> 16, 12);
+        let mut delete_payload = [0u8; 4];
+        client.read_exact(&mut delete_payload).unwrap();
+        assert_eq!(u32::from_le_bytes(delete_payload), 7);
         assert!(core.drain_events().is_empty());
         client.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
         let mut duplicate = [0u8; 1];

@@ -1,6 +1,6 @@
 use crate::{Result, WaylandObjectId, WireError};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireObject {
@@ -11,21 +11,27 @@ pub struct WireObject {
 
 pub struct WireObjectRegistry {
     objects: HashMap<WaylandObjectId, WireObject>,
-    used_ids: HashSet<WaylandObjectId>,
+    retired_pending_delete: HashSet<WaylandObjectId>,
+    reusable_ids: HashSet<WaylandObjectId>,
+    queued_delete_ids: BTreeSet<WaylandObjectId>,
     next_server_id: u32,
 }
 
 impl Default for WireObjectRegistry {
     fn default() -> Self {
-        let mut registry =
-            Self { objects: HashMap::new(), used_ids: HashSet::new(), next_server_id: 0xff000000 };
+        let mut registry = Self {
+            objects: HashMap::new(),
+            retired_pending_delete: HashSet::new(),
+            reusable_ids: HashSet::new(),
+            queued_delete_ids: BTreeSet::new(),
+            next_server_id: 0xff000000,
+        };
 
         // Pre-register wl_display (ID 1)
         registry.objects.insert(
             WaylandObjectId::DISPLAY,
             WireObject { id: WaylandObjectId::DISPLAY, interface: "wl_display".into(), version: 1 },
         );
-        registry.used_ids.insert(WaylandObjectId::DISPLAY);
 
         registry
     }
@@ -42,22 +48,51 @@ impl WireObjectRegistry {
         interface: &str,
         version: u32,
     ) -> Result<()> {
-        if self.used_ids.contains(&id) {
-            // Technically Wayland allows reuse after a period, but task says reuse is forbidden.
+        if id == WaylandObjectId::DISPLAY
+            || self.objects.contains_key(&id)
+            || self.retired_pending_delete.contains(&id)
+        {
             return Err(WireError::InvalidObjectId(id.0));
         }
 
         self.objects.insert(id, WireObject { id, interface: interface.into(), version });
-        self.used_ids.insert(id);
+        self.reusable_ids.remove(&id);
         Ok(())
     }
 
     pub fn destroy_object(&mut self, id: WaylandObjectId) -> Result<()> {
         if self.objects.remove(&id).is_some() {
+            if id.0 < 0xff000000 && id != WaylandObjectId::DISPLAY {
+                self.retired_pending_delete.insert(id);
+            }
             Ok(())
         } else {
             Err(WireError::InvalidObjectId(id.0))
         }
+    }
+
+    pub fn take_delete_id_events(&mut self) -> Vec<WaylandObjectId> {
+        let ids: Vec<_> = self
+            .retired_pending_delete
+            .iter()
+            .filter(|id| !self.queued_delete_ids.contains(id))
+            .copied()
+            .collect();
+        let mut ids = ids;
+        ids.sort_unstable();
+        for id in &ids {
+            self.queued_delete_ids.insert(*id);
+        }
+        ids
+    }
+
+    pub fn acknowledge_delete_id(&mut self, id: WaylandObjectId) -> Result<()> {
+        if !self.retired_pending_delete.remove(&id) {
+            return Err(WireError::InvalidObjectId(id.0));
+        }
+        self.queued_delete_ids.remove(&id);
+        self.reusable_ids.insert(id);
+        Ok(())
     }
 
     pub fn next_server_id(&mut self) -> WaylandObjectId {
@@ -100,7 +135,21 @@ mod tests {
         registry.register_client_object(id, "wl_registry", 1).expect("register");
         registry.destroy_object(id).expect("destroy");
 
-        // Re-registering the same ID should fail based on task requirements
+        assert_eq!(registry.take_delete_id_events(), vec![id]);
         assert!(registry.register_client_object(id, "wl_registry", 1).is_err());
+        registry.acknowledge_delete_id(id).expect("delete_id delivered");
+        registry.register_client_object(id, "wl_registry", 1).expect("reuse after delete_id");
+    }
+
+    #[test]
+    fn delete_id_is_terminal_and_duplicate_destroy_is_rejected() {
+        let mut registry = WireObjectRegistry::default();
+        let id = WaylandObjectId(7);
+        registry.register_client_object(id, "wl_callback", 1).unwrap();
+        registry.destroy_object(id).unwrap();
+        assert!(registry.destroy_object(id).is_err());
+        assert_eq!(registry.take_delete_id_events(), vec![id]);
+        assert!(registry.take_delete_id_events().is_empty());
+        assert!(registry.acknowledge_delete_id(WaylandObjectId(8)).is_err());
     }
 }
