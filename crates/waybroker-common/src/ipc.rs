@@ -727,7 +727,9 @@ impl PhysicalInputEvent {
 // IPC values remain inline to preserve the established wire shape and public API.
 #[allow(clippy::large_enum_variant)]
 pub enum WaylandCommand {
-    InjectPhysicalInput { event: PhysicalInputEvent },
+    InjectPhysicalInput {
+        event: PhysicalInputEvent,
+    },
     GetSurfaceRegistry,
     ApplySelectionHandoff {
         handoff: WaylandSelectionHandoff,
@@ -784,7 +786,9 @@ pub enum WaylandCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum WaylandEvent {
-    PhysicalInputQueued { sequence: u64 },
+    PhysicalInputQueued {
+        sequence: u64,
+    },
     SurfaceRegistry {
         snapshot: SurfaceRegistrySnapshot,
     },
