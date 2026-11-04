@@ -3202,7 +3202,9 @@ impl HeadlessWireCore {
                 let ids = self.input.pointers.keys().copied().collect::<Vec<_>>();
                 for pointer_id in ids {
                     let pointer = self
-                        .input.pointers.get_mut(&pointer_id)
+                        .input
+                        .pointers
+                        .get_mut(&pointer_id)
                         .ok_or(WireError::InvalidObjectId(pointer_id.0))?;
                     let old_focus = pointer.focus_surface_id;
                     if matches!(event.kind, PhysicalInputKind::RelativeX { .. }) {
@@ -3218,22 +3220,39 @@ impl HeadlessWireCore {
                             let mut payload = Vec::new();
                             payload.extend_from_slice(&serial.to_le_bytes());
                             payload.extend_from_slice(&old.0.to_le_bytes());
-                            self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(1), payload));
+                            self.events_out.push(WaylandMessage::new(
+                                pointer_id,
+                                WaylandOpcode(1),
+                                payload,
+                            ));
                         }
                         let mut payload = Vec::new();
                         payload.extend_from_slice(&serial.to_le_bytes());
                         payload.extend_from_slice(&surface_id.0.to_le_bytes());
                         payload.extend_from_slice(&x.to_le_bytes());
                         payload.extend_from_slice(&y.to_le_bytes());
-                        self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(0), payload));
+                        self.events_out.push(WaylandMessage::new(
+                            pointer_id,
+                            WaylandOpcode(0),
+                            payload,
+                        ));
                     }
                     let mut payload = Vec::new();
                     payload.extend_from_slice(&time_ms.to_le_bytes());
                     payload.extend_from_slice(&x.to_le_bytes());
                     payload.extend_from_slice(&y.to_le_bytes());
-                    self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(2), payload));
-                    if self.registry.get_object(pointer_id).is_ok_and(|object| object.version >= 5) {
-                        self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(5), vec![]));
+                    self.events_out.push(WaylandMessage::new(
+                        pointer_id,
+                        WaylandOpcode(2),
+                        payload,
+                    ));
+                    if self.registry.get_object(pointer_id).is_ok_and(|object| object.version >= 5)
+                    {
+                        self.events_out.push(WaylandMessage::new(
+                            pointer_id,
+                            WaylandOpcode(5),
+                            vec![],
+                        ));
                     }
                 }
             }
@@ -3241,7 +3260,9 @@ impl HeadlessWireCore {
                 let ids = self.input.pointers.keys().copied().collect::<Vec<_>>();
                 for pointer_id in ids {
                     let pointer = self
-                        .input.pointers.get_mut(&pointer_id)
+                        .input
+                        .pointers
+                        .get_mut(&pointer_id)
                         .ok_or(WireError::InvalidObjectId(pointer_id.0))?;
                     let old_focus = pointer.focus_surface_id;
                     let x = (pointer.x * 256.0) as i32;
@@ -3252,23 +3273,40 @@ impl HeadlessWireCore {
                             let mut payload = Vec::new();
                             payload.extend_from_slice(&serial.to_le_bytes());
                             payload.extend_from_slice(&old.0.to_le_bytes());
-                            self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(1), payload));
+                            self.events_out.push(WaylandMessage::new(
+                                pointer_id,
+                                WaylandOpcode(1),
+                                payload,
+                            ));
                         }
                         let mut payload = Vec::new();
                         payload.extend_from_slice(&serial.to_le_bytes());
                         payload.extend_from_slice(&surface_id.0.to_le_bytes());
                         payload.extend_from_slice(&x.to_le_bytes());
                         payload.extend_from_slice(&y.to_le_bytes());
-                        self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(0), payload));
+                        self.events_out.push(WaylandMessage::new(
+                            pointer_id,
+                            WaylandOpcode(0),
+                            payload,
+                        ));
                     }
                     let mut payload = Vec::new();
                     payload.extend_from_slice(&serial.to_le_bytes());
                     payload.extend_from_slice(&time_ms.to_le_bytes());
                     payload.extend_from_slice(&code.to_le_bytes());
                     payload.extend_from_slice(&u32::from(pressed).to_le_bytes());
-                    self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(3), payload));
-                    if self.registry.get_object(pointer_id).is_ok_and(|object| object.version >= 5) {
-                        self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(5), vec![]));
+                    self.events_out.push(WaylandMessage::new(
+                        pointer_id,
+                        WaylandOpcode(3),
+                        payload,
+                    ));
+                    if self.registry.get_object(pointer_id).is_ok_and(|object| object.version >= 5)
+                    {
+                        self.events_out.push(WaylandMessage::new(
+                            pointer_id,
+                            WaylandOpcode(5),
+                            vec![],
+                        ));
                     }
                 }
             }
@@ -3276,7 +3314,9 @@ impl HeadlessWireCore {
                 let ids = self.input.keyboards.keys().copied().collect::<Vec<_>>();
                 for keyboard_id in ids {
                     let keyboard = self
-                        .input.keyboards.get_mut(&keyboard_id)
+                        .input
+                        .keyboards
+                        .get_mut(&keyboard_id)
                         .ok_or(WireError::InvalidObjectId(keyboard_id.0))?;
                     let old_focus = keyboard.focus_surface_id;
                     keyboard.focus_surface_id = Some(surface_id);
@@ -3285,20 +3325,32 @@ impl HeadlessWireCore {
                             let mut payload = Vec::new();
                             payload.extend_from_slice(&serial.to_le_bytes());
                             payload.extend_from_slice(&old.0.to_le_bytes());
-                            self.events_out.push(WaylandMessage::new(keyboard_id, WaylandOpcode(2), payload));
+                            self.events_out.push(WaylandMessage::new(
+                                keyboard_id,
+                                WaylandOpcode(2),
+                                payload,
+                            ));
                         }
                         let mut payload = Vec::new();
                         payload.extend_from_slice(&serial.to_le_bytes());
                         payload.extend_from_slice(&surface_id.0.to_le_bytes());
                         payload.extend_from_slice(&0_u32.to_le_bytes()); // zero pressed keys
-                        self.events_out.push(WaylandMessage::new(keyboard_id, WaylandOpcode(1), payload));
+                        self.events_out.push(WaylandMessage::new(
+                            keyboard_id,
+                            WaylandOpcode(1),
+                            payload,
+                        ));
                     }
                     let mut payload = Vec::new();
                     payload.extend_from_slice(&serial.to_le_bytes());
                     payload.extend_from_slice(&time_ms.to_le_bytes());
                     payload.extend_from_slice(&code.to_le_bytes());
                     payload.extend_from_slice(&u32::from(pressed).to_le_bytes());
-                    self.events_out.push(WaylandMessage::new(keyboard_id, WaylandOpcode(3), payload));
+                    self.events_out.push(WaylandMessage::new(
+                        keyboard_id,
+                        WaylandOpcode(3),
+                        payload,
+                    ));
                 }
             }
         }
@@ -3319,7 +3371,6 @@ impl HeadlessWireCore {
     }
 }
 
-
 #[cfg(test)]
 mod physical_input_delivery_tests {
     use super::*;
@@ -3331,7 +3382,8 @@ mod physical_input_delivery_tests {
         core.input.get_pointer(WaylandObjectId(40), WaylandObjectId(41)).unwrap();
         core.registry.register_client_object(WaylandObjectId(41), "wl_pointer", 7).unwrap();
         let input = PhysicalInputEvent {
-            sequence: 5, timestamp_usec: 7_000,
+            sequence: 5,
+            timestamp_usec: 7_000,
             kind: PhysicalInputKind::RelativeX { delta: 9 },
         };
         assert!(core.inject_physical_input(WaylandObjectId(100), &input).is_err());
@@ -3349,7 +3401,8 @@ mod physical_input_delivery_tests {
         core.input.get_keyboard(WaylandObjectId(40), WaylandObjectId(42)).unwrap();
         core.surfaces.create_surface(WaylandObjectId(100));
         let input = PhysicalInputEvent {
-            sequence: 8, timestamp_usec: 5_000,
+            sequence: 8,
+            timestamp_usec: 5_000,
             kind: PhysicalInputKind::Key { code: 30, pressed: true },
         };
         core.inject_physical_input(WaylandObjectId(100), &input).unwrap();
