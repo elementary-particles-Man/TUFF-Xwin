@@ -2,11 +2,11 @@
 //! Only the selected primary DRM device is opened. The caller must already own DRM master.
 //! Legacy modesetting and dumb scanout are used as a baseline; no GPU renderer is required.
 use super::{
-    BackendOutputEvent, DisplayBackend, FramePublication, OutputGeometry, OutputMode,
-    PresentationCadence, PresentationToken, WL_SHM_FORMAT_XRGB8888,
-    MAX_OUTPUTS, MAX_OUTPUT_FRAMEBUFFER_BYTES,
+    BackendOutputEvent, DisplayBackend, FramePublication, MAX_OUTPUT_FRAMEBUFFER_BYTES,
+    MAX_OUTPUTS, OutputGeometry, OutputMode, PresentationCadence, PresentationToken,
+    WL_SHM_FORMAT_XRGB8888,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     ffi::CStr,
@@ -86,12 +86,30 @@ type GetConnector = unsafe extern "C" fn(libc::c_int, u32) -> *mut DrmConnector;
 type FreeConnector = unsafe extern "C" fn(*mut DrmConnector);
 type GetEncoder = unsafe extern "C" fn(libc::c_int, u32) -> *mut DrmEncoder;
 type FreeEncoder = unsafe extern "C" fn(*mut DrmEncoder);
-type CreateDumb = unsafe extern "C" fn(libc::c_int, u32, u32, u32, u32, *mut u32, *mut u32, *mut u64) -> libc::c_int;
+type CreateDumb = unsafe extern "C" fn(
+    libc::c_int,
+    u32,
+    u32,
+    u32,
+    u32,
+    *mut u32,
+    *mut u32,
+    *mut u64,
+) -> libc::c_int;
 type MapDumb = unsafe extern "C" fn(libc::c_int, u32, *mut u64) -> libc::c_int;
 type DestroyDumb = unsafe extern "C" fn(libc::c_int, u32) -> libc::c_int;
 type AddFb = unsafe extern "C" fn(libc::c_int, u32, u32, u8, u8, u32, u32, *mut u32) -> libc::c_int;
 type RmFb = unsafe extern "C" fn(libc::c_int, u32) -> libc::c_int;
-type SetCrtc = unsafe extern "C" fn(libc::c_int, u32, u32, u32, u32, *const u32, libc::c_int, *const DrmModeInfo) -> libc::c_int;
+type SetCrtc = unsafe extern "C" fn(
+    libc::c_int,
+    u32,
+    u32,
+    u32,
+    u32,
+    *const u32,
+    libc::c_int,
+    *const DrmModeInfo,
+) -> libc::c_int;
 
 struct DrmApi {
     library: *mut libc::c_void,
@@ -125,9 +143,8 @@ unsafe fn symbol<T: Copy>(library: *mut libc::c_void, name: &[u8]) -> Result<T> 
 impl DrmApi {
     fn load() -> Result<Self> {
         // SAFETY: a NUL-terminated library name is passed to the runtime loader.
-        let library = unsafe {
-            libc::dlopen(c"libdrm.so.2".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL)
-        };
+        let library =
+            unsafe { libc::dlopen(c"libdrm.so.2".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
         if library.is_null() {
             bail!("drm-kms requires the system runtime library libdrm.so.2");
         }
@@ -229,13 +246,14 @@ fn validate_frame(request: &FramePublication, output: &KmsOutput) -> Result<usiz
 
 impl DrmKmsBackend {
     pub(super) fn open(device_path: &Path, epoch: u64) -> Result<Self> {
-        if !device_path.is_absolute()
-            || !device_path.to_string_lossy().starts_with("/dev/dri/card")
+        if !device_path.is_absolute() || !device_path.to_string_lossy().starts_with("/dev/dri/card")
         {
             bail!("drm-kms requires an explicit absolute /dev/dri/cardN device");
         }
-        let device = OpenOptions::new().read(true).write(true).open(device_path)
-            .with_context(|| format!("cannot open DRM primary device {}", device_path.display()))?;
+        let device =
+            OpenOptions::new().read(true).write(true).open(device_path).with_context(|| {
+                format!("cannot open DRM primary device {}", device_path.display())
+            })?;
         let api = DrmApi::load()?;
         let fd = device.as_raw_fd();
         // SAFETY: libdrm owns resources and they are freed before return.
@@ -251,7 +269,11 @@ impl DrmKmsBackend {
             bail!("drm-kms found no connected connector with a compatible free CRTC");
         }
         Ok(Self {
-            device, api, outputs, events, backend_instance_id: epoch,
+            device,
+            api,
+            outputs,
+            events,
+            backend_instance_id: epoch,
             next_token_sequence: 1,
         })
     }
@@ -264,20 +286,19 @@ impl DrmKmsBackend {
     ) -> Result<(BTreeMap<String, KmsOutput>, VecDeque<BackendOutputEvent>)> {
         // SAFETY: resources are valid for the duration of this method.
         let res = unsafe { &*resources };
-        if res.count_connectors < 0 || res.count_crtcs < 0
-            || res.count_connectors > 256 || res.count_crtcs > 32
+        if res.count_connectors < 0
+            || res.count_crtcs < 0
+            || res.count_connectors > 256
+            || res.count_crtcs > 32
             || (res.count_connectors > 0 && res.connectors.is_null())
             || (res.count_crtcs > 0 && res.crtcs.is_null())
         {
             bail!("drm-kms resource table invalid or exceeds bounds");
         }
         // SAFETY: libdrm supplies these arrays with their declared counts.
-        let connectors = unsafe {
-            std::slice::from_raw_parts(res.connectors, res.count_connectors as usize)
-        };
-        let crtcs = unsafe {
-            std::slice::from_raw_parts(res.crtcs, res.count_crtcs as usize)
-        };
+        let connectors =
+            unsafe { std::slice::from_raw_parts(res.connectors, res.count_connectors as usize) };
+        let crtcs = unsafe { std::slice::from_raw_parts(res.crtcs, res.count_crtcs as usize) };
         let mut outputs = BTreeMap::new();
         let mut events = VecDeque::new();
         let mut used_crtcs = BTreeSet::new();
@@ -285,28 +306,40 @@ impl DrmKmsBackend {
         let mut sequence = 1_u64;
 
         for &connector_id in connectors {
-            if outputs.len() >= MAX_OUTPUTS { break; }
+            if outputs.len() >= MAX_OUTPUTS {
+                break;
+            }
             // SAFETY: connector pointer is freed after all its fields are read.
             let pointer = unsafe { (api.get_connector)(fd, connector_id) };
-            if pointer.is_null() { continue; }
+            if pointer.is_null() {
+                continue;
+            }
             let discovered = (|| -> Option<(u32, DrmModeInfo)> {
                 // SAFETY: non-null pointer returned by libdrm.
                 let conn = unsafe { &*pointer };
-                if conn.connection != 1 { return None; } // DRM_MODE_CONNECTED
+                if conn.connection != 1 {
+                    return None;
+                } // DRM_MODE_CONNECTED
                 let mode = select_mode(conn)?;
-                if conn.count_encoders < 0 || conn.count_encoders > 256
+                if conn.count_encoders < 0
+                    || conn.count_encoders > 256
                     || (conn.count_encoders > 0 && conn.encoders.is_null())
-                { return None; }
+                {
+                    return None;
+                }
                 // SAFETY: libdrm owns the encoder array.
                 let encoders = unsafe {
                     std::slice::from_raw_parts(conn.encoders, conn.count_encoders as usize)
                 };
                 let candidates = std::iter::once(conn.encoder_id)
-                    .chain(encoders.iter().copied()).filter(|id| *id != 0);
+                    .chain(encoders.iter().copied())
+                    .filter(|id| *id != 0);
                 for encoder_id in candidates {
                     // SAFETY: get/free encoder pair.
                     let ep = unsafe { (api.get_encoder)(fd, encoder_id) };
-                    if ep.is_null() { continue; }
+                    if ep.is_null() {
+                        continue;
+                    }
                     // SAFETY: ep is live until freed below.
                     let available = unsafe { &*ep };
                     let selected = crtcs.iter().enumerate().find_map(|(index, crtc_id)| {
@@ -316,22 +349,33 @@ impl DrmKmsBackend {
                     });
                     // SAFETY: ep came from drmModeGetEncoder.
                     unsafe { (api.free_encoder)(ep) };
-                    if let Some(crtc) = selected { return Some((crtc, mode)); }
+                    if let Some(crtc) = selected {
+                        return Some((crtc, mode));
+                    }
                 }
                 None
             })();
             // SAFETY: pointer came from drmModeGetConnector.
             unsafe { (api.free_connector)(pointer) };
-            let Some((crtc_id, mode)) = discovered else { continue; };
+            let Some((crtc_id, mode)) = discovered else {
+                continue;
+            };
             let width = u32::from(mode.hdisplay);
             let height = u32::from(mode.vdisplay);
             let Some(stride) = width.checked_mul(4) else { continue };
             let Some(bytes) = u64::from(stride).checked_mul(u64::from(height)) else { continue };
-            if bytes > MAX_OUTPUT_FRAMEBUFFER_BYTES as u64 { continue; }
+            if bytes > MAX_OUTPUT_FRAMEBUFFER_BYTES as u64 {
+                continue;
+            }
             let output_id = format!("drm-connector-{connector_id}");
             let geometry = OutputGeometry {
-                output_id: output_id.clone(), width, height, stride,
-                format: WL_SHM_FORMAT_XRGB8888, origin_x, origin_y: 0,
+                output_id: output_id.clone(),
+                width,
+                height,
+                stride,
+                format: WL_SHM_FORMAT_XRGB8888,
+                origin_x,
+                origin_y: 0,
                 output_generation: 1,
             };
             let refresh_hz = mode.vrefresh.max(1);
@@ -346,10 +390,19 @@ impl DrmKmsBackend {
             });
             sequence += 1;
             used_crtcs.insert(crtc_id);
-            outputs.insert(output_id, KmsOutput {
-                connector_id, crtc_id, mode, geometry, refresh_hz,
-                buffers: [None, None], active_slot: None, last_frame: None,
-            });
+            outputs.insert(
+                output_id,
+                KmsOutput {
+                    connector_id,
+                    crtc_id,
+                    mode,
+                    geometry,
+                    refresh_hz,
+                    buffers: [None, None],
+                    active_slot: None,
+                    last_frame: None,
+                },
+            );
             origin_x = origin_x.saturating_add(i32::from(mode.hdisplay));
         }
         Ok((outputs, events))
@@ -363,12 +416,14 @@ impl DrmKmsBackend {
         // SAFETY: output pointers refer to writable stack variables.
         if unsafe {
             (self.api.create_dumb)(fd, width, height, 32, 0, &mut handle, &mut pitch, &mut size)
-        } != 0 {
+        } != 0
+        {
             bail!("drmModeCreateDumbBuffer failed: {}", std::io::Error::last_os_error());
         }
         let allocated = (|| -> Result<ScanoutBuffer> {
             let row = width.checked_mul(4).context("drm scanout row overflow")?;
-            if pitch < row || size < u64::from(pitch) * u64::from(height)
+            if pitch < row
+                || size < u64::from(pitch) * u64::from(height)
                 || size > MAX_OUTPUT_FRAMEBUFFER_BYTES as u64
             {
                 bail!("drm dumb buffer pitch/size invalid");
@@ -377,7 +432,8 @@ impl DrmKmsBackend {
             // SAFETY: handle belongs to fd and framebuffer_id is writable.
             if unsafe {
                 (self.api.add_fb)(fd, width, height, 24, 32, pitch, handle, &mut framebuffer_id)
-            } != 0 {
+            } != 0
+            {
                 bail!("drmModeAddFB failed: {}", std::io::Error::last_os_error());
             }
             let mapped = (|| -> Result<ScanoutBuffer> {
@@ -390,17 +446,21 @@ impl DrmKmsBackend {
                 let offset = libc::off_t::try_from(offset)?;
                 // SAFETY: DRM driver provided an offset/size for this handle.
                 let mapping = unsafe {
-                    libc::mmap(ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE,
-                               libc::MAP_SHARED, fd, offset)
+                    libc::mmap(
+                        ptr::null_mut(),
+                        len,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_SHARED,
+                        fd,
+                        offset,
+                    )
                 };
                 if mapping == libc::MAP_FAILED {
                     bail!("drm scanout mmap failed: {}", std::io::Error::last_os_error());
                 }
                 // SAFETY: mmap succeeded and the memory is mapped for writing.
                 unsafe { ptr::write_bytes(mapping.cast::<u8>(), 0, len) };
-                Ok(ScanoutBuffer {
-                    handle, framebuffer_id, pitch, bytes: len, mapping,
-                })
+                Ok(ScanoutBuffer { handle, framebuffer_id, pitch, bytes: len, mapping })
             })();
             if mapped.is_err() {
                 // SAFETY: framebuffer_id was successfully registered above.
@@ -433,11 +493,10 @@ impl DrmKmsBackend {
             (slot, output.buffers[slot].is_none())
         };
         if needs_allocation {
-            let new_buffer = self.create_buffer(
-                self.outputs.get(&frame.output_id).context("unknown DRM output")?
-            )?;
-            self.outputs.get_mut(&frame.output_id).context("unknown DRM output")?
-                .buffers[next] = Some(new_buffer);
+            let new_buffer = self
+                .create_buffer(self.outputs.get(&frame.output_id).context("unknown DRM output")?)?;
+            self.outputs.get_mut(&frame.output_id).context("unknown DRM output")?.buffers[next] =
+                Some(new_buffer);
         }
         let output = self.outputs.get_mut(&frame.output_id).context("unknown DRM output")?;
         let buffer = output.buffers[next].as_mut().context("DRM scanout not allocated")?;
@@ -445,7 +504,9 @@ impl DrmKmsBackend {
         let height = usize::try_from(output.geometry.height)?;
         let pitch = usize::try_from(buffer.pitch)?;
         let required = pitch.checked_mul(height).context("DRM pitch overflow")?;
-        if required > buffer.bytes { bail!("DRM mapped buffer too small"); }
+        if required > buffer.bytes {
+            bail!("DRM mapped buffer too small");
+        }
         for row in 0..height {
             // SAFETY: validate_frame guarantees exactly width*height pixels;
             // checked pitch/height bounds guarantee the mapped destination.
@@ -460,13 +521,21 @@ impl DrmKmsBackend {
         // SAFETY: all objects are live on this fd, mode was copied from libdrm.
         let result = unsafe {
             (self.api.set_crtc)(
-                self.device.as_raw_fd(), output.crtc_id, buffer.framebuffer_id,
-                0, 0, &output.connector_id, 1, &output.mode,
+                self.device.as_raw_fd(),
+                output.crtc_id,
+                buffer.framebuffer_id,
+                0,
+                0,
+                &output.connector_id,
+                1,
+                &output.mode,
             )
         };
         if result != 0 {
-            bail!("drmModeSetCrtc rejected frame (check DRM master/VT lease): {}",
-                  std::io::Error::last_os_error());
+            bail!(
+                "drmModeSetCrtc rejected frame (check DRM master/VT lease): {}",
+                std::io::Error::last_os_error()
+            );
         }
         output.active_slot = Some(next);
         output.last_frame = Some(frame);
@@ -479,10 +548,14 @@ impl Drop for DrmKmsBackend {
         let mut buffers = Vec::new();
         for output in self.outputs.values_mut() {
             for slot in &mut output.buffers {
-                if let Some(buffer) = slot.take() { buffers.push(buffer); }
+                if let Some(buffer) = slot.take() {
+                    buffers.push(buffer);
+                }
             }
         }
-        for buffer in buffers { self.destroy_buffer(buffer); }
+        for buffer in buffers {
+            self.destroy_buffer(buffer);
+        }
     }
 }
 
@@ -491,21 +564,35 @@ impl DisplayBackend for DrmKmsBackend {
         Ok(self.events.drain(..).collect())
     }
     fn enumerate_outputs(&self) -> Result<Vec<OutputMode>> {
-        Ok(self.outputs.iter().map(|(name, output)| OutputMode {
-            name: name.clone(), width: output.geometry.width,
-            height: output.geometry.height, refresh_hz: output.refresh_hz,
-        }).collect())
+        Ok(self
+            .outputs
+            .iter()
+            .map(|(name, output)| OutputMode {
+                name: name.clone(),
+                width: output.geometry.width,
+                height: output.geometry.height,
+                refresh_hz: output.refresh_hz,
+            })
+            .collect())
     }
     fn set_mode(&mut self, output: &str, mode: &OutputMode) -> Result<()> {
         let current = self.outputs.get(output).context("unknown drm-kms output")?;
-        if mode.name != output || mode.width != current.geometry.width
-            || mode.height != current.geometry.height || mode.refresh_hz != current.refresh_hz
+        if mode.name != output
+            || mode.width != current.geometry.width
+            || mode.height != current.geometry.height
+            || mode.refresh_hz != current.refresh_hz
         {
             bail!("drm-kms mode selection requires a discovered mode");
         }
         Ok(())
     }
-    fn set_gamma(&mut self, _output: &str, _red: &[u16], _green: &[u16], _blue: &[u16]) -> Result<()> {
+    fn set_gamma(
+        &mut self,
+        _output: &str,
+        _red: &[u16],
+        _green: &[u16],
+        _blue: &[u16],
+    ) -> Result<()> {
         bail!("drm-kms gamma LUT is not supported by this legacy scanout backend")
     }
     fn publish_frame(&mut self, request: FramePublication) -> Result<()> {
@@ -534,7 +621,9 @@ impl DisplayBackend for DrmKmsBackend {
         Ok(self.outputs.get(output).and_then(|output| output.last_frame.clone()))
     }
     fn reconfigure_output(&mut self, output_id: &str, _generation: u64) -> Result<()> {
-        if !self.outputs.contains_key(output_id) { bail!("unknown drm-kms output"); }
+        if !self.outputs.contains_key(output_id) {
+            bail!("unknown drm-kms output");
+        }
         Ok(())
     }
     fn remove_output(&mut self, output_id: &str) {
@@ -551,25 +640,55 @@ mod tests {
     #[test]
     fn frame_validation_rejects_non_scanout_format_and_shape() {
         let mode = DrmModeInfo {
-            clock: 0, hdisplay: 2, hsync_start: 0, hsync_end: 0, htotal: 0,
-            hskew: 0, vdisplay: 2, vsync_start: 0, vsync_end: 0, vtotal: 0,
-            vscan: 0, vrefresh: 60, flags: 0, mode_type: 0, name: [0; 32],
+            clock: 0,
+            hdisplay: 2,
+            hsync_start: 0,
+            hsync_end: 0,
+            htotal: 0,
+            hskew: 0,
+            vdisplay: 2,
+            vsync_start: 0,
+            vsync_end: 0,
+            vtotal: 0,
+            vscan: 0,
+            vrefresh: 60,
+            flags: 0,
+            mode_type: 0,
+            name: [0; 32],
         };
         let geometry = OutputGeometry {
-            output_id: "drm-connector-1".into(), width: 2, height: 2, stride: 8,
-            format: WL_SHM_FORMAT_XRGB8888, origin_x: 0, origin_y: 0,
+            output_id: "drm-connector-1".into(),
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: WL_SHM_FORMAT_XRGB8888,
+            origin_x: 0,
+            origin_y: 0,
             output_generation: 1,
         };
         let output = KmsOutput {
-            connector_id: 1, crtc_id: 1, mode, geometry: geometry.clone(),
-            refresh_hz: 60, buffers: [None, None], active_slot: None, last_frame: None,
+            connector_id: 1,
+            crtc_id: 1,
+            mode,
+            geometry: geometry.clone(),
+            refresh_hz: 60,
+            buffers: [None, None],
+            active_slot: None,
+            last_frame: None,
         };
         let pixels: std::sync::Arc<[u32]> = vec![0; 4].into();
         let mut frame = FramePublication {
-            frame_id: 1, commit_id: 1, output_id: geometry.output_id.clone(),
-            output_generation: 1, scene_epoch: 1, scene_generation: 1,
-            geometry, format: WL_SHM_FORMAT_XRGB8888, stride: 8,
-            pixels, damage: vec![],
+            frame_id: 1,
+            commit_id: 1,
+            output_id: geometry.output_id.clone(),
+            output_generation: 1,
+            scene_epoch: 1,
+            scene_generation: 1,
+            geometry,
+            format: WL_SHM_FORMAT_XRGB8888,
+            stride: 8,
+            pixels,
+            damage: vec![],
         };
         assert_eq!(validate_frame(&frame, &output).unwrap(), 16);
         frame.format = 0;
