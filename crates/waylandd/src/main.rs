@@ -3157,7 +3157,7 @@ fn production_scene_surfaces_for_generation(
                 scene_generation,
             };
 
-            let pixels = read_shm_buffer(core, buffer);
+            let pixels = read_shm_buffer(buffer);
             let pixel_transport = if pixels.is_empty() {
                 None
             } else {
@@ -3718,16 +3718,16 @@ fn generate_scene_epoch() -> u64 {
     nanos ^ ((std::process::id() as u64) << 32)
 }
 
-fn read_shm_buffer(
-    core: &wayland_wire::core::HeadlessWireCore,
-    buffer: &wayland_wire::shm::ShmBuffer,
-) -> Vec<u8> {
-    let Some(pool) = core.shm.pools.get(&buffer.pool_id) else { return Vec::new() };
+fn read_shm_buffer(buffer: &wayland_wire::shm::ShmBuffer) -> Vec<u8> {
     let len = buffer.byte_len().unwrap_or(0);
     if len == 0 {
         return Vec::new();
     }
-    match &pool.storage {
+    let backing = match buffer.backing.lock() {
+        Ok(backing) => backing,
+        Err(_) => return Vec::new(),
+    };
+    match &*backing {
         wayland_wire::shm::ShmPoolStorage::FakeMemory(bytes) => {
             if len > MAX_SINGLE_PIXEL_PAYLOAD_BYTES {
                 return Vec::new();
