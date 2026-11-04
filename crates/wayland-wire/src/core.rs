@@ -959,6 +959,9 @@ impl HeadlessWireCore {
         let version = self.registry.get_object(message.header.object_id)?.version.min(7);
         self.registry.register_client_object(id, "wl_pointer", version)?;
         self.input.get_pointer(message.header.object_id, id)?;
+        if let Some(surface_id) = self.surfaces.surfaces.keys().copied().max() {
+            let _ = self.input.set_pointer_focus(id, Some(surface_id), 0.0, 0.0);
+        }
         Ok(())
     }
 
