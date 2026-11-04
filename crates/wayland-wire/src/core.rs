@@ -583,6 +583,9 @@ impl HeadlessWireCore {
             ("wl_surface", 9) => self.handle_surface_damage(message)?,
             ("wl_shm", 0) => self.handle_shm_create_pool(message, fd_queue, &args)?,
             ("wl_shm_pool", 0) => self.handle_shm_pool_create_buffer(message)?,
+            ("wl_shm_pool", 1) => self.handle_shm_pool_destroy(message)?,
+            ("wl_shm_pool", 2) => self.handle_shm_pool_resize(message)?,
+            ("wl_buffer", 0) => self.handle_shm_buffer_destroy(message)?,
             ("xdg_wm_base", 2) => self.handle_xdg_wm_base_get_xdg_surface(message)?,
             ("xdg_wm_base", 3) => self.handle_xdg_wm_base_pong(message)?,
             ("xdg_wm_base", 1) => self.handle_xdg_wm_base_create_positioner(message)?,
@@ -1277,6 +1280,24 @@ impl HeadlessWireCore {
         create_result
     }
 
+    fn handle_shm_pool_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.shm.destroy_pool(message.header.object_id)?;
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_shm_pool_resize(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() < 4 {
+            return Err(WireError::Incomplete);
+        }
+        let size = LittleEndian::read_i32(&message.payload[0..4]);
+        self.shm.resize_pool(message.header.object_id, size)
+    }
+
+    fn handle_shm_buffer_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        self.shm.destroy_buffer(message.header.object_id)?;
+        self.registry.destroy_object(message.header.object_id)
+    }
+
     fn send_shm_formats(&mut self, shm_id: WaylandObjectId) {
         // wl_shm.format: Argb8888 (0), Xrgb8888 (1)
         for f in [0u32, 1u32] {
@@ -1506,6 +1527,35 @@ mod tests {
         let removed = core.pop_event().expect("global-remove event");
         assert_eq!(removed.header.object_id, WaylandObjectId(2));
         assert_eq!(removed.header.opcode, WaylandOpcode(1));
+    }
+
+    #[test]
+    fn shm_pool_destroy_emits_delete_id_after_preserving_buffer_backing() {
+        let mut core = HeadlessWireCore::default();
+        let shm = WaylandObjectId(30);
+        let pool = WaylandObjectId(40);
+        let buffer = WaylandObjectId(41);
+        core.registry.register_client_object(shm, "wl_shm", 1).unwrap();
+        core.registry.register_client_object(pool, "wl_shm_pool", 1).unwrap();
+        core.registry.register_client_object(buffer, "wl_buffer", 1).unwrap();
+        core.shm.create_pool_from_fake(pool, 64).unwrap();
+        core.shm.create_buffer(buffer, pool, 0, 2, 2, 8, 1).unwrap();
+
+        let result = core.dispatch(WaylandMessage::new(pool, WaylandOpcode(1), vec![])).unwrap();
+        assert!(!core.shm.pools.contains_key(&pool));
+        assert!(core.shm.buffers.contains_key(&buffer));
+        let delete = result
+            .events
+            .iter()
+            .find(|event| {
+                event.header.object_id == WaylandObjectId::DISPLAY
+                    && event.header.opcode == WaylandOpcode(1)
+            })
+            .expect("pool delete_id");
+        assert_eq!(LittleEndian::read_u32(&delete.payload), pool.0);
+        assert!(core.registry.register_client_object(pool, "wl_shm_pool", 1).is_err());
+        core.acknowledge_event_delivery(delete).unwrap();
+        core.registry.register_client_object(pool, "wl_shm_pool", 1).unwrap();
     }
 
     #[test]
