@@ -104,7 +104,7 @@ impl EvdevSource {
         }
         let len = usize::try_from(len)?;
         let record = std::mem::size_of::<EvdevRaw>();
-        if !len.is_multiple_of(record) {
+        if len % record != 0 {
             bail!("evdev returned a partial input_event record");
         }
         let mut events = Vec::new();
