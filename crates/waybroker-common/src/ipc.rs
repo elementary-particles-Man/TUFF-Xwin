@@ -684,7 +684,7 @@ pub enum PublicationFailure {
     RendererRejected,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum PhysicalInputKind {
     RelativeX { delta: i32 },
