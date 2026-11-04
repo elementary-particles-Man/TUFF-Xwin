@@ -1,5 +1,7 @@
 #[cfg(target_os = "linux")]
 mod drm_kms;
+#[cfg(target_os = "linux")]
+mod evdev;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
@@ -171,6 +173,43 @@ async fn main() -> Result<()> {
     };
     let _socket_guard = SocketGuard::new(listener.endpoint().clone());
     println!("service=displayd op=listen event=socket_bound path={}", listener.endpoint());
+
+    #[cfg(target_os = "linux")]
+    let _input_threads = match env::var("TUFF_XWIN_INPUT_DEVICES") {
+        Ok(paths) => {
+            if config.display_backend != DisplayBackendType::DrmKms {
+                bail!("physical evdev input requires the explicit drm-kms display backend");
+            }
+            let devices = paths.split(',').map(str::trim).collect::<Vec<_>>();
+            if devices.is_empty()
+                || devices.len() > 16
+                || devices.iter().any(|path| path.is_empty())
+            {
+                bail!("TUFF_XWIN_INPUT_DEVICES requires 1..16 explicit /dev/input/eventN paths");
+            }
+            let mut sources = Vec::new();
+            for device in devices {
+                sources.push(evdev::EvdevSource::open(Path::new(device))?);
+            }
+            sources
+                .into_iter()
+                .map(|source| {
+                    std::thread::spawn(move || {
+                        if let Err(error) = evdev::run(source) {
+                            eprintln!(
+                                "service=displayd op=physical_input event=fatal error={error:#}"
+                            );
+                            // A dead physical input source must not leave a nominally
+                            // healthy physical display service running.
+                            std::process::exit(1);
+                        }
+                    })
+                })
+                .collect::<Vec<_>>()
+        }
+        Err(env::VarError::NotPresent) => Vec::new(),
+        Err(env::VarError::NotUnicode(_)) => bail!("TUFF_XWIN_INPUT_DEVICES must be UTF-8"),
+    };
 
     let mut served = 0usize;
     loop {

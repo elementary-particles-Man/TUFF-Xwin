@@ -136,6 +136,39 @@ impl ServiceListener {
 }
 
 impl ServiceStream {
+    #[cfg(target_os = "linux")]
+    pub fn linux_peer_pid_uid(&self) -> std::io::Result<Option<(u32, u32)>> {
+        use std::os::fd::AsRawFd;
+        match &self.inner {
+            ServiceStreamInner::Unix(stream) => {
+                // SO_PEERCRED is kernel-supplied at connect time; unlike the
+                // envelope's source role it cannot be chosen by the client.
+                let mut credentials = unsafe { std::mem::zeroed::<libc::ucred>() };
+                let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+                let result = unsafe {
+                    libc::getsockopt(
+                        stream.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_PEERCRED,
+                        (&mut credentials as *mut libc::ucred).cast(),
+                        &mut len,
+                    )
+                };
+                if result != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if len as usize != std::mem::size_of::<libc::ucred>() || credentials.pid <= 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid kernel peer credentials",
+                    ));
+                }
+                Ok(Some((credentials.pid as u32, credentials.uid)))
+            }
+            ServiceStreamInner::Tcp(_) => Ok(None),
+        }
+    }
+
     pub fn try_clone(&self) -> std::io::Result<Self> {
         match &self.inner {
             #[cfg(unix)]

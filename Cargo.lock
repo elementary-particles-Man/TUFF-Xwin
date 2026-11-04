@@ -1836,6 +1836,7 @@ dependencies = [
 name = "waybroker-common"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "anyhow",
  "serde",
  "serde_json",
