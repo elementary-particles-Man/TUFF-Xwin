@@ -25,6 +25,7 @@ use crate::{
     Result, WaylandMessage, WaylandObjectId, WaylandOpcode, WireError,
 };
 use byteorder::{ByteOrder, LittleEndian};
+use waybroker_common::{PhysicalInputEvent, PhysicalInputKind};
 
 const MAX_CLIENT_SURFACES: usize = 4096;
 const MAX_CLIENT_REGIONS: usize = 4096;
@@ -3184,6 +3185,123 @@ impl HeadlessWireCore {
         self.registry.destroy_object(message.header.object_id)
     }
 
+    /// Emit real evdev input only for the surface already selected by the
+    /// compositor's authoritative focus. No client can choose its own target.
+    pub fn inject_physical_input(
+        &mut self,
+        surface_id: WaylandObjectId,
+        event: &PhysicalInputEvent,
+    ) -> Result<()> {
+        event.validate().map_err(WireError::ProtocolError)?;
+        if !self.surfaces.surfaces.contains_key(&surface_id) {
+            return Err(WireError::InvalidObjectId(surface_id.0));
+        }
+        let serial = event.sequence as u32;
+        let time_ms = (event.timestamp_usec / 1_000) as u32;
+        match event.kind {
+            PhysicalInputKind::RelativeX { delta } | PhysicalInputKind::RelativeY { delta } => {
+                let ids = self.input.pointers.keys().copied().collect::<Vec<_>>();
+                for pointer_id in ids {
+                    let pointer = self
+                        .input.pointers.get_mut(&pointer_id)
+                        .ok_or(WireError::InvalidObjectId(pointer_id.0))?;
+                    let old_focus = pointer.focus_surface_id;
+                    if matches!(event.kind, PhysicalInputKind::RelativeX { .. }) {
+                        pointer.x = (pointer.x + f64::from(delta)).clamp(-32768.0, 32767.0);
+                    } else {
+                        pointer.y = (pointer.y + f64::from(delta)).clamp(-32768.0, 32767.0);
+                    }
+                    let x = (pointer.x * 256.0) as i32;
+                    let y = (pointer.y * 256.0) as i32;
+                    pointer.focus_surface_id = Some(surface_id);
+                    if old_focus != Some(surface_id) {
+                        if let Some(old) = old_focus {
+                            let mut payload = Vec::new();
+                            payload.extend_from_slice(&serial.to_le_bytes());
+                            payload.extend_from_slice(&old.0.to_le_bytes());
+                            self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(1), payload));
+                        }
+                        let mut payload = Vec::new();
+                        payload.extend_from_slice(&serial.to_le_bytes());
+                        payload.extend_from_slice(&surface_id.0.to_le_bytes());
+                        payload.extend_from_slice(&x.to_le_bytes());
+                        payload.extend_from_slice(&y.to_le_bytes());
+                        self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(0), payload));
+                    }
+                    let mut payload = Vec::new();
+                    payload.extend_from_slice(&time_ms.to_le_bytes());
+                    payload.extend_from_slice(&x.to_le_bytes());
+                    payload.extend_from_slice(&y.to_le_bytes());
+                    self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(2), payload));
+                    self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(5), vec![]));
+                }
+            }
+            PhysicalInputKind::Button { code, pressed } => {
+                let ids = self.input.pointers.keys().copied().collect::<Vec<_>>();
+                for pointer_id in ids {
+                    let pointer = self
+                        .input.pointers.get_mut(&pointer_id)
+                        .ok_or(WireError::InvalidObjectId(pointer_id.0))?;
+                    let old_focus = pointer.focus_surface_id;
+                    let x = (pointer.x * 256.0) as i32;
+                    let y = (pointer.y * 256.0) as i32;
+                    pointer.focus_surface_id = Some(surface_id);
+                    if old_focus != Some(surface_id) {
+                        if let Some(old) = old_focus {
+                            let mut payload = Vec::new();
+                            payload.extend_from_slice(&serial.to_le_bytes());
+                            payload.extend_from_slice(&old.0.to_le_bytes());
+                            self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(1), payload));
+                        }
+                        let mut payload = Vec::new();
+                        payload.extend_from_slice(&serial.to_le_bytes());
+                        payload.extend_from_slice(&surface_id.0.to_le_bytes());
+                        payload.extend_from_slice(&x.to_le_bytes());
+                        payload.extend_from_slice(&y.to_le_bytes());
+                        self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(0), payload));
+                    }
+                    let mut payload = Vec::new();
+                    payload.extend_from_slice(&serial.to_le_bytes());
+                    payload.extend_from_slice(&time_ms.to_le_bytes());
+                    payload.extend_from_slice(&code.to_le_bytes());
+                    payload.extend_from_slice(&u32::from(pressed).to_le_bytes());
+                    self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(3), payload));
+                    self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(5), vec![]));
+                }
+            }
+            PhysicalInputKind::Key { code, pressed } => {
+                let ids = self.input.keyboards.keys().copied().collect::<Vec<_>>();
+                for keyboard_id in ids {
+                    let keyboard = self
+                        .input.keyboards.get_mut(&keyboard_id)
+                        .ok_or(WireError::InvalidObjectId(keyboard_id.0))?;
+                    let old_focus = keyboard.focus_surface_id;
+                    keyboard.focus_surface_id = Some(surface_id);
+                    if old_focus != Some(surface_id) {
+                        if let Some(old) = old_focus {
+                            let mut payload = Vec::new();
+                            payload.extend_from_slice(&serial.to_le_bytes());
+                            payload.extend_from_slice(&old.0.to_le_bytes());
+                            self.events_out.push(WaylandMessage::new(keyboard_id, WaylandOpcode(2), payload));
+                        }
+                        let mut payload = Vec::new();
+                        payload.extend_from_slice(&serial.to_le_bytes());
+                        payload.extend_from_slice(&surface_id.0.to_le_bytes());
+                        payload.extend_from_slice(&0_u32.to_le_bytes()); // zero pressed keys
+                        self.events_out.push(WaylandMessage::new(keyboard_id, WaylandOpcode(1), payload));
+                    }
+                    let mut payload = Vec::new();
+                    payload.extend_from_slice(&serial.to_le_bytes());
+                    payload.extend_from_slice(&time_ms.to_le_bytes());
+                    payload.extend_from_slice(&code.to_le_bytes());
+                    payload.extend_from_slice(&u32::from(pressed).to_le_bytes());
+                    self.events_out.push(WaylandMessage::new(keyboard_id, WaylandOpcode(3), payload));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn inject_relative_pointer_motion(
         &mut self,
         pointer_id: WaylandObjectId,
@@ -3195,5 +3313,45 @@ impl HeadlessWireCore {
     ) -> Vec<WaylandMessage> {
         self.relative_pointer
             .inject_relative_motion(pointer_id, time_usec, dx, dy, dx_unaccel, dy_unaccel)
+    }
+}
+
+
+#[cfg(test)]
+mod physical_input_delivery_tests {
+    use super::*;
+
+    #[test]
+    fn selected_surface_is_required_for_physical_input() {
+        let mut core = HeadlessWireCore::default();
+        core.input.create_seat(WaylandObjectId(40), "seat0");
+        core.input.get_pointer(WaylandObjectId(40), WaylandObjectId(41)).unwrap();
+        let input = PhysicalInputEvent {
+            sequence: 5, timestamp_usec: 7_000,
+            kind: PhysicalInputKind::RelativeX { delta: 9 },
+        };
+        assert!(core.inject_physical_input(WaylandObjectId(100), &input).is_err());
+        core.surfaces.create_surface(WaylandObjectId(100));
+        core.inject_physical_input(WaylandObjectId(100), &input).unwrap();
+        assert_eq!(core.pop_event().unwrap().header.opcode, WaylandOpcode(0)); // enter
+        assert_eq!(core.pop_event().unwrap().header.opcode, WaylandOpcode(2)); // motion
+        assert_eq!(core.pop_event().unwrap().header.opcode, WaylandOpcode(5)); // frame
+    }
+
+    #[test]
+    fn keyboard_event_uses_linux_evdev_code_and_selected_surface() {
+        let mut core = HeadlessWireCore::default();
+        core.input.create_seat(WaylandObjectId(40), "seat0");
+        core.input.get_keyboard(WaylandObjectId(40), WaylandObjectId(42)).unwrap();
+        core.surfaces.create_surface(WaylandObjectId(100));
+        let input = PhysicalInputEvent {
+            sequence: 8, timestamp_usec: 5_000,
+            kind: PhysicalInputKind::Key { code: 30, pressed: true },
+        };
+        core.inject_physical_input(WaylandObjectId(100), &input).unwrap();
+        assert_eq!(core.pop_event().unwrap().header.opcode, WaylandOpcode(1)); // enter
+        let key = core.pop_event().unwrap();
+        assert_eq!(key.header.opcode, WaylandOpcode(3));
+        assert_eq!(LittleEndian::read_u32(&key.payload[8..12]), 30);
     }
 }
