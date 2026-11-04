@@ -159,7 +159,8 @@ impl ServiceStream {
                 }
                 if len as usize != std::mem::size_of::<libc::ucred>() || credentials.pid <= 0 {
                     return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData, "invalid kernel peer credentials",
+                        std::io::ErrorKind::InvalidData,
+                        "invalid kernel peer credentials",
                     ));
                 }
                 Ok(Some((credentials.pid as u32, credentials.uid)))
