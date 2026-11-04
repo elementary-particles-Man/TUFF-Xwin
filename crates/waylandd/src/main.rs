@@ -1,3 +1,6 @@
+#[cfg(target_os = "linux")]
+mod xkb_keymap;
+
 use std::{
     env, fs,
     io::{self, BufReader, Read, Write},
@@ -2652,6 +2655,19 @@ fn handle_production_client(
                             .map(|object| object.interface == "wl_surface")
                             .unwrap_or(false);
                     let committed_surface = msg.header.object_id;
+                    let keyboard_binding = if msg.header.opcode.0 == 1
+                        && core
+                            .registry
+                            .get_object(msg.header.object_id)
+                            .is_ok_and(|object| object.interface == "wl_seat")
+                        && msg.payload.len() >= 4
+                    {
+                        Some(wayland_wire::WaylandObjectId(
+                            byteorder::LittleEndian::read_u32(&msg.payload[..4]),
+                        ))
+                    } else {
+                        None
+                    };
 
                     match core.dispatch_with_fds(msg.clone(), &mut received_fds) {
                         Ok(_) => {}
@@ -2666,6 +2682,14 @@ fn handle_production_client(
                                 error,
                             );
                             return Err(error.into());
+                        }
+                    }
+                    if let Some(keyboard_id) = keyboard_binding {
+                        #[cfg(target_os = "linux")]
+                        {
+                            let version = core.registry.get_object(keyboard_id)?.version;
+                            xkb_keymap::send_keymap(&stream, keyboard_id, version >= 4)
+                                .context("production wl_keyboard keymap bootstrap")?;
                         }
                     }
                     if let Err(error) = flush_pending_client_events(&stream, &mut core) {
