@@ -1,3 +1,6 @@
+#[cfg(target_os = "linux")]
+mod drm_kms;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     env, fs,
@@ -109,7 +112,10 @@ async fn main() -> Result<()> {
     };
 
     let mut state = DisplayState::load(&config.session_instance_id)?;
-    if config.display_backend == DisplayBackendType::HeadlessShm {
+    if matches!(
+        config.display_backend,
+        DisplayBackendType::HeadlessShm | DisplayBackendType::DrmKms
+    ) {
         state.outputs.clear();
     }
     let mut clock = FakePresentationClock;
@@ -142,6 +148,18 @@ async fn main() -> Result<()> {
                 output_generation: 1,
             });
             Box::new(backend)
+        }
+        DisplayBackendType::DrmKms => {
+            #[cfg(target_os = "linux")]
+            {
+                let path = env::var("TUFF_XWIN_DRM_DEVICE")
+                    .context("drm-kms requires an explicit TUFF_XWIN_DRM_DEVICE=/dev/dri/cardN")?;
+                Box::new(drm_kms::DrmKmsBackend::open(Path::new(&path), state.display_epoch)?)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                bail!("drm-kms is supported only on Linux")
+            }
         }
         DisplayBackendType::Unavailable => bail!("production display backend is unavailable"),
     };
@@ -204,6 +222,7 @@ enum DisplayBackendType {
     #[default]
     Mock,
     HeadlessShm,
+    DrmKms,
     Unavailable,
 }
 
@@ -359,6 +378,7 @@ impl Config {
 fn display_backend_from_env(value: Option<&str>) -> Result<DisplayBackendType> {
     match value.unwrap_or("") {
         "headless-shm" => Ok(DisplayBackendType::HeadlessShm),
+        "drm-kms" => Ok(DisplayBackendType::DrmKms),
         "mock" | "" => Ok(DisplayBackendType::Mock),
         "unavailable" => Ok(DisplayBackendType::Unavailable),
         other => bail!("unknown TUFF_XWIN_DISPLAY_BACKEND: {other}"),
@@ -1332,7 +1352,10 @@ async fn handle_display_command(
             Ok(handle_scene_snapshot_request(output, state))
         }
         DisplayCommand::CaptureOutput { output } => {
-            if config.display_backend == DisplayBackendType::HeadlessShm {
+            if matches!(
+                config.display_backend,
+                DisplayBackendType::HeadlessShm | DisplayBackendType::DrmKms
+            ) {
                 handle_headless_capture_output(&output, config, display_backend)
             } else {
                 handle_capture_output(&output, config, state, vulkan, capture_backend).await
@@ -5217,6 +5240,7 @@ mod tests {
             display_backend_from_env(Some("unavailable")).unwrap(),
             DisplayBackendType::Unavailable
         );
+        assert_eq!(display_backend_from_env(Some("drm-kms")).unwrap(), DisplayBackendType::DrmKms);
         assert!(display_backend_from_env(Some("physical")).is_err());
     }
 
