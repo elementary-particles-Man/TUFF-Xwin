@@ -7,13 +7,13 @@ use std::{
     io,
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::Path,
-    thread,
     sync::atomic::{AtomicU64, Ordering},
+    thread,
     time::Duration,
 };
 use waybroker_common::{
-    IpcEnvelope, MessageKind, PhysicalInputEvent, PhysicalInputKind, ServiceRole,
-    WaylandCommand, WaylandEvent, connect_service_socket, read_ipc_envelope, send_ipc_envelope,
+    IpcEnvelope, MessageKind, PhysicalInputEvent, PhysicalInputKind, ServiceRole, WaylandCommand,
+    WaylandEvent, connect_service_socket, read_ipc_envelope, send_ipc_envelope,
 };
 
 const EV_KEY: u16 = 1;
@@ -44,7 +44,9 @@ fn permitted_device_path(path: &Path) -> bool {
         return false;
     };
     path.parent() == Some(Path::new("/dev/input"))
-        && name.strip_prefix("event").is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+        && name
+            .strip_prefix("event")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
 }
 
 fn decode(raw: EvdevRaw, sequence: u64) -> Option<PhysicalInputEvent> {
@@ -86,12 +88,13 @@ impl EvdevSource {
     pub(super) fn read_events(&mut self) -> Result<Vec<PhysicalInputEvent>> {
         let mut bytes = [0u8; std::mem::size_of::<EvdevRaw>() * MAX_READ_EVENTS];
         // SAFETY: bytes is writable, the descriptor is an opened evdev node.
-        let len = unsafe {
-            libc::read(self.file.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len())
-        };
+        let len =
+            unsafe { libc::read(self.file.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) };
         if len < 0 {
             let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::WouldBlock || error.kind() == io::ErrorKind::Interrupted {
+            if error.kind() == io::ErrorKind::WouldBlock
+                || error.kind() == io::ErrorKind::Interrupted
+            {
                 return Ok(Vec::new());
             }
             return Err(error).context("evdev read failed");
@@ -125,7 +128,8 @@ fn submit_to_waylandd(event: PhysicalInputEvent) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_millis(500)))?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
     let message = IpcEnvelope::new(
-        ServiceRole::Displayd, ServiceRole::Waylandd,
+        ServiceRole::Displayd,
+        ServiceRole::Waylandd,
         MessageKind::WaylandCommand(WaylandCommand::InjectPhysicalInput { event: event.clone() }),
     );
     send_ipc_envelope(&mut stream, &message)?;
@@ -135,8 +139,13 @@ fn submit_to_waylandd(event: PhysicalInputEvent) -> Result<()> {
     };
     match response.kind {
         MessageKind::WaylandEvent(WaylandEvent::PhysicalInputQueued { sequence })
-            if sequence == event.sequence => Ok(()),
-        MessageKind::WaylandEvent(WaylandEvent::Rejected { reason }) => bail!("input not routed: {reason}"),
+            if sequence == event.sequence =>
+        {
+            Ok(())
+        }
+        MessageKind::WaylandEvent(WaylandEvent::Rejected { reason }) => {
+            bail!("input not routed: {reason}")
+        }
         _ => bail!("input route acknowledgement mismatch"),
     }
 }
@@ -159,10 +168,7 @@ mod tests {
     use super::*;
 
     fn raw(kind: u16, code: u16, value: i32) -> EvdevRaw {
-        EvdevRaw {
-            timestamp: libc::timeval { tv_sec: 3, tv_usec: 125 },
-            kind, code, value,
-        }
+        EvdevRaw { timestamp: libc::timeval { tv_sec: 3, tv_usec: 125 }, kind, code, value }
     }
 
     #[test]
@@ -178,10 +184,14 @@ mod tests {
         let x = decode(raw(EV_REL, REL_X, -11), 1).unwrap();
         assert_eq!(x.kind, PhysicalInputKind::RelativeX { delta: -11 });
         assert_eq!(x.timestamp_usec, 3_000_125);
-        assert_eq!(decode(raw(EV_KEY, 30, 1), 2).unwrap().kind,
-                   PhysicalInputKind::Key { code: 30, pressed: true });
-        assert_eq!(decode(raw(EV_KEY, FIRST_POINTER_BUTTON, 1), 3).unwrap().kind,
-                   PhysicalInputKind::Button { code: 0x110, pressed: true });
+        assert_eq!(
+            decode(raw(EV_KEY, 30, 1), 2).unwrap().kind,
+            PhysicalInputKind::Key { code: 30, pressed: true }
+        );
+        assert_eq!(
+            decode(raw(EV_KEY, FIRST_POINTER_BUTTON, 1), 3).unwrap().kind,
+            PhysicalInputKind::Button { code: 0x110, pressed: true }
+        );
     }
 
     #[test]
