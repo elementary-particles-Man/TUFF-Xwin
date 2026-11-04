@@ -83,7 +83,7 @@ pub(super) fn generate_keymap() -> Result<Vec<u8>> {
     result
 }
 
-pub(super) fn send_keymap(stream: &UnixStream, keyboard: WaylandObjectId) -> Result<()> {
+pub(super) fn send_keymap(stream: &UnixStream, keyboard: WaylandObjectId, repeat_supported: bool) -> Result<()> {
     let map = generate_keymap()?;
     let size = u32::try_from(map.len())?;
     // SAFETY: memfd_create accepts a NUL-terminated name and flags.
@@ -115,7 +115,10 @@ pub(super) fn send_keymap(stream: &UnixStream, keyboard: WaylandObjectId) -> Res
         let mut socket = stream;
         socket.write_all(&encoded[sent..])?;
     }
-    // wl_keyboard.repeat_info, supported by our advertised version 7.
+    if !repeat_supported {
+        return Ok(());
+    }
+    // wl_keyboard.repeat_info is available only at protocol version >= 4.
     let mut repeat = Vec::with_capacity(8);
     repeat.extend_from_slice(&25_i32.to_le_bytes());
     repeat.extend_from_slice(&600_i32.to_le_bytes());
