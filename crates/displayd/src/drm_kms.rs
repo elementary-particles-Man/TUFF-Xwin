@@ -14,7 +14,27 @@ use std::{
     os::fd::AsRawFd,
     path::Path,
     ptr,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
+
+// Page flip userdata is an opaque monotonically increasing identifier, never
+// a pointer to temporary memory. Late events cannot dereference freed memory.
+static NEXT_FLIP_ID: AtomicU64 = AtomicU64::new(1);
+static LAST_FLIP_ID: AtomicU64 = AtomicU64::new(0);
+unsafe extern "C" fn drm_page_flip_done(
+    _fd: libc::c_int, _sequence: u32, _sec: u32, _usec: u32,
+    user_data: *mut libc::c_void,
+) {
+    LAST_FLIP_ID.store(user_data as usize as u64, Ordering::Release);
+}
+
+#[repr(C)]
+struct DrmEventContext {
+    version: libc::c_int,
+    vblank_handler: Option<unsafe extern "C" fn(libc::c_int, u32, u32, u32, *mut libc::c_void)>,
+    page_flip_handler: Option<unsafe extern "C" fn(libc::c_int, u32, u32, u32, *mut libc::c_void)>,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -110,6 +130,10 @@ type SetCrtc = unsafe extern "C" fn(
     libc::c_int,
     *const DrmModeInfo,
 ) -> libc::c_int;
+type PageFlip = unsafe extern "C" fn(
+    libc::c_int, u32, u32, u32, *mut libc::c_void,
+) -> libc::c_int;
+type HandleEvent = unsafe extern "C" fn(libc::c_int, *mut DrmEventContext) -> libc::c_int;
 
 struct DrmApi {
     library: *mut libc::c_void,
@@ -125,6 +149,8 @@ struct DrmApi {
     add_fb: AddFb,
     rm_fb: RmFb,
     set_crtc: SetCrtc,
+    page_flip: PageFlip,
+    handle_event: HandleEvent,
 }
 
 unsafe fn symbol<T: Copy>(library: *mut libc::c_void, name: &[u8]) -> Result<T> {
@@ -165,6 +191,8 @@ impl DrmApi {
                     add_fb: symbol(library, b"drmModeAddFB\0")?,
                     rm_fb: symbol(library, b"drmModeRmFB\0")?,
                     set_crtc: symbol(library, b"drmModeSetCrtc\0")?,
+                    page_flip: symbol(library, b"drmModePageFlip\0")?,
+                    handle_event: symbol(library, b"drmHandleEvent\0")?,
                 })
             }
         })();
@@ -518,24 +546,62 @@ impl DrmKmsBackend {
                 );
             }
         }
-        // SAFETY: all objects are live on this fd, mode was copied from libdrm.
-        let result = unsafe {
-            (self.api.set_crtc)(
-                self.device.as_raw_fd(),
-                output.crtc_id,
-                buffer.framebuffer_id,
-                0,
-                0,
-                &output.connector_id,
-                1,
-                &output.mode,
-            )
-        };
-        if result != 0 {
-            bail!(
-                "drmModeSetCrtc rejected frame (check DRM master/VT lease): {}",
-                std::io::Error::last_os_error()
-            );
+        let first_modeset = output.active_slot.is_none();
+        let crtc = output.crtc_id;
+        let framebuffer_id = buffer.framebuffer_id;
+        let connector = output.connector_id;
+        let mode = output.mode;
+        let fd = self.device.as_raw_fd();
+        if first_modeset {
+            // SAFETY: all objects are live on this fd, and mode was copied from libdrm.
+            let result = unsafe {
+                (self.api.set_crtc)(fd, crtc, framebuffer_id, 0, 0, &connector, 1, &mode)
+            };
+            if result != 0 {
+                bail!("drmModeSetCrtc rejected initial frame (check DRM master/VT): {}",
+                      std::io::Error::last_os_error());
+            }
+        } else {
+            let flip_id = NEXT_FLIP_ID.fetch_add(1, Ordering::AcqRel);
+            if flip_id == 0 || flip_id > usize::MAX as u64 {
+                bail!("drm page flip token exhausted");
+            }
+            // SAFETY: userdata is an integer token (not dereferenced); DRM owns fd/crtc/fb.
+            let result = unsafe {
+                (self.api.page_flip)(fd, crtc, framebuffer_id, 1, flip_id as usize as *mut libc::c_void)
+            };
+            if result != 0 {
+                bail!("drmModePageFlip rejected frame: {}", std::io::Error::last_os_error());
+            }
+            let mut ctx = DrmEventContext {
+                version: 2, vblank_handler: None,
+                page_flip_handler: Some(drm_page_flip_done),
+            };
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while LAST_FLIP_ID.load(Ordering::Acquire) != flip_id {
+                let now = Instant::now();
+                if now >= deadline { bail!("DRM page flip completion timed out"); }
+                let millis = deadline.duration_since(now).as_millis().min(2000) as libc::c_int;
+                let mut descriptor = libc::pollfd {
+                    fd, events: libc::POLLIN, revents: 0,
+                };
+                // SAFETY: descriptor is writable for exactly one pollfd.
+                let ready = unsafe { libc::poll(&mut descriptor, 1, millis) };
+                if ready < 0 {
+                    if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    bail!("DRM page flip poll failed: {}", std::io::Error::last_os_error());
+                }
+                if ready == 0 { bail!("DRM page flip completion timed out"); }
+                if descriptor.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                    bail!("DRM page flip device reported an error");
+                }
+                // SAFETY: ctx is a valid version-2 drmEventContext and lives across the call.
+                if unsafe { (self.api.handle_event)(fd, &mut ctx) } != 0 {
+                    bail!("drmHandleEvent failed: {}", std::io::Error::last_os_error());
+                }
+            }
         }
         output.active_slot = Some(next);
         output.last_frame = Some(frame);
