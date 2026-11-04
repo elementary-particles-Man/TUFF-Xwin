@@ -956,7 +956,8 @@ impl HeadlessWireCore {
             return Err(WireError::Incomplete);
         }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
-        self.registry.register_client_object(id, "wl_pointer", 7)?;
+        let version = self.registry.get_object(message.header.object_id)?.version.min(7);
+        self.registry.register_client_object(id, "wl_pointer", version)?;
         self.input.get_pointer(message.header.object_id, id)?;
         if let Some(surface_id) = self.surfaces.surfaces.keys().copied().max() {
             let _ = self.input.set_pointer_focus(id, Some(surface_id), 0.0, 0.0);
@@ -969,7 +970,8 @@ impl HeadlessWireCore {
             return Err(WireError::Incomplete);
         }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
-        self.registry.register_client_object(id, "wl_keyboard", 7)?;
+        let version = self.registry.get_object(message.header.object_id)?.version.min(7);
+        self.registry.register_client_object(id, "wl_keyboard", version)?;
         self.input.get_keyboard(message.header.object_id, id)
     }
 
