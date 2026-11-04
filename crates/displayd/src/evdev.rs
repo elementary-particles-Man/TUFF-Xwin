@@ -8,6 +8,7 @@ use std::{
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::Path,
     thread,
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 use waybroker_common::{
@@ -32,9 +33,10 @@ struct EvdevRaw {
     value: i32,
 }
 
+static NEXT_EVDEV_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
 pub(super) struct EvdevSource {
     file: File,
-    sequence: u64,
 }
 
 fn permitted_device_path(path: &Path) -> bool {
@@ -78,7 +80,7 @@ impl EvdevSource {
             .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(path)
             .with_context(|| format!("failed to open physical input {}", path.display()))?;
-        Ok(Self { file, sequence: 1 })
+        Ok(Self { file })
     }
 
     pub(super) fn read_events(&mut self) -> Result<Vec<PhysicalInputEvent>> {
@@ -106,8 +108,11 @@ impl EvdevSource {
         for data in bytes[..len].chunks_exact(record) {
             // SAFETY: data is exactly the native input_event representation.
             let raw = unsafe { (data.as_ptr().cast::<EvdevRaw>()).read_unaligned() };
-            if let Some(event) = decode(raw, self.sequence) {
-                self.sequence = self.sequence.checked_add(1).context("physical input serial exhausted")?;
+            let sequence = NEXT_EVDEV_SEQUENCE.fetch_add(1, Ordering::AcqRel);
+            if sequence == 0 || sequence == u64::MAX {
+                bail!("physical input sequence exhausted");
+            }
+            if let Some(event) = decode(raw, sequence) {
                 events.push(event);
             }
         }
