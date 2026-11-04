@@ -35,6 +35,28 @@
 更新日: `2026-07-26`
 対象 repository: `/media/flux/THPDOC/Develop/TUFF-Xwin`
 
+## Phase-4 completion run (2026-11-05)
+
+Freeze20 (`840cfe3ce3b7eb8bc480a126322611c6d255bbff`) was integrated through
+PR #28 as merge commit `ac8e7310bab2280ab365ad831cfa436e14a32e13`. The Phase-4
+worktree is based on that merge. `wl_surface.attach` now rejects unknown or
+non-SHM buffers before changing pending surface state, with a regression test.
+The screenshot preflight now uses a short `/tmp` run root so UNIX socket path
+limits do not depend on worktree depth, and it terminates fail-closed displayd
+instances deterministically.
+
+Validation passed: workspace check/test/Clippy, dev-check, dev-harness check/test,
+integration, multi-session recovery, Wayland canonical replay, compd outage,
+displayd reconnect, live topology, Wayland IPC isolation, and screenshot
+preflight. Chrome 156 headless and Wayland smoke passed.
+
+BLOCKED: this host has no `xdg-desktop-portal` or KDE portal service, so the
+browser-check script fails its portal prerequisite. `displayd` still exposes
+mock/headless-shm and fail-closed capture paths; no DRM/KMS production display
+backend or physical-input backend is available in this repository/environment.
+Therefore a real hardware/VM display-input E2E and portal-mediated browser
+scenario must not be reported as PASS.
+
 ## 完了した主要タスク
 
 1.  **Session-aware Recovery & Path-safe Identity** (Final Pass Criteria)

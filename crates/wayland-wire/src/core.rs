@@ -1060,6 +1060,15 @@ impl HeadlessWireCore {
         let buffer_id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
         let x = LittleEndian::read_i32(&message.payload[4..8]);
         let y = LittleEndian::read_i32(&message.payload[8..12]);
+        if buffer_id != WaylandObjectId(0) {
+            let buffer = self.registry.get_object(buffer_id)?;
+            if buffer.interface != "wl_buffer" || !self.shm.buffers.contains_key(&buffer_id) {
+                return Err(WireError::ProtocolError(format!(
+                    "wl_surface.attach requires a live wl_shm buffer: {}",
+                    buffer_id.0
+                )));
+            }
+        }
         if let Some(surface) = self.surfaces.surfaces.get_mut(&message.header.object_id) {
             surface.pending.buffer_id = if buffer_id.0 == 0 { None } else { Some(buffer_id) };
             surface.pending.offset_x = x;
@@ -1505,6 +1514,34 @@ mod tests {
             vec![WaylandObjectId(21)]
         );
         assert!(core.drain_events().is_empty());
+    }
+
+    #[test]
+    fn surface_attach_rejects_unknown_or_non_shm_buffers_without_mutating_pending_state() {
+        let mut core = HeadlessWireCore::default();
+        let surface = WaylandObjectId(20);
+        core.registry.register_client_object(surface, "wl_surface", 4).unwrap();
+        core.surfaces.create_surface(surface);
+
+        let mut payload = vec![0u8; 12];
+        LittleEndian::write_u32(&mut payload[0..4], 99);
+        LittleEndian::write_i32(&mut payload[4..8], 3);
+        LittleEndian::write_i32(&mut payload[8..12], 4);
+        assert!(matches!(
+            core.dispatch(WaylandMessage::new(surface, WaylandOpcode(1), payload)),
+            Err(WireError::InvalidObjectId(99))
+        ));
+        assert_eq!(core.surfaces.surfaces[&surface].pending.buffer_id, None);
+
+        let non_buffer = WaylandObjectId(21);
+        core.registry.register_client_object(non_buffer, "wl_surface", 4).unwrap();
+        let mut payload = vec![0u8; 12];
+        LittleEndian::write_u32(&mut payload[0..4], non_buffer.0);
+        assert!(matches!(
+            core.dispatch(WaylandMessage::new(surface, WaylandOpcode(1), payload)),
+            Err(WireError::ProtocolError(_))
+        ));
+        assert_eq!(core.surfaces.surfaces[&surface].pending.buffer_id, None);
     }
 
     #[test]

@@ -10,8 +10,11 @@ IFS=$'\n\t'
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# The displayd socket is a UNIX pathname and is subject to SUN_LEN. Keep the
+# per-run root short enough that the explicit socket path remains bindable from
+# a worktree mounted at a long path.
 RUN_ID="$(date +%Y%m%dT%H%M%S)-$$"
-RUN_ROOT="$REPO_ROOT/target/xsm/preflight-$RUN_ID"
+RUN_ROOT="$(mktemp -d "/tmp/tuff-xwin-preflight-${RUN_ID}.XXXXXX")"
 LOG_DIR="$RUN_ROOT/logs"
 TMP_ROOT="$RUN_ROOT/tmp"
 SOCKET_PATH="$TMP_ROOT/real-displayd.sock"
@@ -74,6 +77,7 @@ cleanup() {
     if [[ -n "${DISPLAYD_PID:-}" ]]; then
         kill "$DISPLAYD_PID" >/dev/null 2>&1 || true
     fi
+    rm -rf -- "$RUN_ROOT"
 }
 
 trap cleanup EXIT INT TERM
@@ -175,6 +179,7 @@ else
     append_report "Case 4 (Real Fail-Closed): FAILED"
     exit 1
 fi
+kill "$DISPLAYD_PID" >/dev/null 2>&1 || true
 wait "$DISPLAYD_PID" || true
 
 # Test 5: X11 Method without Display (Should fail to start)
