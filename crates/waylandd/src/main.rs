@@ -312,9 +312,9 @@ use vulkan_backend::{
 use waybroker_common::{
     CommitTarget, DisplayCommand, DisplayEvent, FocusTarget, ImeBridgeMode, ImeCommand, ImeEvent,
     ImeStatus, IpcEnvelope, MessageKind, OutputMode, OutputTopologyDelta, OutputTopologyEntry,
-    OutputTopologyTransition, PixelTransportHandle, PixelTransportPayload, PixelTransportStore,
-    PhysicalInputEvent, ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream, SurfacePlacement,
-    SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
+    OutputTopologyTransition, PhysicalInputEvent, PixelTransportHandle, PixelTransportPayload,
+    PixelTransportStore, ServiceBanner, ServiceEndpoint, ServiceRole, ServiceStream,
+    SurfacePlacement, SurfaceRegistrySnapshot, SurfaceSnapshot, WaylandCommand, WaylandEvent,
     WaylandSelectionHandoff, WaylandSelectionState, WaylandSurfaceRole, WaylandSurfaceState,
     accel::global_accel_policy, bind_service_socket, connect_service_socket, ensure_runtime_dir,
     is_recoverable_accept_error, now_unix_timestamp, read_ipc_envelope, send_ipc_display_command,
@@ -801,7 +801,8 @@ async fn handle_client(
             Err(error) => WaylandEvent::Rejected { reason: error.to_string() },
         };
         let envelope = IpcEnvelope::new(
-            ServiceRole::Waylandd, request.source,
+            ServiceRole::Waylandd,
+            request.source,
             MessageKind::WaylandEvent(response),
         );
         send_ipc_envelope(&mut stream, &envelope).map_err(ClientHandlingError::Client)?;
@@ -839,7 +840,8 @@ fn verify_physical_input_peer(stream: &ServiceStream, request: &IpcEnvelope) -> 
     if request.source != ServiceRole::Displayd || request.destination != ServiceRole::Waylandd {
         bail!("physical input requires displayd-to-waylandd routing");
     }
-    let (pid, uid) = stream.linux_peer_pid_uid()?.context("physical input requires Unix peer credentials")?;
+    let (pid, uid) =
+        stream.linux_peer_pid_uid()?.context("physical input requires Unix peer credentials")?;
     if uid != unsafe { libc::geteuid() } {
         bail!("physical input caller UID mismatch");
     }
@@ -870,7 +872,9 @@ fn route_physical_input(event: &PhysicalInputEvent, pid: u32) -> Result<()> {
     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
     socket.set_write_timeout(Some(Duration::from_secs(2)))?;
     send_ipc_display_command(
-        &mut socket, ServiceRole::Waylandd, ServiceRole::Displayd,
+        &mut socket,
+        ServiceRole::Waylandd,
+        ServiceRole::Displayd,
         &DisplayCommand::GetSceneSnapshot { output: None },
     )?;
     let response: IpcEnvelope = read_ipc_envelope(&mut BufReader::new(socket))?;
@@ -878,13 +882,16 @@ fn route_physical_input(event: &PhysicalInputEvent, pid: u32) -> Result<()> {
         bail!("physical input focus response identity mismatch");
     }
     let snapshot = match response.kind {
-        MessageKind::DisplayEvent(DisplayEvent::SceneSnapshot { snapshot: Some(snapshot) }) => snapshot,
+        MessageKind::DisplayEvent(DisplayEvent::SceneSnapshot { snapshot: Some(snapshot) }) => {
+            snapshot
+        }
         _ => bail!("physical input rejected: no authoritative presented scene"),
     };
     let FocusTarget::Surface { id: focus_id } = snapshot.focus else {
         bail!("physical input rejected: compositor has no focused surface");
     };
-    if !snapshot.surfaces.iter().any(|surface| surface.id == focus_id && surface.placement.visible) {
+    if !snapshot.surfaces.iter().any(|surface| surface.id == focus_id && surface.placement.visible)
+    {
         bail!("physical input focus is not a visible committed surface");
     }
     let (client_id, surface_id) = {
@@ -904,7 +911,8 @@ fn route_physical_input(event: &PhysicalInputEvent, pid: u32) -> Result<()> {
     let endpoint = {
         let (lock, _) = &*TOPOLOGY_REGISTRY;
         lock.lock().unwrap().clients.get(&client_id).cloned()
-    }.context("physical input focus client is disconnected")?;
+    }
+    .context("physical input focus client is disconnected")?;
     {
         let mut authority = PHYSICAL_INPUT_AUTHORITY.lock().unwrap();
         if let Some((previous_pid, previous_sequence)) = *authority {
@@ -912,9 +920,10 @@ fn route_physical_input(event: &PhysicalInputEvent, pid: u32) -> Result<()> {
                 bail!("physical input event sequence was replayed or reordered");
             }
         }
-        endpoint.sender.try_send(ClientCommand::PhysicalInput {
-            event: event.clone(), surface_id,
-        }).map_err(|_| anyhow::anyhow!("physical input client queue is full or closed"))?;
+        endpoint
+            .sender
+            .try_send(ClientCommand::PhysicalInput { event: event.clone(), surface_id })
+            .map_err(|_| anyhow::anyhow!("physical input client queue is full or closed"))?;
         *authority = Some((pid, event.sequence));
     }
     Ok(())
@@ -1032,7 +1041,9 @@ async fn handle_wayland_command(
 ) -> (WaylandEvent, bool) {
     match command {
         WaylandCommand::InjectPhysicalInput { .. } => (
-            WaylandEvent::Rejected { reason: "physical input requires verified displayd peer".into() },
+            WaylandEvent::Rejected {
+                reason: "physical input requires verified displayd peer".into(),
+            },
             false,
         ),
         WaylandCommand::GetSurfaceRegistry => {
@@ -2666,9 +2677,9 @@ fn handle_production_client(
                             .is_ok_and(|object| object.interface == "wl_seat")
                         && msg.payload.len() >= 4
                     {
-                        Some(wayland_wire::WaylandObjectId(
-                            byteorder::LittleEndian::read_u32(&msg.payload[..4]),
-                        ))
+                        Some(wayland_wire::WaylandObjectId(byteorder::LittleEndian::read_u32(
+                            &msg.payload[..4],
+                        )))
                     } else {
                         None
                     };
@@ -3004,7 +3015,7 @@ fn apply_client_command(
         }
         ClientCommand::TopologyReset { .. } => {}
         ClientCommand::Disconnect { .. } => return Ok(true),
-        ClientCommand::PhysicalInput { .. } => {},
+        ClientCommand::PhysicalInput { .. } => {}
     }
     Ok(false)
 }
