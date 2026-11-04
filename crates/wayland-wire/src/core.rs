@@ -959,9 +959,6 @@ impl HeadlessWireCore {
         let version = self.registry.get_object(message.header.object_id)?.version.min(7);
         self.registry.register_client_object(id, "wl_pointer", version)?;
         self.input.get_pointer(message.header.object_id, id)?;
-        if let Some(surface_id) = self.surfaces.surfaces.keys().copied().max() {
-            let _ = self.input.set_pointer_focus(id, Some(surface_id), 0.0, 0.0);
-        }
         Ok(())
     }
 
@@ -3235,7 +3232,9 @@ impl HeadlessWireCore {
                     payload.extend_from_slice(&x.to_le_bytes());
                     payload.extend_from_slice(&y.to_le_bytes());
                     self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(2), payload));
-                    self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(5), vec![]));
+                    if self.registry.get_object(pointer_id).is_ok_and(|object| object.version >= 5) {
+                        self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(5), vec![]));
+                    }
                 }
             }
             PhysicalInputKind::Button { code, pressed } => {
@@ -3268,7 +3267,9 @@ impl HeadlessWireCore {
                     payload.extend_from_slice(&code.to_le_bytes());
                     payload.extend_from_slice(&u32::from(pressed).to_le_bytes());
                     self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(3), payload));
-                    self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(5), vec![]));
+                    if self.registry.get_object(pointer_id).is_ok_and(|object| object.version >= 5) {
+                        self.events_out.push(WaylandMessage::new(pointer_id, WaylandOpcode(5), vec![]));
+                    }
                 }
             }
             PhysicalInputKind::Key { code, pressed } => {
@@ -3328,6 +3329,7 @@ mod physical_input_delivery_tests {
         let mut core = HeadlessWireCore::default();
         core.input.create_seat(WaylandObjectId(40), "seat0");
         core.input.get_pointer(WaylandObjectId(40), WaylandObjectId(41)).unwrap();
+        core.registry.register_client_object(WaylandObjectId(41), "wl_pointer", 7).unwrap();
         let input = PhysicalInputEvent {
             sequence: 5, timestamp_usec: 7_000,
             kind: PhysicalInputKind::RelativeX { delta: 9 },
