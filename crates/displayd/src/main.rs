@@ -112,7 +112,10 @@ async fn main() -> Result<()> {
     };
 
     let mut state = DisplayState::load(&config.session_instance_id)?;
-    if matches!(config.display_backend, DisplayBackendType::HeadlessShm | DisplayBackendType::DrmKms) {
+    if matches!(
+        config.display_backend,
+        DisplayBackendType::HeadlessShm | DisplayBackendType::DrmKms
+    ) {
         state.outputs.clear();
     }
     let mut clock = FakePresentationClock;
@@ -1349,7 +1352,10 @@ async fn handle_display_command(
             Ok(handle_scene_snapshot_request(output, state))
         }
         DisplayCommand::CaptureOutput { output } => {
-            if matches!(config.display_backend, DisplayBackendType::HeadlessShm | DisplayBackendType::DrmKms) {
+            if matches!(
+                config.display_backend,
+                DisplayBackendType::HeadlessShm | DisplayBackendType::DrmKms
+            ) {
                 handle_headless_capture_output(&output, config, display_backend)
             } else {
                 handle_capture_output(&output, config, state, vulkan, capture_backend).await
@@ -5234,10 +5240,7 @@ mod tests {
             display_backend_from_env(Some("unavailable")).unwrap(),
             DisplayBackendType::Unavailable
         );
-        assert_eq!(
-            display_backend_from_env(Some("drm-kms")).unwrap(),
-            DisplayBackendType::DrmKms
-        );
+        assert_eq!(display_backend_from_env(Some("drm-kms")).unwrap(), DisplayBackendType::DrmKms);
         assert!(display_backend_from_env(Some("physical")).is_err());
     }
 
