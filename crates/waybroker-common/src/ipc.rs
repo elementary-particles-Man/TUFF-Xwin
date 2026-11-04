@@ -684,11 +684,50 @@ pub enum PublicationFailure {
     RendererRejected,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum PhysicalInputKind {
+    RelativeX { delta: i32 },
+    RelativeY { delta: i32 },
+    Button { code: u32, pressed: bool },
+    Key { code: u32, pressed: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicalInputEvent {
+    pub sequence: u64,
+    pub timestamp_usec: u64,
+    pub kind: PhysicalInputKind,
+}
+
+impl PhysicalInputEvent {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.sequence == 0 {
+            return Err("physical input sequence must be nonzero".into());
+        }
+        match &self.kind {
+            PhysicalInputKind::RelativeX { delta } | PhysicalInputKind::RelativeY { delta }
+                if delta.unsigned_abs() > 32768 =>
+            {
+                Err("physical input relative delta exceeds bound".into())
+            }
+            PhysicalInputKind::Button { code, .. } if !(0x110..=0x11f).contains(code) => {
+                Err("physical pointer button code out of range".into())
+            }
+            PhysicalInputKind::Key { code, .. } if *code > 767 => {
+                Err("physical keyboard key code out of range".into())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 // IPC values remain inline to preserve the established wire shape and public API.
 #[allow(clippy::large_enum_variant)]
 pub enum WaylandCommand {
+    InjectPhysicalInput { event: PhysicalInputEvent },
     GetSurfaceRegistry,
     ApplySelectionHandoff {
         handoff: WaylandSelectionHandoff,
@@ -745,6 +784,7 @@ pub enum WaylandCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum WaylandEvent {
+    PhysicalInputQueued { sequence: u64 },
     SurfaceRegistry {
         snapshot: SurfaceRegistrySnapshot,
     },
