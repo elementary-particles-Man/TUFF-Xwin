@@ -1031,6 +1031,10 @@ async fn handle_wayland_command(
     config: &Config,
 ) -> (WaylandEvent, bool) {
     match command {
+        WaylandCommand::InjectPhysicalInput { .. } => (
+            WaylandEvent::Rejected { reason: "physical input requires verified displayd peer".into() },
+            false,
+        ),
         WaylandCommand::GetSurfaceRegistry => {
             println!(
                 "service=waylandd op=get_surface_registry event=success generation={} surfaces={} clipboard_owner={} primary_selection_owner={}",
