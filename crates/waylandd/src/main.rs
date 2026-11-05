@@ -2627,12 +2627,15 @@ fn handle_production_client(
         if poll_result == 0 {
             continue;
         }
-        if poll_fd.revents & libc::POLLNVAL != 0 || poll_fd.revents & libc::POLLERR != 0 {
-            bail!("Wayland client poll reported an invalid or failed socket");
+        if poll_fd.revents & libc::POLLNVAL != 0 {
+            bail!("Wayland client poll reported an invalid socket");
         }
         let (n, fds) = wayland_wire::fd::recv_with_fds(&stream, &mut read_buf)?;
         if n == 0 && fds.is_empty() {
             break;
+        }
+        if poll_fd.revents & libc::POLLERR != 0 && poll_fd.revents & libc::POLLIN == 0 {
+            bail!("Wayland client poll reported a failed socket after a non-EOF read");
         }
         buffer.extend_from_slice(&read_buf[..n]);
         received_fds.extend(fds);

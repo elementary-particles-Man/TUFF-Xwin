@@ -156,8 +156,16 @@ class Client:
         self.callback = None
 
     def close(self):
-        self.sock.close()
-        self.temp.close()
+        try:
+            self.sock.shutdown(socket.SHUT_WR)
+            self.sock.settimeout(2.0)
+            while self.sock.recv(65536):
+                pass
+        except (OSError, socket.timeout):
+            pass
+        finally:
+            self.sock.close()
+            self.temp.close()
 
 
 def main():

@@ -9,13 +9,26 @@ displayd_pid= compd_pid= waylandd_pid= client_pid=
 wayland_socket="$runtime_dir/wayland-live-topology"
 
 cleanup() {
+  local status=$?
   for pid in "$client_pid" "$waylandd_pid" "$compd_pid" "$displayd_pid"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
     fi
   done
+  if [[ "$status" -ne 0 && "${TUFF_XWIN_KEEP_FAILED_TOPOLOGY_LOGS:-0}" == "1" ]]; then
+    local run_root="${TUFF_XWIN_E2E_RUN_ROOT:-$HOME/.local/state/tuff-xwin-e2e-20261105}"
+    local run_id
+    run_id="$(date -u +%Y%m%dT%H%M%SZ)-${runtime_dir##*.}"
+    local destination="$run_root/logs/live-topology/$run_id"
+    if mkdir -p "$destination" && cp -a "$runtime_dir/." "$destination/"; then
+      echo "live-topology failure logs preserved: $destination" >&2
+    else
+      echo "live-topology failure log preservation failed: $destination" >&2
+    fi
+  fi
   rm -rf "$runtime_dir"
+  return "$status"
 }
 trap cleanup EXIT
 
