@@ -1,0 +1,50 @@
+timestamp=2026-11-11T03:49:11+09:00
+before_cleanup_units
+active
+active
+active
+active
+active
+active
+kwin_before
+1967 /usr/bin/kwin_wayland_wrapper --xwayland
+2016 /usr/bin/kwin_wayland --wayland-fd 7 --socket wayland-0 --xwayland-fd 8 --xwayland-fd 9 --xwayland-display :0 --xwayland-xauthority /run/user/1000/xauth_cgmgEc --xwayland
+plasma_before
+2707 /usr/bin/plasmashell --no-respawn
+cleanup_command
+cleanup_exit=0
+daemon_reload_exit=0
+after_cleanup_units
+inactive
+active
+inactive
+inactive
+inactive
+inactive
+remaining_own_processes
+kwin_after
+1967 /usr/bin/kwin_wayland_wrapper --xwayland
+2016 /usr/bin/kwin_wayland --wayland-fd 7 --socket wayland-0 --xwayland-fd 8 --xwayland-fd 9 --xwayland-display :0 --xwayland-xauthority /run/user/1000/xauth_cgmgEc --xwayland
+plasma_after
+2707 /usr/bin/plasmashell --no-respawn
+runtime_sockets
+compd.sock
+sessiond.sock
+waylandd.sock
+wayland-tuff
+displayd.sock
+watchdog.sock
+lockd.sock
+timestamp=2026-11-11T03:49:29+09:00
+tuff-xwin-current-session-displayd.service=inactive
+tuff-xwin-current-session-waylandd.service=inactive
+tuff-xwin-current-session-lockd.service=inactive
+tuff-xwin-current-session-watchdog.service=inactive
+tuff-xwin-current-session-sessiond.service=inactive
+tuff-xwin-current-session.target=inactive
+processes
+kwin
+1967 /usr/bin/kwin_wayland_wrapper --xwayland
+2016 /usr/bin/kwin_wayland --wayland-fd 7 --socket wayland-0 --xwayland-fd 8 --xwayland-fd 9 --xwayland-display :0 --xwayland-xauthority /run/user/1000/xauth_cgmgEc --xwayland
+plasmashell
+2707 /usr/bin/plasmashell --no-respawn

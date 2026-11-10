@@ -1,0 +1,774 @@
+{
+  "schema": "tuff-xwin/host-install-evidence-manifest/v1",
+  "collected_at": "2026-11-10T18:50:17.451186+00:00",
+  "redactions": 0,
+  "files": [
+    {
+      "origin_relative_path": "run_root/evidence/01-baseline.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/01-baseline.txt",
+      "sha256": "41877f9dec45e3826febe51ab923709160c327360a90ad6caa99e3464d07b932",
+      "bytes": 2421,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/02-install-and-prestart.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/02-install-and-prestart.txt",
+      "sha256": "412e90b0e3caeba9ca17d9e31cab56f6c0c325c79e815bd20dd8203063797f47",
+      "bytes": 1894,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/03-launcher-fix.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/03-launcher-fix.command.txt",
+      "sha256": "d9f4eab087a4c46259b588d59f2e890aa50a42c9da98036ec00561f673c26f01",
+      "bytes": 61,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/03-readiness-2.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/03-readiness-2.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/03-readiness-2.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/03-readiness-2.stdout",
+      "sha256": "566ea4277f849b2b4451a2defbe1a906e89eca9d77cc5d2da421105755e01f1d",
+      "bytes": 247,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/03-readiness.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/03-readiness.stderr",
+      "sha256": "80997cd16c851ae94584e79cdf5c0d8adc092027735041cac7dcb3cdcef34f25",
+      "bytes": 168,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/03-readiness.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/03-readiness.stdout",
+      "sha256": "132ab3d56e6c4431af8d6c43c2af015bde5e70fc4a264690c9fa73d607fcd102",
+      "bytes": 197,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/03-restart.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/03-restart.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/03-restart.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/03-restart.stdout",
+      "sha256": "20ab7a27249c91932e738a25329be653c6c888106c3dd5f01b02f29203f95d16",
+      "bytes": 171,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/03-runtime-status-2.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/03-runtime-status-2.txt",
+      "sha256": "577b6b432b0eb0d62fe0f85d9fa080bab3e4fb3af5fe14e4c0a9799297f6df07",
+      "bytes": 9456,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/03-runtime-status.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/03-runtime-status.txt",
+      "sha256": "93d0add8eff39d9022132c312a2b722c39323690962cda5293d252458ddaec46",
+      "bytes": 30245,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/03-start.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/03-start.command.txt",
+      "sha256": "7142d6b38dee2f3e6f2c076585a194eadbe1c7984a2575cb14a5522e5cfd7e36",
+      "bytes": 219,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/03-start.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/03-start.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/03-start.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/03-start.stdout",
+      "sha256": "20ab7a27249c91932e738a25329be653c6c888106c3dd5f01b02f29203f95d16",
+      "bytes": 171,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/04-chrome-summary.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/04-chrome-summary.txt",
+      "sha256": "ca3fa4273bfbd95a00588f69307e65de1a8a7c5c40be57f49adf81d4af2c1b44",
+      "bytes": 12072,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/04-chrome.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/04-chrome.command.txt",
+      "sha256": "fa5bbe3f8d4ebf38731789a4f7327ef0496541326bea4b34acc798483a04d675",
+      "bytes": 358,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/04-chrome.socket.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/04-chrome.socket.txt",
+      "sha256": "cc92dc5e66927c8fec4fb233ae3682c4371a9746a2d32dcb068e732fd2e0014f",
+      "bytes": 763,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/04-chrome.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/04-chrome.stderr",
+      "sha256": "9fcc72c2e83d87f3211cf46720b5f6dc9218518a782d266a3da01da0ed79056b",
+      "bytes": 443,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/04-chrome.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/04-chrome.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/07-cleanup.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/07-cleanup.txt",
+      "sha256": "a7623c7b9b32e3004431e46d04dedeae09911b989c70b2256d2dddd79b6c8b31",
+      "bytes": 1549,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/07-stop-remaining.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/07-stop-remaining.command.txt",
+      "sha256": "3664fcf1e2f15aad035e2423c3b0c2d53865f72e69c397cb262f1fa3a6c2ee1b",
+      "bytes": 23,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/07-stop-remaining.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/07-stop-remaining.stderr",
+      "sha256": "5c5f1b24abb594f35990249adcc83a1f70907dd5801c90615175e850374bd3fe",
+      "bytes": 688,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/07-stop-remaining.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/07-stop-remaining.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/install.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/install.command.txt",
+      "sha256": "dfa9e319efa969503ba95d57039939099cd6104618b035086a49da702c2dcdec",
+      "bytes": 105,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/install.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/install.stderr",
+      "sha256": "9998e2d603600704f087bbf9631e348aafc798580a5c5ecde05e9426a27e14fd",
+      "bytes": 1389,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/install.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/install.stdout",
+      "sha256": "20e29e938c2dcb3385eaaa1ffad4da4a515fb89a4466c37bded56c7628c1f461",
+      "bytes": 440,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/FACTS.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/FACTS.txt",
+      "sha256": "e8817113b8aa926deed600f94157ad15ea7d0e27eadf197bacb4aa17f723b487",
+      "bytes": 700595,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/coredump-list.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/coredump-list.command.txt",
+      "sha256": "51960b78028e0b26f5dae3eaa02b4ecd9f9e6a777120aec9d6390d7d11f9121a",
+      "bytes": 104,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/coredump-list.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/coredump-list.stderr",
+      "sha256": "7fd30764fbc29ba7a2cfc6ede42e225cd98ae3c2d496a8a93bc3270d03f03818",
+      "bytes": 185,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/coredump-list.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/coredump-list.stdout",
+      "sha256": "3d94e2695cf3337a9f22dd3b926feaaecc23f5282a0b17a60bd84fea1a9e30af",
+      "bytes": 20862,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/kde-kernel-filter.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/kde-kernel-filter.command.txt",
+      "sha256": "b1381abe08605ee798768ecf5f15b4beed73faa236592f33a417ccc1ad997b8a",
+      "bytes": 191,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/kde-kernel-filter.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/kde-kernel-filter.stderr",
+      "sha256": "7fd30764fbc29ba7a2cfc6ede42e225cd98ae3c2d496a8a93bc3270d03f03818",
+      "bytes": 185,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/kde-kernel-filter.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/kde-kernel-filter.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/kde-user-filter.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/kde-user-filter.command.txt",
+      "sha256": "3bd3719bc4c810e6696161a77875724b24c3115fb664a4d1dfb98a356d666f4d",
+      "bytes": 216,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/kde-user-filter.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/kde-user-filter.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/kde-user-filter.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/kde-user-filter.stdout",
+      "sha256": "54285077e6208126e0048ff146593ab10b062588a7de30b34633be710345a016",
+      "bytes": 644105,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/kernel-journal.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/kernel-journal.command.txt",
+      "sha256": "fbe559879e7173e61377b14c14f458b13f29938293f513803818b63507c33c04",
+      "bytes": 191,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/kernel-journal.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/kernel-journal.stderr",
+      "sha256": "7fd30764fbc29ba7a2cfc6ede42e225cd98ae3c2d496a8a93bc3270d03f03818",
+      "bytes": 185,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/kernel-journal.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/kernel-journal.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/kwin-coredumps.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/kwin-coredumps.command.txt",
+      "sha256": "5b9a9b18cfa0bb976279655ed9fb2df6ff4f792b0cf926db6cc4140eb83d1fe9",
+      "bytes": 154,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/kwin-coredumps.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/kwin-coredumps.stderr",
+      "sha256": "7fd30764fbc29ba7a2cfc6ede42e225cd98ae3c2d496a8a93bc3270d03f03818",
+      "bytes": 185,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/kwin-coredumps.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/kwin-coredumps.stdout",
+      "sha256": "3bc1c17d0400a7d34b56a6e7a5948829c261bbda41762e3fa222ee89940573fe",
+      "bytes": 183,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/user-journal.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/user-journal.command.txt",
+      "sha256": "70daf4d387ac7941635d215bbe6c7869084ca231de1b7ca593808903a244df5d",
+      "bytes": 137,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/kde/user-journal.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/kde/user-journal.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/OVERALL.status",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/OVERALL.status",
+      "sha256": "7eeb001f2187a8a959b780debf8d18d68494ed2cd6101f39e5440ac3ace19b91",
+      "bytes": 10,
+      "evidence_kind": "status",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/canonical.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/canonical.command.txt",
+      "sha256": "147a16862353f3e9bd99205c046400bab05b9f2a80e42bcfc2ecd1ef8015fc92",
+      "bytes": 132,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/canonical.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/canonical.stderr",
+      "sha256": "2b34696728dc82b03cbf6311d7e3a6a41658bbde097834c3010a78bc82842c1a",
+      "bytes": 72,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/canonical.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/canonical.stdout",
+      "sha256": "d299a90e27e5648e7bbe0c4958bd2d8c6fa86ab6395f1098e61b6aa3a8692713",
+      "bytes": 238,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/integration.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/integration.command.txt",
+      "sha256": "88a05a374857ac776392a547ecb061e971c985d9ccfde3cb40bacc9de68205ef",
+      "bytes": 109,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/integration.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/integration.stderr",
+      "sha256": "4a46e3f1a8bb14886784c6632369552a674757ef8e813df072ffe87ec4018dab",
+      "bytes": 569,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/integration.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/integration.stdout",
+      "sha256": "e48a20346d61b4b9a8169e777a1b0c0d63eec965cd5e1ac62350718dcb048419",
+      "bytes": 8200,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/ipc.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/ipc.command.txt",
+      "sha256": "76a4498f3c7b23a41ffbab30bb4222fd1b767f2cc92bc23907571a37d78b0723",
+      "bytes": 120,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/ipc.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/ipc.stderr",
+      "sha256": "e311d1a1b9202309db65ed6517e5e12897ada48e0e97213e8032fca6a2c3c757",
+      "bytes": 497,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/ipc.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/ipc.stdout",
+      "sha256": "47b27e5a89dd1407469303975a076006fc05ab29bdb9a6ca729e8d3241f9d05a",
+      "bytes": 41,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/live-topology.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/live-topology.command.txt",
+      "sha256": "851c37a1e5fd7618b39140cc43c1eb5769aa0929cefe447378c27adf2c83cdde",
+      "bytes": 125,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/live-topology.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/live-topology.stderr",
+      "sha256": "f593ff56e05d780bf6c7527dfa4ff0bab9c9209716196a15cd55ba9f0bf75be6",
+      "bytes": 357,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/live-topology.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/live-topology.stdout",
+      "sha256": "6ffff9f7779d363c00095279261f2003c5d22f80a4013384bc19d506bb3705e6",
+      "bytes": 73,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/reconnect.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/reconnect.command.txt",
+      "sha256": "932a8f0749285ff9206cffdb8472125ab3dd9fdf1365ce2059ea1fc026e2b95a",
+      "bytes": 125,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/reconnect.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/reconnect.stderr",
+      "sha256": "59639588a6f1826f129cbcd121edc07279dab94786f5fa5bde6b3439b2e845cc",
+      "bytes": 72,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/smokes/reconnect.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/smokes/reconnect.stdout",
+      "sha256": "fff53567d81b7ba4b486fe9956a81c71dcc55442775f075133052c64f14d68a1",
+      "bytes": 130,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/OVERALL.status",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/OVERALL.status",
+      "sha256": "71f10e2baa0c3f2660da5e51d2a0849dbf24ffacf0761a956ada1764e69a08af",
+      "bytes": 24,
+      "evidence_kind": "status",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/check.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/check.command.txt",
+      "sha256": "4c450e9cf5ca82c89a2e7492f9fbe3f7fe92033baf025b770704354e311ea1b6",
+      "bytes": 108,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/check.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/check.stderr",
+      "sha256": "f3cada094275db1fccbc9e79b89bce73860adeef829e987c51602a999b34b743",
+      "bytes": 1398,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/check.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/check.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/clippy.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/clippy.command.txt",
+      "sha256": "5045cca704ac9851605c16f7158fa6817ad9492678366a442cf9f24c33c29e9b",
+      "bytes": 138,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/clippy.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/clippy.stderr",
+      "sha256": "3dc8464ab6dd296ef4995c29e9f6a516c21935ca615a21bd134c29dcf12fa119",
+      "bytes": 1398,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/clippy.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/clippy.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/dev-check.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/dev-check.command.txt",
+      "sha256": "960f176fad5010a21831e84d8ebdfda85c6ffebbff90748f8a45116f53b74346",
+      "bytes": 110,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/dev-check.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/dev-check.stderr",
+      "sha256": "8abfc08b37f1194d5f11393e1d5e1ce5973dba71df2d865af9deeb8142cc40c8",
+      "bytes": 2810,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/dev-check.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/dev-check.stdout",
+      "sha256": "dbd69d6455eb6eeb2147661dd1cb8e25b64f5fd2b03cdc460cc43b1e0f65914d",
+      "bytes": 46500,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/fmt.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/fmt.command.txt",
+      "sha256": "aeab1cd1118861da989e57af89d8860f1e22dedeeadfe016dc256816faa82960",
+      "bytes": 111,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/fmt.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/fmt.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/fmt.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/fmt.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/test.command.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/test.command.txt",
+      "sha256": "5e5dbb838142147855e645a3c1b2d8acb9c9b99db73ee03f27930040c0b74cf2",
+      "bytes": 107,
+      "evidence_kind": "command",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/test.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/test.stderr",
+      "sha256": "5c49c3fc263d0076369e4fe592d4ed14d7b7fca45aa68fb93dc3dd86d1e7361c",
+      "bytes": 4064,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "run_root/evidence/software/test.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/software/test.stdout",
+      "sha256": "38a3bab4f6d39b3eb333b88440b3f8d58d9d7eff4f085d493e56a8627ec30b54",
+      "bytes": 46500,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-10T18:50:17.451186+00:00",
+      "redaction_count": 0,
+      "status": "collected"
+    }
+  ],
+  "missing": [
+    {
+      "origin_relative_path": "evidence/kde/user-journal.stdout",
+      "status": "excluded_large_unfiltered_log",
+      "reason": "filtered KDE extracts are tracked; raw 91MB journal remains local"
+    }
+  ]
+}

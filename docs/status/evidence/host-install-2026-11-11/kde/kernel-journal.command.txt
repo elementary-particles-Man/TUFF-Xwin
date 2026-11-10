@@ -1,0 +1,4 @@
+sh -c journalctl -k -b --no-pager -o short-iso | rg -i 'drm|amdgpu|gpu reset|oom|out of memory|i/o error|segfault'
+started=2026-11-11T03:48:41+09:00
+exit=1
+finished=2026-11-11T03:48:41+09:00

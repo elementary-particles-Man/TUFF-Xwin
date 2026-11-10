@@ -1,0 +1,94 @@
+timestamp=2026-11-11T03:47:24+09:00
+UNIT                                       LOAD   ACTIVE SUB     DESCRIPTION
+tuff-xwin-current-session-displayd.service loaded active running TUFF-Xwin current-session display broker
+tuff-xwin-current-session-lockd.service    loaded active running TUFF-Xwin current-session lock broker
+tuff-xwin-current-session-sessiond.service loaded active running TUFF-Xwin current-session session supervisor
+tuff-xwin-current-session-watchdog.service loaded active running TUFF-Xwin current-session watchdog
+tuff-xwin-current-session-waylandd.service loaded active running TUFF-Xwin current-session Wayland broker
+tuff-xwin-current-session.target           loaded active active  TUFF-Xwin current-session runtime target
+
+Legend: LOAD   → Reflects whether the unit definition was properly loaded.
+        ACTIVE → The high-level unit activation state, i.e. generalization of SUB.
+        SUB    → The low-level unit activation state, values depend on unit type.
+
+6 loaded units listed. Pass --all to see loaded but inactive units, too.
+To show all installed unit files use 'systemctl list-unit-files'.
+tuff-xwin-current-session.target=active
+tuff-xwin-current-session-displayd.service=active
+tuff-xwin-current-session-waylandd.service=active
+tuff-xwin-current-session-lockd.service=active
+tuff-xwin-current-session-watchdog.service=active
+tuff-xwin-current-session-sessiond.service=active
+sockets
+compd.sock
+displayd.sock
+lockd.sock
+sessiond.sock
+watchdog.sock
+wayland-tuff
+waylandd.sock
+readiness
+exit=0
+waybroker service=waylandd responsibility=wayland endpoint, client lifecycle, clipboard core
+service=waylandd op=readiness_check event=begin path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff
+service=waylandd op=readiness_check event=success
+wayland_log
+2026-11-11T03:46:31+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:46:31+09:00 main (env)[673357]: tuff-xwin-current-session-waylandd.service: Invalid environment variable name evaluates to an empty string: WAYBROKER_RUNTIME_DIR/wayland-tuff
+2026-11-11T03:46:31+09:00 main env[673357]: Error: unknown argument: linux-debian-host
+2026-11-11T03:46:31+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-11T03:46:31+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:46:33+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Scheduled restart job, restart counter is at 1.
+2026-11-11T03:46:33+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:46:33+09:00 main (env)[673455]: tuff-xwin-current-session-waylandd.service: Invalid environment variable name evaluates to an empty string: WAYBROKER_RUNTIME_DIR/wayland-tuff
+2026-11-11T03:46:33+09:00 main env[673455]: Error: unknown argument: linux-debian-host
+2026-11-11T03:46:33+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-11T03:46:33+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:46:34+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Scheduled restart job, restart counter is at 2.
+2026-11-11T03:46:34+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:46:34+09:00 main (env)[673532]: tuff-xwin-current-session-waylandd.service: Invalid environment variable name evaluates to an empty string: WAYBROKER_RUNTIME_DIR/wayland-tuff
+2026-11-11T03:46:34+09:00 main env[673532]: Error: unknown argument: linux-debian-host
+2026-11-11T03:46:34+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-11T03:46:34+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:46:35+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Scheduled restart job, restart counter is at 3.
+2026-11-11T03:46:35+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:46:35+09:00 main (env)[673601]: tuff-xwin-current-session-waylandd.service: Invalid environment variable name evaluates to an empty string: WAYBROKER_RUNTIME_DIR/wayland-tuff
+2026-11-11T03:46:35+09:00 main env[673601]: Error: unknown argument: linux-debian-host
+2026-11-11T03:46:35+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-11T03:46:35+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:46:36+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Scheduled restart job, restart counter is at 4.
+2026-11-11T03:46:36+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:46:36+09:00 main (env)[673679]: tuff-xwin-current-session-waylandd.service: Invalid environment variable name evaluates to an empty string: WAYBROKER_RUNTIME_DIR/wayland-tuff
+2026-11-11T03:46:36+09:00 main env[673679]: Error: unknown argument: linux-debian-host
+2026-11-11T03:46:36+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-11T03:46:36+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:46:37+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Scheduled restart job, restart counter is at 5.
+2026-11-11T03:46:37+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Start request repeated too quickly.
+2026-11-11T03:46:37+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:46:37+09:00 main systemd[1601]: Failed to start tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:47:15+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:47:15+09:00 main env[675064]: waybroker service=waylandd responsibility=wayland endpoint, client lifecycle, clipboard core
+2026-11-11T03:47:15+09:00 main env[675064]: service=waylandd op=surface_registry event=loaded generation=1 surfaces=2 clipboard_owner=konsole-1 primary_selection_owner=none timestamp=1794336435
+2026-11-11T03:47:15+09:00 main env[675064]: Error: failed to query output inventory before serving IPC
+2026-11-11T03:47:15+09:00 main env[675064]: Caused by:
+2026-11-11T03:47:15+09:00 main env[675064]:     0: failed to connect to /run/user/1000/tuff-xwin-ops-20261111/displayd.sock
+2026-11-11T03:47:15+09:00 main env[675064]:     1: No such file or directory (os error 2)
+2026-11-11T03:47:15+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-11T03:47:15+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:47:16+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Scheduled restart job, restart counter is at 1.
+2026-11-11T03:47:16+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:47:16+09:00 main env[675184]: waybroker service=waylandd responsibility=wayland endpoint, client lifecycle, clipboard core
+2026-11-11T03:47:16+09:00 main env[675184]: service=waylandd op=surface_registry event=loaded generation=1 surfaces=2 clipboard_owner=konsole-1 primary_selection_owner=none timestamp=1794336436
+2026-11-11T03:47:16+09:00 main env[675184]: waylandd displayd_outputs=headless-0:1920x1080@0Hz
+2026-11-11T03:47:16+09:00 main env[675184]: service=waylandd op=topology event=reconnected epoch=1794336435475133365 sequence=1
+2026-11-11T03:47:16+09:00 main env[675184]: service=waylandd op=wayland_display event=production_listener_bound path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff info="this listener handles real Wayland clients"
+2026-11-11T03:47:16+09:00 main env[675184]: service=waylandd op=listen event=socket_bound path=/run/user/1000/tuff-xwin-ops-20261111/waylandd.sock
+2026-11-11T03:47:21+09:00 main env[675184]: service=waylandd op=topology event=subscription_lost reason=failed to inspect IPC message prefix retry_ms=250
+2026-11-11T03:47:21+09:00 main env[675184]: service=waylandd op=topology event=reconnect_pending reason=failed to inspect IPC message prefix
+2026-11-11T03:47:21+09:00 main env[675184]: service=waylandd op=topology event=reconnected epoch=1794336435475133365 sequence=1
+2026-11-11T03:47:24+09:00 main env[675184]: service=waylandd op=wayland_display event=client_connected path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff mode=production
+kwin
+1967 /usr/bin/kwin_wayland_wrapper --xwayland
+2016 /usr/bin/kwin_wayland --wayland-fd 7 --socket wayland-0 --xwayland-fd 8 --xwayland-fd 9 --xwayland-display :0 --xwayland-xauthority /run/user/1000/xauth_cgmgEc --xwayland
+plasma
+2707 /usr/bin/plasmashell --no-respawn

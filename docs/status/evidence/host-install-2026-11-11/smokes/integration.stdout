@@ -1,0 +1,68 @@
+==> Running Waybroker Integration Smoke Test
+==> Runtime directory: /run/user/1000/waybroker-integration-smoke
+==> Pre-building all packages...
+==> [1/6] Testing displayd output enumeration
+Waiting for socket /run/user/1000/waybroker-integration-smoke/displayd.sock...
+Socket /run/user/1000/waybroker-integration-smoke/displayd.sock found.
+waybroker service=waylandd responsibility=wayland endpoint, client lifecycle, clipboard core
+waylandd displayd_outputs=eDP-1:1920x1080@60Hz
+==> [2/6] Testing compd scene commit to displayd
+waybroker service=compd responsibility=scene, focus, composition policy
+service=compd op=accel_policy event=selected simd=Avx2 vulkan_enabled=true
+service=compd op=vulkan_init event=success compute_available=true driver=vulkan-ash-v1 device=AMD Radeon RX 7600 XT (RADV NAVI33)
+service=compd op=scene_build event=success target=eDP-1 focus=Surface { id: "konsole-1" } surfaces=2
+service=compd op=displayd_response event=scene_committed surface_count=2 commit_id=1
+==> [3/6] Testing lockd state transition
+Waiting for socket /run/user/1000/waybroker-integration-smoke/lockd.sock...
+Socket /run/user/1000/waybroker-integration-smoke/lockd.sock found.
+==> [4/6] Testing sessiond profile loading and selection
+waybroker service=sessiond responsibility=lid, idle, suspend, session policy, desktop profile manager
+service=sessiond op=load_profiles dir=/home/flux/.local/share/tuff-xwin/source-20261111/profiles count=10 session_instance_id=legacy-single-session
+service=sessiond op=binding_validation event=ok profile=demo-x11
+service=sessiond op=select_profile id=demo-x11 protocol=layer-x11 components=4
+service=sessiond op=write_active_profile path=/run/user/1000/waybroker-integration-smoke/session-legacy-single-session-active-profile.json
+sessiond launch_state profile=demo-x11 session_instance=legacy-single-session protocol=layer-x11 generation=1 sequence=1 components=4
+sessiond launch component id=demo-x11bridge role=compat-layer critical=true state=ready resolved=/home/flux/.local/share/tuff-xwin/source-20261111/scripts/mock-desktop-component.sh pid=none restarts=0 last_exit=none
+sessiond launch component id=demo-wm role=window-manager critical=true state=ready resolved=/home/flux/.local/share/tuff-xwin/source-20261111/scripts/mock-desktop-component.sh pid=none restarts=0 last_exit=none
+sessiond launch component id=demo-panel role=panel critical=false state=ready resolved=/home/flux/.local/share/tuff-xwin/source-20261111/scripts/mock-desktop-component.sh pid=none restarts=0 last_exit=none
+sessiond launch component id=demo-lockui role=lockscreen critical=false state=ready resolved=/home/flux/.local/share/tuff-xwin/source-20261111/scripts/mock-desktop-component.sh pid=none restarts=0 last_exit=none
+service=sessiond op=write_launch_state path=/run/user/1000/waybroker-integration-smoke/session-legacy-single-session-launch-state.json
+service=sessiond op=authority_persist event=success path=/run/user/1000/waybroker-integration-smoke/session-legacy-single-session-sessiond-state.json generation=1 sequence=1
+==> [5/6] Testing watchdog report generation
+waybroker service=watchdog responsibility=display stack recovery control
+service=watchdog op=report profile=demo-x11 session_instance=legacy-single-session generation=1 sequence=1 healthy=0 unhealthy=0 inactive=4 timestamp=1794336505
+service=watchdog op=component_status id=demo-x11bridge role=compat-layer critical=true status=inactive pid=none crashes=0 action=none reason="component is installed but not launched"
+service=watchdog op=component_status id=demo-wm role=window-manager critical=true status=inactive pid=none crashes=0 action=none reason="component is installed but not launched"
+service=watchdog op=component_status id=demo-panel role=panel critical=false status=inactive pid=none crashes=0 action=none reason="component is installed but not launched"
+service=watchdog op=component_status id=demo-lockui role=lockscreen critical=false status=inactive pid=none crashes=0 action=none reason="component is installed but not launched"
+service=watchdog op=write_report path=/run/user/1000/waybroker-integration-smoke/session-legacy-single-session-watchdog-report.json
+==> [6/6] Testing resume orchestration (displayd <-> compd <-> lockd <-> sessiond)
+Waiting for socket /run/user/1000/waybroker-integration-smoke/displayd.sock...
+Socket /run/user/1000/waybroker-integration-smoke/displayd.sock found.
+Waiting for socket /run/user/1000/waybroker-integration-smoke/compd.sock...
+Socket /run/user/1000/waybroker-integration-smoke/compd.sock found.
+Waiting for socket /run/user/1000/waybroker-integration-smoke/lockd.sock...
+Socket /run/user/1000/waybroker-integration-smoke/lockd.sock found.
+waybroker service=sessiond responsibility=lid, idle, suspend, session policy, desktop profile manager
+service=sessiond op=load_profiles dir=/home/flux/.local/share/tuff-xwin/source-20261111/profiles count=10 session_instance_id=legacy-single-session
+service=sessiond op=profile_entry id=demo-wayland-compd-recovery protocol=wayland-native name="Demo Native Wayland Compd Recovery" summary="sessiond/watchdog から compd broker を restart し、displayd/waylandd snapshot で scene rebuild と selection handoff を行う。lock UI は broker-owned lockd に任せ、shell/panel/settings-daemon/applet を載せる Wayland native demo profile。"
+service=sessiond op=profile_entry id=demo-x11 protocol=layer-x11 name="Demo Desktop on LeyerX11" summary="repo 内の mock component を使って launch / watchdog を確認する demo profile。"
+service=sessiond op=profile_entry id=demo-x11-compd-binding-collision protocol=layer-x11 name="Demo Desktop with Compd Binding Collision" summary="compd に対して 2 つの binding を持たせ、衝突検出をテストする profile。"
+service=sessiond op=profile_entry id=demo-x11-crashy protocol=layer-x11 name="Crashy Demo Desktop on LeyerX11" summary="critical component の再起動と crash-loop 判定を確認する demo profile。"
+service=sessiond op=profile_entry id=demo-x11-degraded protocol=layer-x11 name="Degraded Demo Desktop on LeyerX11" summary="critical component が crash-loop に入った時の最小 fallback profile。"
+service=sessiond op=profile_entry id=demo-x11-lockd-binding-collision protocol=layer-x11 name="Demo Desktop with Lockd Binding Collision" summary="lockd に対して 2 つの binding を持たせ、衝突検出をテストする profile。"
+service=sessiond op=profile_entry id=demo-x11-lockd-recovery-optin protocol=layer-x11 name="Demo Desktop on LeyerX11 with Lockd Opt-in" summary="lockd の opt-in recovery execution をテストするための専用 demo profile。"
+service=sessiond op=profile_entry id=host-wayland protocol=wayland-native name="Host Wayland Session on Waybroker" summary="major Linux distro 向けの Wayland native profile。broker 群は TUFF-Xwin が担い、GUI は明示的に選んだ場合だけ接続する。"
+service=sessiond op=profile_entry id=openbox-x11 protocol=layer-x11 name="Openbox Minimal on LeyerX11" summary="最小構成の X11 desktop profile。rootless X11 と軽量 WM を組み合わせる。"
+service=sessiond op=profile_entry id=xfce-x11 protocol=layer-x11 name="XFCE Classic on LeyerX11" summary="軽量な X11 desktop profile。x11bridge の上に xfwm4 と panel 群を載せる。"
+service=sessiond op=resume_sequence event=begin scenario=normal session_instance_id=legacy-single-session
+service=sessiond op=resume_sequence event=displayd_started
+service=sessiond op=resume_sequence event=lockd_locked
+service=sessiond op=resume_sequence event=compd_outputs_recovered
+service=sessiond op=resume_sequence event=lockd_auth_prompt
+service=sessiond op=resume_sequence event=compd_complete
+service=sessiond op=resume_sequence event=finished final_state=normal
+service=sessiond op=write_resume_trace event=success path=/run/user/1000/waybroker-integration-smoke/session-legacy-single-session-resume-trace-normal.json
+service=sessiond op=write_lock_path_artifact event=success path=/run/user/1000/waybroker-integration-smoke/session-legacy-single-session-lock-ui-path-normal.json
+==> INTEGRATION SMOKE TEST PASSED
+==> Cleaning up background processes...

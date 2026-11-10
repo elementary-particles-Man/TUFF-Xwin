@@ -1,0 +1,4 @@
+scripts/run-integration-smoke.sh
+started=2026-11-11T03:48:21+09:00
+exit=0
+finished=2026-11-11T03:48:26+09:00

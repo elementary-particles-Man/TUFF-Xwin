@@ -1,0 +1,41 @@
+   Compiling waybroker-common v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/waybroker-common)
+   Compiling xwin-sec v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/xwin-sec)
+   Compiling wayland-wire v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/wayland-wire)
+   Compiling vulkan-backend v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/vulkan-backend)
+   Compiling xwin-screenshot v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/apps/screenshot)
+   Compiling layerx11-common v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/LeyerX11/crates/layerx11-common)
+   Compiling sessiond v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/sessiond)
+   Compiling watchdog v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/watchdog)
+   Compiling x11bridge v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/LeyerX11/crates/x11bridge)
+   Compiling lockd v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/lockd)
+   Compiling compd v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/compd)
+   Compiling displayd v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/displayd)
+   Compiling waylandd v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/waylandd)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.19s
+     Running unittests src/main.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/compd-066a1e7ca58b057a)
+     Running unittests src/main.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/displayd-023b261a8f5c1081)
+     Running unittests src/lib.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/layerx11_common-4e84ed516c353f44)
+     Running unittests src/main.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/lockd-ede746e7a7b6bb58)
+     Running unittests src/main.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/sessiond-732901216e1153a3)
+     Running unittests src/lib.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/vulkan_backend-4bb717e08e2bea5e)
+     Running unittests src/main.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/watchdog-eb06dacb65c77f25)
+     Running unittests src/lib.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/waybroker_common-c1a5abfa352f5011)
+     Running unittests src/lib.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/wayland_wire-ca5b6bce6982c92c)
+     Running tests/isolated_socket.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/isolated_socket-8ab15b46e25f8828)
+     Running tests/pixel_ops.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/pixel_ops-7d48b23d6e90f67d)
+     Running tests/protocol_matrix.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/protocol_matrix-e886d56c99ffe93f)
+     Running unittests src/main.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/waylandd-c88a474cdf5b25de)
+     Running unittests src/main.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/x11bridge-2fc26da3281668e1)
+     Running unittests src/lib.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/xwin_screenshot-bad45bc5c4957fac)
+     Running unittests src/main.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/xwin_screenshot-d9fb1f8457134010)
+     Running unittests src/lib.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/xwin_sec-99f19924ce272ef6)
+     Running tests/age_assurance_browser_surface_boundary.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/age_assurance_browser_surface_boundary-a82141aac4d838f6)
+     Running tests/browser_surface_boundary.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/browser_surface_boundary-7ff15060763e7a6e)
+     Running tests/developer_tool_surface_boundary.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/developer_tool_surface_boundary-3c2af4fac3276d81)
+     Running tests/privileged_ai_surface_boundary.rs (/home/flux/.cache/tuff-xwin-target/debug/deps/privileged_ai_surface_boundary-550240ac658067c0)
+   Doc-tests layerx11_common
+   Doc-tests vulkan_backend
+   Doc-tests waybroker_common
+   Doc-tests wayland_wire
+   Doc-tests xwin_screenshot
+   Doc-tests xwin_sec

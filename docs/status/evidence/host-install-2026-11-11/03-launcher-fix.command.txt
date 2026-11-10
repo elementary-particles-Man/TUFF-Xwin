@@ -1,0 +1,2 @@
+reinstall installed launcher after unit expansion fix
+exit=0

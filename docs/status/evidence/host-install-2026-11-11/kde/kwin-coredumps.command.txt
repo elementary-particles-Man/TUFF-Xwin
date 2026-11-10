@@ -1,0 +1,4 @@
+sh -c coredumpctl --no-pager list | rg -i 'kwin_wayland|plasmashell|Xwayland'
+started=2026-11-11T03:48:41+09:00
+exit=0
+finished=2026-11-11T03:48:41+09:00
