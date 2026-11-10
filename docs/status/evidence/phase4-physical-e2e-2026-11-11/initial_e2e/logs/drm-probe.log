@@ -1,0 +1,13 @@
+   Compiling waybroker-common v0.1.0 (/home/flux/.local/state/tuff-xwin-e2e-20261105/source/crates/waybroker-common)
+   Compiling vulkan-backend v0.1.0 (/home/flux/.local/state/tuff-xwin-e2e-20261105/source/crates/vulkan-backend)
+   Compiling displayd v0.1.0 (/home/flux/.local/state/tuff-xwin-e2e-20261105/source/crates/displayd)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.75s
+     Running `/home/flux/.cache/tuff-xwin-target/debug/displayd --socket /home/flux/.local/state/tuff-xwin-e2e-20261105/runtime/drm-probe.sock --no-vulkan --once`
+waybroker service=displayd responsibility=drm/kms, input, seat broker
+service=displayd op=accel_policy event=selected simd=Avx2 vulkan_enabled=true
+service=displayd op=scene_cache event=empty path=/run/user/1000/waybroker/session-default-single-session-scene-snapshot.json session_instance_id=default-single-session
+service=displayd op=listen event=socket_bound path=/home/flux/.local/state/tuff-xwin-e2e-20261105/runtime/drm-probe.sock
+Error: failed to open physical input /dev/input/event1
+
+Caused by:
+    Permission denied (os error 13)

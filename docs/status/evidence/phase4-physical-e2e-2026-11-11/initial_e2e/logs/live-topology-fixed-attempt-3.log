@@ -1,0 +1,4 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+==> stopping displayd only
+unexpected production client error
+live-topology failure logs preserved: /home/flux/.local/state/tuff-xwin-e2e-20261105/logs/live-topology/20261105T155123Z-VpG6Xb

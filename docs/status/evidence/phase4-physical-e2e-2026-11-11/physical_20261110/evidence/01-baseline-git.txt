@@ -1,0 +1,141 @@
+2026-11-11T00:08:40+09:00
+primary_sha=
+2c1b6671228b306ebc88adbc5b0c47b543e192c6
+primary_status=
+ M .gitignore
+?? cargo_metadata.json
+?? crates/waylandd/src/main_old.rs
+?? dir/
+?? history_graph.txt
+?? history_recent.txt
+?? new_main.rs
+?? new_tests.rs
+?? pres_files.txt
+?? top_resync_files.txt
+?? wayland_files.txt
+?? xwin_codebase_dump.txt
+worktrees=
+worktree /mnt/thpdoc/Develop/TUFF-Xwin
+HEAD 2c1b6671228b306ebc88adbc5b0c47b543e192c6
+branch refs/heads/feature/wayland-client-broadcast-supervisor
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-authoritative-output-geometry
+HEAD 876bdbfa6959be2c9d376ba36fa0668ba5a2514d
+branch refs/heads/feature/wayland-authoritative-output-geometry
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-canonical-replay-isolation
+HEAD 16c07affd23cf0e3091c96788a75af98980acb66
+branch refs/heads/feature/wayland-canonical-replay-isolation
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-compd-isolation
+HEAD cbe1b72ab6d5ef44045fa9ef53243e886a9cd9f5
+branch refs/heads/feature/compd-ipc-fault-isolation
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-displayd-isolation
+HEAD e25184b4bbb376eef5e32d7a839ddcc93f16fffb
+branch refs/heads/feature/displayd-ipc-fault-isolation
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-displayd-topology-reconnect
+HEAD 3aeed7ee12d53e8f232c44afab34dd9e89e88ae4
+branch refs/heads/feature/waylandd-displayd-topology-reconnect
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-ignore-local-worktrees
+HEAD e79465ff876300d662e16298805c188fb743d4e9
+branch refs/heads/feature/ignore-local-worktrees
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-live-topology-epoch-continuity
+HEAD ae51ab95f57cdf8efa18fe1f0276265f35b74744
+branch refs/heads/feature/wayland-live-topology-epoch-continuity
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-object-id-lifecycle
+HEAD 9af8e701fb01a15bdacfc729bb4e97aba399d7e3
+branch refs/heads/feature/wayland-object-id-lifecycle
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-output-mode-wire-atomic
+HEAD df8415b21be4ace89feb1c1b19f230fa70fc0b0f
+branch refs/heads/feature/wayland-output-mode-wire-atomic
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-output-physical-geometry
+HEAD 71f1038338ec3df91160d9f41ec4e088a92d172d
+branch refs/heads/feature/wayland-output-physical-geometry
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-phase4-end-to-end
+HEAD df9734f3bd51eea802455e8d83f38b08cf2ca5a9
+branch refs/heads/feature/phase4-end-to-end-completion
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-presentation-feedback-gating
+HEAD f9ddd51b355da39271b63097e76bc5219c87eb20
+branch refs/heads/feature/wayland-presentation-feedback-gating
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-registry-bind-version
+HEAD 0be3538c3754adc180f652f0f52907b91fae3fe5
+branch refs/heads/feature/wayland-registry-bind-version
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-shm-pool-lifecycle
+HEAD 840cfe3ce3b7eb8bc480a126322611c6d255bbff
+branch refs/heads/feature/wayland-shm-pool-lifecycle
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-topology-fanout-saturation-recovery
+HEAD 992fb1afb30f8fa2420422bcdeab3c43028e6a1f
+branch refs/heads/feature/wayland-topology-fanout-saturation-recovery
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-topology-resync-wire-delivery
+HEAD 9c25310d33ac18bf5edd6c3e52c93b2cc61c3ef3
+branch refs/heads/feature/wayland-topology-resync-wire-delivery
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-wayland-client-recovery
+HEAD 5efe555eed3678fb91972b1c8772c8098b9ca299
+branch refs/heads/feature/wayland-client-compd-outage-containment
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-waylandd-isolation
+HEAD db43bbe9a3733d033e7874f4f7bb4851fd09b348
+branch refs/heads/feature/waylandd-fault-isolation
+
+worktree /mnt/thpdoc/Develop/TUFF-Xwin/branch/TUFF-Xwin-x11bridge-isolation
+HEAD e36f9b4fa7570247e94e19e46b5664919eee77aa
+branch refs/heads/feature/x11bridge-fault-isolation
+
+worktree /tmp/TUFF-Xwin-lockd-bundle
+HEAD 7757c5ac404b7789cbdd2a5fcc282598606af897
+detached
+prunable gitdir file points to non-existent location
+
+worktree /tmp/TUFF-Xwin-lockd-complete
+HEAD a0a6d7f9ee2c5cdac402728a3338bc882d68d376
+branch refs/heads/feature/lockd-durable-state
+prunable gitdir file points to non-existent location
+
+worktree /tmp/TUFF-Xwin-r3-recovery-fix
+HEAD db8a31f7807cdebff7f118f6d536a229912b3178
+detached
+prunable gitdir file points to non-existent location
+
+worktree /tmp/TUFF-Xwin-sessiond-bundle
+HEAD b0b3d20a1aeb2adadc6a3d00070c90916ab46e04
+detached
+prunable gitdir file points to non-existent location
+
+worktree /tmp/TUFF-Xwin-sessiond-complete
+HEAD c1b33841e3ff742f76a384bda73930e45263e5ad
+branch refs/heads/feature/sessiond-durable-authority
+prunable gitdir file points to non-existent location
+
+worktree /tmp/TUFF-Xwin-watchdog-isolation
+HEAD 313a3a2871f8ca2164a0ffe35ed8d256e69a3f09
+branch refs/heads/feature/watchdog-bounded-isolation
+prunable gitdir file points to non-existent location
+
+worktree /tmp/tuff-xwin-r3-merge.pLicka
+HEAD 52e17971041983882b58e9df686bdc473ee04ced
+detached
+prunable gitdir file points to non-existent location
+
+fetch=
+From https://github.com/elementary-particles-Man/TUFF-Xwin
+ * branch            main       -> FETCH_HEAD
+pr32_commit=
+ancestor=
+0
+Preparing worktree (new branch 'test/phase4-physical-e2e-20261110')
+branch 'test/phase4-physical-e2e-20261110' set up to track 'origin/main'.
+HEAD is now at ee3a678 fix(wayland): repair live topology production client errors

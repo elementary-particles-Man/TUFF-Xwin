@@ -1,0 +1,5 @@
+--- input selection ---
+/dev/input/event1 keyboard=1 mouse=0
+/dev/input/event2 keyboard=0 mouse=1
+/dev/input/event3 keyboard=1 mouse=0
+/dev/input/event5 keyboard=0 mouse=1

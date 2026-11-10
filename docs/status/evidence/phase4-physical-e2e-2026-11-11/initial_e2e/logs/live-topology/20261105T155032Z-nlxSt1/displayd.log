@@ -1,0 +1,8 @@
+waybroker service=displayd responsibility=drm/kms, input, seat broker
+service=displayd op=accel_policy event=selected simd=Avx2 vulkan_enabled=true
+service=displayd op=scene_cache event=loaded commit_id=2 source=compd surfaces=2 path=/tmp/waybroker-live-topology.nlxSt1/session-default-single-session-scene-snapshot.json session_instance_id=default-single-session
+service=displayd op=listen event=socket_bound path=/tmp/waybroker-live-topology.nlxSt1/displayd.sock
+service=displayd op=scene_accept event=success commit_id=3 epoch=1792886190328723168 generation=3 surfaces=2 pixel_payloads=0 pixel_bytes=0 resident_pixel_bytes=0 damage_rects=2
+service=displayd op=scene_accept event=success commit_id=4 epoch=1792886190328723168 generation=4 surfaces=2 pixel_payloads=0 pixel_bytes=0 resident_pixel_bytes=0 damage_rects=2
+service=displayd op=scene_accept event=success commit_id=5 epoch=1792886190328723168 generation=5 surfaces=1 pixel_payloads=0 pixel_bytes=0 resident_pixel_bytes=0 damage_rects=1
+service=displayd op=scene_accept event=success commit_id=6 epoch=1792886190328723168 generation=6 surfaces=0 pixel_payloads=0 pixel_bytes=0 resident_pixel_bytes=0 damage_rects=0

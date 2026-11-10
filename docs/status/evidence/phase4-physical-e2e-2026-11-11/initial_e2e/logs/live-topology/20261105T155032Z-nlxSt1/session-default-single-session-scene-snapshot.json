@@ -1,0 +1,25 @@
+{
+  "source": "compd",
+  "target": {
+    "type": "output",
+    "name": "eDP-1"
+  },
+  "focus": {
+    "type": "none"
+  },
+  "selection": {
+    "clipboard_owner": null,
+    "clipboard_payload_id": null,
+    "clipboard_source_serial": null,
+    "clipboard_offer": null,
+    "primary_selection_owner": null,
+    "primary_selection_payload_id": null,
+    "primary_selection_source_serial": null,
+    "primary_offer": null
+  },
+  "surfaces": [],
+  "scene_epoch": 1792886190328723168,
+  "scene_generation": 6,
+  "commit_id": 6,
+  "unix_timestamp": 1793893832
+}

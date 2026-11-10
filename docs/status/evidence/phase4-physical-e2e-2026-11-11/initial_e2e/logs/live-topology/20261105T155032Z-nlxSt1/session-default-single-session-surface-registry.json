@@ -1,0 +1,41 @@
+{
+  "generation": 1,
+  "surfaces": [
+    {
+      "id": "konsole-1",
+      "app_id": "org.kde.konsole",
+      "role": {
+        "type": "toplevel"
+      },
+      "mapped": true,
+      "buffer_attached": true,
+      "buffer_handle": null,
+      "buffer_generation": 0,
+      "damage_rects": []
+    },
+    {
+      "id": "background-1",
+      "app_id": "org.kde.plasmashell.wallpaper",
+      "role": {
+        "type": "background"
+      },
+      "mapped": true,
+      "buffer_attached": true,
+      "buffer_handle": null,
+      "buffer_generation": 0,
+      "damage_rects": []
+    }
+  ],
+  "foreign_toplevels": [],
+  "selection": {
+    "clipboard_owner": "konsole-1",
+    "clipboard_payload_id": "konsole-clipboard-v1",
+    "clipboard_source_serial": 11,
+    "clipboard_offer": null,
+    "primary_selection_owner": null,
+    "primary_selection_payload_id": null,
+    "primary_selection_source_serial": null,
+    "primary_offer": null
+  },
+  "unix_timestamp": 1793893832
+}

@@ -1,0 +1,98 @@
+timestamp=2026-11-11T00:10:09+09:00
+drm_status
+connected
+modes
+3840x2160
+3840x2160
+3840x2160
+3840x2160
+3840x2160
+3840x2160
+3840x2160
+3840x2160
+3840x2160
+3840x2160
+2560x1440
+1920x1200
+1920x1080
+1920x1080
+1920x1080
+1920x1080
+1920x1080
+1920x1080
+1920x1080
+1920x1080
+1920x1080
+1600x1200
+1680x1050
+1600x900
+1280x1024
+1440x900
+1280x800
+1280x720
+1280x720
+1280x720
+1280x720
+1024x768
+800x600
+720x576
+720x576
+720x480
+720x480
+720x480
+720x480
+640x480
+640x480
+640x480
+720x400
+card_stat
+e2:0 660 root:video /dev/dri/card0
+edid_sha256
+96298cd36bd68401e05199c4452bd54f09cfd6e076555b0302b58c01a31675bf  /sys/class/drm/card0-HDMI-A-2/edid
+drm_master_processes
+                     USER        PID ACCESS COMMAND
+/dev/dri/card0:      flux       2555 F.... Xwayland
+1967 /usr/bin/kwin_wayland_wrapper --xwayland
+2016 /usr/bin/kwin_wayland --wayland-fd 7 --socket wayland-0 --xwayland-fd 8 --xwayland-fd 9 --xwayland-display :0 --xwayland-xauthority /run/user/1000/xauth_cgmgEc --xwayland
+uinput
+crw------- 600 root:root /dev/uinput
+event_nodes
+portal_interfaces
+NAME                              TYPE      SIGNATURE RESULT/VALUE FLAGS
+.CreateSession                    method    a{sv}     o            -
+.OpenPipeWireRemote               method    oa{sv}    h            -
+.SelectSources                    method    oa{sv}    o            -
+.Start                            method    osa{sv}   o            -
+.AvailableCursorModes             property  u         7            emits-change
+.AvailableSourceTypes             property  u         3            emits-change
+.version                          property  u         5            emits-change
+NAME                              TYPE      SIGNATURE RESULT/VALUE FLAGS
+.PickColor                        method    sa{sv}    o            -
+.Screenshot                       method    sa{sv}    o            -
+.version                          property  u         2            emits-change
+portal_processes
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+/usr/bin/google-chrome-stable
+vkms_before
+card0
+card0-DP-1
+card0-DP-2
+card0-HDMI-A-1
+card0-HDMI-A-2
+card0-Writeback-1
+renderD128
+version
+vkms_modprobe
+modprobe: FATAL: Module vkms not found in directory /lib/modules/6.12.116+deb13-amd64
+status=1
+vkms_after
+crw-rw----+ 1 root video 226, 0 Nov 10 22:12 /dev/dri/card0
+card0
+card0-DP-1
+card0-DP-2
+card0-HDMI-A-1
+card0-HDMI-A-2
+card0-Writeback-1
+renderD128
+version
