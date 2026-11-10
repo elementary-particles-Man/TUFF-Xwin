@@ -1,0 +1,24 @@
+final_timestamp=2026-11-11T00:10:42+09:00
+primary_sha=2c1b6671228b306ebc88adbc5b0c47b543e192c6
+primary_status=
+ M .gitignore
+?? cargo_metadata.json
+?? crates/waylandd/src/main_old.rs
+?? dir/
+?? history_graph.txt
+?? history_recent.txt
+?? new_main.rs
+?? new_tests.rs
+?? pres_files.txt
+?? top_resync_files.txt
+?? wayland_files.txt
+?? xwin_codebase_dump.txt
+kwin=
+1967 /usr/bin/kwin_wayland_wrapper --xwayland
+2016 /usr/bin/kwin_wayland --wayland-fd 7 --socket wayland-0 --xwayland-fd 8 --xwayland-fd 9 --xwayland-display :0 --xwayland-xauthority /run/user/1000/xauth_cgmgEc --xwayland
+active_vt=
+tty2
+connector=
+connected
+worktree_removed=
+yes

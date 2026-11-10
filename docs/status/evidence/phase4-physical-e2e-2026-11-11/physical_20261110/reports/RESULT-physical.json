@@ -1,0 +1,45 @@
+{
+  "task_id": "TUFF-XWIN-P4-PHYSICAL-E2E-AFTER-PR32-20261110",
+  "baseline_sha": "ee3a678ae90832763590683d48cd4de81de0c728",
+  "overall": "BLOCKED",
+  "software_regression": "PASS",
+  "live_topology": "PASS_10_OF_10_PRODUCTION_CLIENT_ERROR_0",
+  "physical_drm_pageflip": "BLOCKED",
+  "virtual_kms": "BLOCKED_VKMS_MODULE_UNAVAILABLE",
+  "auth_uinput_e2e": "BLOCKED",
+  "chrome_tuff_gui": "BLOCKED",
+  "portal_real_capture": "BLOCKED",
+  "physical_hotplug": "NOT_RUN",
+  "non_intrusive_devices": {
+    "drm_device": "/dev/dri/card0",
+    "connector": "card0-HDMI-A-2",
+    "connector_status": "connected",
+    "edid_sha256": "96298cd36bd68401e05199c4452bd54f09cfd6e076555b0302b58c01a31675bf",
+    "uinput": "root:root 0600",
+    "drm_users": "Xwayland/KWin session",
+    "portal": "ScreenCast and Screenshot interfaces available",
+    "browser": "/usr/bin/google-chrome-stable"
+  },
+  "blocking_reasons": [
+    "唯一のfluxユーザーTTYはtty2の既存KWin sessionで、独立ユーザーVTがない",
+    "既存KWin/Xwaylandがcard0を使用中で、主セッションを停止・奪取できない",
+    "vkms module is unavailable",
+    "/dev/uinput is root-only and no isolated input seat/VT exists",
+    "TUFF専用endpointの実DRM/vkms outputが成立していないためChrome GUI/portal実キャプチャ条件を満たさない",
+    "物理ケーブル操作用の既存自動アクチュエータがない"
+  ],
+  "code_changes": "none",
+  "commit": null,
+  "pr": null,
+  "merge": null,
+  "host_recovery": "NOT_APPLICABLE_NO_TTY_SWITCH",
+  "evidence": {
+    "baseline_git": "evidence/01-baseline-git.txt",
+    "initial_state": "evidence/01-initial-state.txt",
+    "software": "evidence/02-software-regression.log",
+    "smokes": "evidence/02-smokes.log",
+    "devices": "evidence/03-real-devices.txt",
+    "previous_result": "evidence/previous-RESULT.json",
+    "previous_retest": "evidence/previous-RESULT-retest.md"
+  }
+}

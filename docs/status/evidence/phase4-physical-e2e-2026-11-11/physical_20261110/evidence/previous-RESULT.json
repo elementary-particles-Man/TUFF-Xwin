@@ -1,0 +1,39 @@
+{
+  "task": "TUFF-Xwin Phase-4 physical E2E",
+  "source_sha": "3ca6eb418e9dd1e4c7f0addbedbb5973cc9ea410",
+  "host": "main",
+  "overall": "BLOCKED",
+  "software_validation": "PASS",
+  "isolated_smokes": {
+    "canonical_replay": "PASS",
+    "compd_outage": "PASS_WITH_CLIENT_BROKENPIPE_TRACE",
+    "displayd_reconnect": "PASS",
+    "live_topology": "FAIL_REPRODUCED_PRODUCTION_CLIENT_ERROR",
+    "waylandd_ipc_isolation": "PASS",
+    "multi_session_recovery_isolation": "PASS",
+    "integration": "PASS"
+  },
+  "hardware": {
+    "drm_connector": "card0-HDMI-A-2 connected",
+    "drm_backend_probe": "BLOCKED_NO_SCENE_COMMIT",
+    "drm_modeset_pageflip": "NOT_CONFIRMED",
+    "physical_hid": "BLOCKED_UINPUT_ROOT_ONLY_AND_NO_AUTHORIZED_SERVICE_E2E",
+    "uinput": "present_root_only",
+    "portal_dbus": "PASS",
+    "chrome_headless_wayland": "PASS",
+    "chrome_real_tuff_portal_gui": "BLOCKED",
+    "hotplug": "NOT_RUN"
+  },
+  "blocking_evidence": [
+    "KWin owns the active KDE session on tty2; no VT/master takeover was attempted",
+    "TUFF-Xwin current-session systemd units were not active",
+    "live topology smoke logged production_client_error after displayd subscription EOF",
+    "browser check script does not detect installed /usr/libexec portal binaries",
+    "no physical actuator/cable operation was available"
+  ],
+  "source_worktree": "clean",
+  "commit": null,
+  "push": false,
+  "pr": false,
+  "merge": false
+}

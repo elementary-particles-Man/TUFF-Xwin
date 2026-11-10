@@ -31,6 +31,10 @@
 - 元の作業ツリーの未コミット変更は保全した。
 - 詳細な個人環境ログ・EDID本体・一時runtimeはリポジトリへ持ち込んでいない。
 
+## 一次証跡
+
+実行時の保存済み stdout/stderr、終了コード、結果ファイルは [EVIDENCE_INDEX.md](evidence/phase4-physical-e2e-2026-11-11/EVIDENCE_INDEX.md) から直接参照できる。収録ファイルの SHA-256、サイズ、元相対パスは [MANIFEST.json](evidence/phase4-physical-e2e-2026-11-11/MANIFEST.json) に記録した。秘密値の置換はなく、`REDACTIONS.json` の redaction_count は 0。
+
 ## 実行証跡
 
 完全な実行ログはローカル試験run rootに保存した。リポジトリに残す本成果物は本ファイルであり、将来のエージェントが `docs/status/` から発見できる。

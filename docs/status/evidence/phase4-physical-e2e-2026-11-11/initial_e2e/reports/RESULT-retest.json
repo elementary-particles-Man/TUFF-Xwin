@@ -1,0 +1,26 @@
+{
+  "task_id": "TUFF-XWIN-P4-E2E-UNBLOCK-20261105",
+  "status": "PARTIAL_PASS_WITH_HARDWARE_BLOCKERS",
+  "baseline_sha": "3ca6eb418e9dd1e4c7f0addbedbb5973cc9ea410",
+  "fix_commit": "955c0ced10e0b3769a4b5fb6c76c4669fb857268",
+  "pr": 32,
+  "merge_commit": "ee3a678ae90832763590683d48cd4de81de0c728",
+  "live_topology": {
+    "root_cause": "smoke client closed immediately after final callback while server still had queued events, causing Connection reset by peer and false production_client_error",
+    "fix": "client half-close and drain; waylandd checks EOF before non-EOF poll errors",
+    "failure_log_preservation": "TUFF_XWIN_KEEP_FAILED_TOPOLOGY_LOGS=1",
+    "consecutive_passes": 10,
+    "production_client_error": 0
+  },
+  "software_gates": "PASS",
+  "related_smokes": "PASS",
+  "drm_modeset_pageflip": "BLOCKED",
+  "authenticated_evdev_uinput": "BLOCKED",
+  "chrome_portal_gui_on_tuff_endpoint": "BLOCKED",
+  "physical_hotplug": "NOT_RUN",
+  "host_recovery": "PASS",
+  "source_worktree": "clean",
+  "push": true,
+  "merge": true,
+  "physical_phase_complete": false
+}

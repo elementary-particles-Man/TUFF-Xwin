@@ -1,0 +1,36 @@
+--- host snapshot ---
+2026-11-05T23:28:58+09:00
+ Static hostname: main
+       Icon name: computer-desktop
+         Chassis: desktop 🖥️
+      Machine ID: 8fc283392b944fb7b98dec0ac72dfef6
+         Boot ID: 645ab014336c41e8b2f882a037500230
+Operating System: Debian GNU/Linux 13 (trixie)
+          Kernel: Linux 6.12.115+deb13.1-amd64
+    Architecture: x86-64
+ Hardware Vendor: ASRock
+  Hardware Model: B550M Pro4
+Firmware Version: P3.90
+   Firmware Date: Tue 2025-09-30
+    Firmware Age: 1y 1month 5d
+Linux main 6.12.115+deb13.1-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.115-2 (2026-11-01) x86_64 GNU/Linux
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+NAME="Debian GNU/Linux"
+VERSION_ID="13"
+VERSION="13 (trixie)"
+VERSION_CODENAME=trixie
+DEBIAN_VERSION_FULL=13.7
+ID=debian
+HOME_URL="https://www.debian.org/"
+SUPPORT_URL="https://www.debian.org/support"
+BUG_REPORT_URL="https://bugs.debian.org/"
+SESSION  UID USER SEAT  LEADER CLASS   TTY  IDLE SINCE
+      1 1000 flux seat0 1540   user    tty2 no   -
+      2 1000 flux -     1552   manager -    no   -
+
+2 sessions listed.
+/sys/class/drm/card0-DP-1/status: disconnected
+/sys/class/drm/card0-DP-2/status: disconnected
+/sys/class/drm/card0-HDMI-A-1/status: disconnected
+/sys/class/drm/card0-HDMI-A-2/status: connected
+/sys/class/drm/card0-Writeback-1/status: unknown
