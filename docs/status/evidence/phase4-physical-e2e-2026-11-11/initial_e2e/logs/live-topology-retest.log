@@ -1,0 +1,11 @@
+=== attempt 1 ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+==> stopping displayd only
+WAYLAND LIVE TOPOLOGY EPOCH SMOKE TEST PASSED
+attempt=1 rc=0
+=== attempt 2 ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+==> stopping displayd only
+unexpected production client error
+live-topology failure logs preserved: /home/flux/.local/state/tuff-xwin-e2e-20261105/logs/live-topology/20261105T155032Z-nlxSt1
+attempt=2 rc=1

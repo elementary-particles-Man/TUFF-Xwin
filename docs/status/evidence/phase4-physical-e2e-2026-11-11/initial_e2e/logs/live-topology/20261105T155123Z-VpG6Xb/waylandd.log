@@ -1,0 +1,11 @@
+waybroker service=waylandd responsibility=wayland endpoint, client lifecycle, clipboard core
+service=waylandd op=surface_registry event=loaded generation=1 surfaces=2 clipboard_owner=konsole-1 primary_selection_owner=none timestamp=1793893883
+waylandd displayd_outputs=eDP-1:1920x1080@60Hz
+service=waylandd op=topology event=reconnected epoch=1793893883153121420 sequence=0
+service=waylandd op=wayland_display event=production_listener_bound path=/tmp/waybroker-live-topology.VpG6Xb/wayland-live-topology info="this listener handles real Wayland clients"
+service=waylandd op=listen event=socket_bound path=/tmp/waybroker-live-topology.VpG6Xb/waylandd.sock
+service=waylandd op=wayland_display event=client_connected path=/tmp/waybroker-live-topology.VpG6Xb/wayland-live-topology mode=production
+service=waylandd op=wayland_display event=client_connected path=/tmp/waybroker-live-topology.VpG6Xb/wayland-live-topology mode=production
+service=waylandd op=topology event=subscription_lost reason=unexpected EOF while reading IPC message retry_ms=250
+service=waylandd op=topology event=reconnect_pending reason=unexpected EOF while reading IPC message
+service=waylandd op=wayland_display event=production_client_error path=/tmp/waybroker-live-topology.VpG6Xb/wayland-live-topology reason=Connection reset by peer (os error 104)

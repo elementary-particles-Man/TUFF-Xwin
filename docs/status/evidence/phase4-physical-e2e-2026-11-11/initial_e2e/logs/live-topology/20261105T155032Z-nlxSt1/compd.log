@@ -1,0 +1,9 @@
+waybroker service=compd responsibility=scene, focus, composition policy
+service=compd op=accel_policy event=selected simd=Avx2 vulkan_enabled=true
+service=compd op=listen event=socket_bound path=/tmp/waybroker-live-topology.nlxSt1/compd.sock
+service=compd op=scene_admission event=accepted epoch=1792886190328723168 generation=1 surfaces=1 payloads=0 bytes=0
+service=compd op=scene_admission event=accepted epoch=1792886190328723168 generation=2 surfaces=2 payloads=0 bytes=0
+service=compd op=scene_admission event=accepted epoch=1792886190328723168 generation=3 surfaces=2 payloads=0 bytes=0
+service=compd op=scene_admission event=accepted epoch=1792886190328723168 generation=4 surfaces=2 payloads=0 bytes=0
+service=compd op=scene_admission event=accepted epoch=1792886190328723168 generation=5 surfaces=1 payloads=0 bytes=0
+service=compd op=scene_admission event=accepted epoch=1792886190328723168 generation=6 surfaces=0 payloads=0 bytes=0

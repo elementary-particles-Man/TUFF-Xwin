@@ -1,0 +1,52 @@
+client=A request object=1 opcode=1 size=12 payload=4 fds=0
+client=A request object=1 opcode=0 size=12 payload=4 fds=0
+client=A request object=2 opcode=0 size=40 payload=32 fds=0
+client=A request object=2 opcode=0 size=32 payload=24 fds=0
+client=A request object=2 opcode=0 size=36 payload=28 fds=0
+client=A request object=4 opcode=0 size=12 payload=4 fds=0
+client=A request object=7 opcode=0 size=16 payload=8 fds=1
+client=A request object=8 opcode=0 size=32 payload=24 fds=0
+client=A request object=10 opcode=2 size=16 payload=8 fds=0
+client=A request object=6 opcode=1 size=12 payload=4 fds=0
+client=A request object=6 opcode=3 size=24 payload=16 fds=0
+client=A request object=6 opcode=4 size=12 payload=4 fds=0
+client=B request object=1 opcode=1 size=12 payload=4 fds=0
+client=B request object=1 opcode=0 size=12 payload=4 fds=0
+client=B request object=2 opcode=0 size=40 payload=32 fds=0
+client=B request object=2 opcode=0 size=32 payload=24 fds=0
+client=B request object=2 opcode=0 size=36 payload=28 fds=0
+client=B request object=20 opcode=0 size=12 payload=4 fds=0
+client=B request object=23 opcode=0 size=16 payload=8 fds=1
+client=B request object=24 opcode=0 size=32 payload=24 fds=0
+client=B request object=26 opcode=2 size=16 payload=8 fds=0
+client=B request object=22 opcode=1 size=12 payload=4 fds=0
+client=B request object=22 opcode=3 size=24 payload=16 fds=0
+client=B request object=22 opcode=4 size=12 payload=4 fds=0
+client=A request object=5 opcode=1 size=20 payload=12 fds=0
+client=A request object=5 opcode=2 size=24 payload=16 fds=0
+client=A request object=5 opcode=3 size=12 payload=4 fds=0
+client=A request object=5 opcode=6 size=8 payload=0 fds=0
+client=A surface_commit callback=20
+client=B request object=21 opcode=1 size=20 payload=12 fds=0
+client=B request object=21 opcode=2 size=24 payload=16 fds=0
+client=B request object=21 opcode=3 size=12 payload=4 fds=0
+client=B request object=21 opcode=6 size=8 payload=0 fds=0
+client=B surface_commit callback=40
+client=A callback_done object=20 opcode=0
+client=B callback_done object=40 opcode=0
+client=A request object=1 opcode=0 size=12 payload=4 fds=0
+client=B request object=1 opcode=0 size=12 payload=4 fds=0
+client=A request object=1 opcode=0 size=12 payload=4 fds=0
+client=A request object=5 opcode=1 size=20 payload=12 fds=0
+client=A request object=5 opcode=2 size=24 payload=16 fds=0
+client=A request object=5 opcode=3 size=12 payload=4 fds=0
+client=A request object=5 opcode=6 size=8 payload=0 fds=0
+client=A surface_commit callback=23
+client=B request object=1 opcode=0 size=12 payload=4 fds=0
+client=B request object=21 opcode=1 size=20 payload=12 fds=0
+client=B request object=21 opcode=2 size=24 payload=16 fds=0
+client=B request object=21 opcode=3 size=12 payload=4 fds=0
+client=B request object=21 opcode=6 size=8 payload=0 fds=0
+client=B surface_commit callback=43
+client=A callback_done object=23 opcode=0
+client=B callback_done object=43 opcode=0
