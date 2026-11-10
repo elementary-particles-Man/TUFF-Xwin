@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$script_repo_root"
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/tuff-xwin"
 env_file="$config_dir/session.env"
 runtime_base="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -40,6 +41,10 @@ if [[ -f "$env_file" ]]; then
   set +a
 fi
 
+if [[ -n "${TUFF_XWIN_REPO_ROOT:-}" ]]; then
+  repo_root="$TUFF_XWIN_REPO_ROOT"
+fi
+
 profile="${TUFF_XWIN_PROFILE:-$profile}"
 session_id="${TUFF_XWIN_SESSION_INSTANCE_ID:-$session_id}"
 profiles_dir="${TUFF_XWIN_PROFILES_DIR:-$repo_root/profiles}"
@@ -55,6 +60,8 @@ die() {
   printf '[tuff-xwin-current-session] %s\n' "$*" >&2
   exit 1
 }
+
+[[ -f "$repo_root/profiles/host-wayland.json" ]] || die "TUFF_XWIN_REPO_ROOT lacks profiles/host-wayland.json: $repo_root"
 
 need_systemd_user() {
   command -v systemctl >/dev/null 2>&1 || die "systemctl is required"
@@ -87,7 +94,7 @@ Environment=PATH=$bin_path
 EnvironmentFile=-%h/.config/tuff-xwin/session.env
 Environment=WAYBROKER_RUNTIME_DIR=$runtime_dir
 Environment=TUFF_XWIN_SESSION_INSTANCE_ID=$session_id
-ExecStart=/usr/bin/env displayd \$TUFF_XWIN_DISPLAYD_ARGS --session-instance-id \${TUFF_XWIN_SESSION_INSTANCE_ID}
+ExecStart=/usr/bin/env displayd \$TUFF_XWIN_DISPLAYD_ARGS --session-instance-id $session_id
 Restart=on-failure
 RestartSec=1
 "
@@ -104,7 +111,7 @@ Environment=PATH=$bin_path
 EnvironmentFile=-%h/.config/tuff-xwin/session.env
 Environment=WAYBROKER_RUNTIME_DIR=$runtime_dir
 Environment=TUFF_XWIN_SESSION_INSTANCE_ID=$session_id
-ExecStart=/usr/bin/env waylandd --serve-ipc --require-displayd --production --bind-wayland-display \$WAYBROKER_RUNTIME_DIR/wayland-tuff \$TUFF_XWIN_WAYLANDD_ARGS --session-instance-id \${TUFF_XWIN_SESSION_INSTANCE_ID}
+ExecStart=/usr/bin/env waylandd --serve-ipc --require-displayd --production --bind-wayland-display ${runtime_dir}/wayland-tuff \$TUFF_XWIN_WAYLANDD_ARGS --session-instance-id $session_id
 Restart=on-failure
 RestartSec=1
 "
@@ -152,8 +159,8 @@ Environment=TUFF_XWIN_PROFILE=$profile
 Environment=TUFF_XWIN_SESSION_INSTANCE_ID=$session_id
 Environment=TUFF_XWIN_REPO_ROOT=$repo_root
 Environment=TUFF_XWIN_PROFILES_DIR=$profiles_dir
-ExecStartPre=/usr/bin/env sessiond --repo-root \${TUFF_XWIN_REPO_ROOT} --profiles-dir \${TUFF_XWIN_PROFILES_DIR} --select-profile \${TUFF_XWIN_PROFILE} --write-selection --session-instance-id \${TUFF_XWIN_SESSION_INSTANCE_ID}
-ExecStart=/usr/bin/env sessiond --repo-root \${TUFF_XWIN_REPO_ROOT} --profiles-dir \${TUFF_XWIN_PROFILES_DIR} --serve-ipc --manage-active --spawn-components --notify-watchdog --session-instance-id \${TUFF_XWIN_SESSION_INSTANCE_ID} \$TUFF_XWIN_SESSIOND_ARGS
+ExecStartPre=/usr/bin/env sessiond --repo-root $repo_root --profiles-dir $profiles_dir --select-profile $profile --write-selection --session-instance-id $session_id
+ExecStart=/usr/bin/env sessiond --repo-root $repo_root --profiles-dir $profiles_dir --serve-ipc --manage-active --spawn-components --notify-watchdog --session-instance-id $session_id \$TUFF_XWIN_SESSIOND_ARGS
 Restart=on-failure
 RestartSec=1
 "

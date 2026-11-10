@@ -1,0 +1,4 @@
+command=cargo clippy --workspace --all-targets -- -D warnings
+started=2026-11-11T03:45:29+09:00
+exit=0
+finished=2026-11-11T03:45:34+09:00

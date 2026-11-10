@@ -1,0 +1,2 @@
+XDG_RUNTIME_DIR=/run/user/1000 WAYBROKER_RUNTIME_DIR=/run/user/1000/tuff-xwin-ops-20261111 /home/flux/.local/bin/tuff-xwin-current-session --profile host-wayland --session-instance-id host-install-20261111 start
+exit=0

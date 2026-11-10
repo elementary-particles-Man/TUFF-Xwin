@@ -1,0 +1,48 @@
+timestamp=2026-11-11T03:46:25+09:00
+XDG_RUNTIME_DIR=/run/user/1000
+installed_bins
+-rwxr-xr-x 8692584 /home/flux/.local/share/tuff-xwin/bin/displayd
+-rwxr-xr-x 5064760 /home/flux/.local/share/tuff-xwin/bin/waylandd
+-rwxr-xr-x 3674552 /home/flux/.local/share/tuff-xwin/bin/compd
+-rwxr-xr-x 2659392 /home/flux/.local/share/tuff-xwin/bin/lockd
+-rwxr-xr-x 2805384 /home/flux/.local/share/tuff-xwin/bin/watchdog
+-rwxr-xr-x 3085272 /home/flux/.local/share/tuff-xwin/bin/sessiond
+-rwxr-xr-x 2809720 /home/flux/.local/share/tuff-xwin/bin/x11bridge
+-rwxr-xr-x 3393776 /home/flux/.local/share/tuff-xwin/bin/xwin-screenshot
+launchers
+-rwxr-xr-x 1411 /home/flux/.local/bin/tuff-xwin-start
+-rwxr-xr-x 78 /home/flux/.local/bin/tuff-xwin-stop
+-rwxr-xr-x 3514 /home/flux/.local/bin/tuff-xwin-recover
+-rwxr-xr-x 11515 /home/flux/.local/bin/tuff-xwin-current-session
+session_env
+TUFF_XWIN_PREFIX=/home/flux/.local/share/tuff-xwin
+TUFF_XWIN_REPO_ROOT=/home/flux/.local/share/tuff-xwin/source-20261111
+TUFF_XWIN_PROFILES_DIR=/home/flux/.local/share/tuff-xwin/source-20261111/profiles
+TUFF_XWIN_SOCKET_FLAVOR=linux-systemd-user
+TUFF_XWIN_DISTRO_FAMILY=debian
+TUFF_XWIN_DISTRO_ID=debian
+TUFF_XWIN_PACKAGE_MANAGER=apt-get
+TUFF_XWIN_PROFILE=host-wayland
+TUFF_XWIN_SESSION_INSTANCE_ID=linux-debian-host
+TUFF_XWIN_DISPLAYD_ARGS=''
+TUFF_XWIN_WAYLANDD_ARGS=''
+TUFF_XWIN_LOCKD_ARGS=''
+TUFF_XWIN_WATCHDOG_ARGS=''
+TUFF_XWIN_SESSIOND_ARGS=''
+TUFF_XWIN_DISPLAY_BACKEND=headless-shm
+TUFF_XWIN_HOST_SHELL=''
+TUFF_XWIN_HOST_PANEL=''
+TUFF_XWIN_HOST_SETTINGSD=''
+existing_current
+inactive
+inactive
+inactive
+inactive
+inactive
+inactive
+existing_primary
+inactive
+kwin_before
+1967 /usr/bin/kwin_wayland_wrapper --xwayland
+2016 /usr/bin/kwin_wayland --wayland-fd 7 --socket wayland-0 --xwayland-fd 8 --xwayland-fd 9 --xwayland-display :0 --xwayland-xauthority /run/user/1000/xauth_cgmgEc --xwayland
+2707 /usr/bin/plasmashell --no-respawn

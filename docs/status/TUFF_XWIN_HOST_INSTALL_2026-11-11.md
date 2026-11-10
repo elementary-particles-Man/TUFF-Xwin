@@ -1,0 +1,39 @@
+# TUFF-Xwin user-space 導入・KDE並走実運用結果
+
+実行日: 2026-11-11 JST
+対象main: `954ffd1f5c421c24d4648c8e7fe9369d6386310e`
+
+## 結果
+
+- user-space release install: **PASS**。`~/.local/share/tuff-xwin` と `~/.local/bin` に実体を配置。
+- TUFF current-session 並走起動: **PASS**。専用runtime `/run/user/1000/tuff-xwin-ops-20261111`、6 unit active、専用 `wayland-tuff` socket、readiness exit 0。
+- KDE並走: **PASS**。KWin/Plasma/Xwaylandは停止・killせず、開始前後のPIDを確認。
+- Chrome専用endpoint接続: **FAIL**。Chromeは専用socketへ接続し、waylanddが `client_connected` を記録したが、`wl_seat` opcode 2 の未処理 protocol errorでexit 1。Chrome GUI PASSとは扱わない。
+- 指定software smoke: **PASS**。live-topology、canonical replay、displayd reconnect、IPC isolation、integration は全てexit 0。
+- KDE障害情報: 事実を採取。KWin main-thread hang、plasmashell QML binding loop / Qt警告、過去のplasmashell SIGABRTを確認。因果関係は断定していない。
+- cleanup: **PASS**。今回作成したTUFF current-sessionのみ停止・cleanup。KWin/Plasmaは継続稼働。
+
+## 実コード変更
+
+許可範囲内で `scripts/tuff-xwin-current-session.sh` のみ修正した。
+
+- `TUFF_XWIN_REPO_ROOT` がsession.envにあれば永続sourceを使用。
+- `profiles/host-wayland.json` がない場合はfail-closed。
+- systemd unitのWayland socket pathとsession IDを生成時に正しく固定。
+
+この修正により、インストール済みlauncherが過去の一時sourceを参照せず、専用runtimeのWayland endpointを起動できることを実測した。
+
+## 未達
+
+- 実DRM pageflip: 実施せず。KWinのDRM masterを奪取しない。
+- 物理入力/uinput: 実施せず。`/dev/uinput`権限変更・root常駐を行わない。
+- portal実キャプチャ: 同意UIを自動承認せず、実キャプチャPASSにはしていない。
+- KDEの根因確定: ログ証跡のみで、設定変更・再起動・ドライバ変更は行っていない。
+
+## 一次証跡
+
+実行コマンド、終了コード、stdout/stderr、サービス状態、Chrome接続、KDE抽出は [EVIDENCE_INDEX.md](evidence/host-install-2026-11-11/EVIDENCE_INDEX.md) から参照できる。収録ファイルのSHA-256とサイズは [MANIFEST.json](evidence/host-install-2026-11-11/MANIFEST.json) に記録した。
+
+- 収録対象: 76ファイル
+- redaction: 0件
+- 未収録: 91MBの未加工user journal全文のみ。関連KDE抽出は `evidence/kde/kde-user-filter.stdout` として収録。

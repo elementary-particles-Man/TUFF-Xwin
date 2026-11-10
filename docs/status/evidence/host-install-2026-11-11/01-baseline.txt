@@ -1,0 +1,67 @@
+timestamp=2026-11-11T03:44:44+09:00
+repo=/mnt/thpdoc/Develop/TUFF-Xwin
+head=2c1b6671228b306ebc88adbc5b0c47b543e192c6
+status:
+ M .gitignore
+?? cargo_metadata.json
+?? crates/waylandd/src/main_old.rs
+?? dir/
+?? history_graph.txt
+?? history_recent.txt
+?? new_main.rs
+?? new_tests.rs
+?? pres_files.txt
+?? top_resync_files.txt
+?? wayland_files.txt
+?? xwin_codebase_dump.txt
+diff-stat:
+ .gitignore | 1 +
+ 1 file changed, 1 insertion(+)
+origin:
+origin	https://github.com/elementary-particles-Man/TUFF-Xwin.git (fetch)
+origin	https://github.com/elementary-particles-Man/TUFF-Xwin.git (push)
+home-existing:
+/home/flux/.config/tuff-xwin
+/home/flux/.config/tuff-xwin/session.env
+/home/flux/.config/systemd/user/tuff-xwin-sessiond.service
+/home/flux/.config/systemd/user/tuff-xwin-waylandd.service
+/home/flux/.config/systemd/user/tuff-xwin.target
+/home/flux/.config/systemd/user/tuff-xwin-displayd.service
+/home/flux/.config/systemd/user/tuff-xwin-lockd.service
+/home/flux/.config/systemd/user/tuff-xwin-watchdog.service
+/home/flux/.local/share/tuff-xwin/bin/displayd
+/home/flux/.local/share/tuff-xwin/bin/watchdog
+/home/flux/.local/share/tuff-xwin/bin/xwin-screenshot
+/home/flux/.local/share/tuff-xwin/bin/sessiond
+/home/flux/.local/share/tuff-xwin/bin/waylandd
+/home/flux/.local/share/tuff-xwin/bin/x11bridge
+/home/flux/.local/share/tuff-xwin/bin/lockd
+/home/flux/.local/share/tuff-xwin/bin/compd
+/home/flux/.local/bin/tuff-xwin-autostart
+/home/flux/.local/bin/tuff-xwin-stop
+/home/flux/.local/bin/tuff-xwin-select-profile
+/home/flux/.local/bin/tuff-xwin-login-session
+/home/flux/.local/bin/tuff-xwin-start
+/home/flux/.local/bin/tuff-xwin-recover
+/home/flux/.local/bin/tuff-xwin-distro-socket
+/home/flux/.local/bin/tuff-xwin-current-session
+tools:
+MISSING XDG_RUNTIME_DIR
+/usr/bin/systemctl
+/home/flux/.cargo/bin/cargo
+/home/flux/.cargo/bin/rustc
+/usr/bin/git
+/usr/bin/sha256sum
+/usr/bin/timeout
+/usr/bin/google-chrome-stable
+baseline-fetch:
+From https://github.com/elementary-particles-Man/TUFF-Xwin
+ * branch            main       -> FETCH_HEAD
+baseline-ancestor:
+0
+systemd-user:
+running
+backup=/home/flux/.local/state/tuff-xwin-host-install-20261111/backups/20261110T184452Z
+Preparing worktree (new branch 'ops/tuff-xwin-host-install-20261111')
+branch 'ops/tuff-xwin-host-install-20261111' set up to track 'origin/main'.
+HEAD is now at 954ffd1 Merge pull request #33 from elementary-particles-Man/docs/phase4-physical-e2e-report

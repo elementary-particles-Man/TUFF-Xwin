@@ -1,0 +1,5 @@
+   Compiling waybroker-common v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/waybroker-common)
+   Compiling vulkan-backend v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/vulkan-backend)
+   Compiling wayland-wire v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/wayland-wire)
+   Compiling waylandd v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/waylandd)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.38s

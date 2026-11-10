@@ -1,0 +1,4 @@
+scripts/run-waylandd-displayd-reconnect-smoke.sh
+started=2026-11-11T03:48:02+09:00
+exit=0
+finished=2026-11-11T03:48:03+09:00

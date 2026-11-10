@@ -1,0 +1,195 @@
+timestamp=2026-11-11T03:46:41+09:00
+units
+UNIT                                       LOAD   ACTIVE SUB     DESCRIPTION
+tuff-xwin-current-session-displayd.service loaded active running TUFF-Xwin current-session display broker
+tuff-xwin-current-session-lockd.service    loaded active running TUFF-Xwin current-session lock broker
+tuff-xwin-current-session-watchdog.service loaded active running TUFF-Xwin current-session watchdog
+tuff-xwin-current-session-waylandd.service loaded failed failed  TUFF-Xwin current-session Wayland broker
+tuff-xwin-current-session.target           loaded active active  TUFF-Xwin current-session runtime target
+
+Legend: LOAD   → Reflects whether the unit definition was properly loaded.
+        ACTIVE → The high-level unit activation state, i.e. generalization of SUB.
+        SUB    → The low-level unit activation state, values depend on unit type.
+
+5 loaded units listed. Pass --all to see loaded but inactive units, too.
+To show all installed unit files use 'systemctl list-unit-files'.
+tuff-xwin-current-session-target.target=inactive
+tuff-xwin-current-session-displayd.service=active
+tuff-xwin-current-session-waylandd.service=failed
+tuff-xwin-current-session-lockd.service=active
+tuff-xwin-current-session-watchdog.service=active
+tuff-xwin-current-session-sessiond.service=inactive
+sockets
+compd.sock
+sessiond.sock
+displayd.sock
+watchdog.sock
+lockd.sock
+processes
+673774 /bin/bash -c sleep 3; run=/home/flux/.local/state/tuff-xwin-host-install-20261111; runtime=/run/user/1000/tuff-xwin-ops-20261111; export XDG_RUNTIME_DIR=/run/user/1000; {  echo timestamp=$(date -Is); echo 'units'; systemctl --user --no-pager --plain --full list-units 'tuff-xwin-current-session*' || true; for u in target displayd waylandd lockd watchdog sessiond; do unit="tuff-xwin-current-session-$u"; [ "$u" = target ] && unit="$unit.target" || unit="$unit.service"; echo "$unit=$(systemctl --user is-active "$unit" 2>&1)"; done  echo 'sockets'; find "$runtime" -maxdepth 1 -type s -printf '%f\n' 2>&1 || true  echo 'processes'; pgrep -a -f '(/home/flux/.local/share/tuff-xwin/bin/|tuff-xwin-current-session)' || true  echo 'readiness'; /home/flux/.local/share/tuff-xwin/bin/waylandd --check-readiness "$runtime/wayland-tuff" >"$run/evidence/03-readiness.stdout" 2>"$run/evidence/03-readiness.stderr"; echo exit=$?; cat "$run/evidence/03-readiness.stdout"; cat "$run/evidence/03-readiness.stderr"  echo 'service logs'; for u in displayd waylandd lockd watchdog sessiond; do echo "---$u---"; journalctl --user -u "tuff-xwin-current-session-$u.service" --since '-2 minutes' --no-pager -o short-iso | tail -80; done } > "$run/evidence/03-runtime-status.txt" 2>&1; cat "$run/evidence/03-runtime-status.txt"
+readiness
+exit=1
+waybroker service=waylandd responsibility=wayland endpoint, client lifecycle, clipboard core
+service=waylandd op=readiness_check event=begin path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff
+service=waylandd op=readiness_check event=failure reason=Failed to connect to Wayland socket for readiness check
+
+Caused by:
+    No such file or directory (os error 2)
+service logs
+---displayd---
+2026-11-11T03:46:31+09:00 main systemd[1601]: Started tuff-xwin-current-session-displayd.service - TUFF-Xwin current-session display broker.
+2026-11-11T03:46:31+09:00 main env[673354]: waybroker service=displayd responsibility=drm/kms, input, seat broker
+2026-11-11T03:46:31+09:00 main env[673354]: service=displayd op=accel_policy event=selected simd=Avx2 vulkan_enabled=true
+2026-11-11T03:46:32+09:00 main env[673354]: service=displayd op=vulkan_init event=success compute_available=true driver=vulkan-ash-v1 device=AMD Radeon RX 7600 XT (RADV NAVI33)
+2026-11-11T03:46:32+09:00 main env[673354]: service=displayd op=scene_cache event=empty path=/run/user/1000/tuff-xwin-ops-20261111/session-linux-debian-host-scene-snapshot.json session_instance_id=linux-debian-host
+2026-11-11T03:46:32+09:00 main env[673354]: service=displayd op=listen event=socket_bound path=/run/user/1000/tuff-xwin-ops-20261111/displayd.sock
+---waylandd---
+2026-11-11T03:46:31+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:46:31+09:00 main (env)[673357]: tuff-xwin-current-session-waylandd.service: Invalid environment variable name evaluates to an empty string: WAYBROKER_RUNTIME_DIR/wayland-tuff
+2026-11-11T03:46:31+09:00 main env[673357]: Error: unknown argument: linux-debian-host
+2026-11-11T03:46:31+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-11T03:46:31+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:46:33+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Scheduled restart job, restart counter is at 1.
+2026-11-11T03:46:33+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:46:33+09:00 main (env)[673455]: tuff-xwin-current-session-waylandd.service: Invalid environment variable name evaluates to an empty string: WAYBROKER_RUNTIME_DIR/wayland-tuff
+2026-11-11T03:46:33+09:00 main env[673455]: Error: unknown argument: linux-debian-host
+2026-11-11T03:46:33+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-11T03:46:33+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:46:34+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Scheduled restart job, restart counter is at 2.
+2026-11-11T03:46:34+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:46:34+09:00 main (env)[673532]: tuff-xwin-current-session-waylandd.service: Invalid environment variable name evaluates to an empty string: WAYBROKER_RUNTIME_DIR/wayland-tuff
+2026-11-11T03:46:34+09:00 main env[673532]: Error: unknown argument: linux-debian-host
+2026-11-11T03:46:34+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-11T03:46:34+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:46:35+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Scheduled restart job, restart counter is at 3.
+2026-11-11T03:46:35+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:46:35+09:00 main (env)[673601]: tuff-xwin-current-session-waylandd.service: Invalid environment variable name evaluates to an empty string: WAYBROKER_RUNTIME_DIR/wayland-tuff
+2026-11-11T03:46:35+09:00 main env[673601]: Error: unknown argument: linux-debian-host
+2026-11-11T03:46:35+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-11T03:46:35+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:46:36+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Scheduled restart job, restart counter is at 4.
+2026-11-11T03:46:36+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-11T03:46:36+09:00 main (env)[673679]: tuff-xwin-current-session-waylandd.service: Invalid environment variable name evaluates to an empty string: WAYBROKER_RUNTIME_DIR/wayland-tuff
+2026-11-11T03:46:36+09:00 main env[673679]: Error: unknown argument: linux-debian-host
+2026-11-11T03:46:36+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-11T03:46:36+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:46:37+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Scheduled restart job, restart counter is at 5.
+2026-11-11T03:46:37+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Start request repeated too quickly.
+2026-11-11T03:46:37+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-11T03:46:37+09:00 main systemd[1601]: Failed to start tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+---lockd---
+2026-11-11T03:46:31+09:00 main systemd[1601]: Started tuff-xwin-current-session-lockd.service - TUFF-Xwin current-session lock broker.
+2026-11-11T03:46:31+09:00 main env[673355]: waybroker service=lockd responsibility=lockscreen and auth ui
+2026-11-11T03:46:31+09:00 main env[673355]: service=lockd op=listen event=socket_bound path=/run/user/1000/tuff-xwin-ops-20261111/lockd.sock
+2026-11-11T03:46:31+09:00 main env[673355]: service=lockd op=state_restore event=fresh session_instance_id=legacy-single-session state=Unlocked generation=1 path=/run/user/1000/tuff-xwin-ops-20261111/session-legacy-single-session-lockd-state.json
+2026-11-11T03:46:31+09:00 main env[673355]: service=lockd op=status event=ready current_state=Unlocked generation=1 session_instance_id=legacy-single-session
+---watchdog---
+2026-11-11T03:46:31+09:00 main systemd[1601]: Started tuff-xwin-current-session-watchdog.service - TUFF-Xwin current-session watchdog.
+2026-11-11T03:46:31+09:00 main env[673356]: waybroker service=watchdog responsibility=display stack recovery control
+2026-11-11T03:46:31+09:00 main env[673356]: watchdog listening socket=/run/user/1000/tuff-xwin-ops-20261111/watchdog.sock
+2026-11-11T03:46:32+09:00 main env[673356]: service=watchdog op=report profile=host-wayland session_instance=linux-debian-host generation=1 sequence=1 healthy=4 unhealthy=0 inactive=0 timestamp=1794336392
+2026-11-11T03:46:32+09:00 main env[673356]: service=watchdog op=component_status id=broker-compd role=window-manager critical=true status=healthy pid=673397 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:32+09:00 main env[673356]: service=watchdog op=component_status id=host-shell role=shell critical=false status=healthy pid=673398 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:32+09:00 main env[673356]: service=watchdog op=component_status id=host-panel role=panel critical=false status=healthy pid=673399 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:32+09:00 main env[673356]: service=watchdog op=component_status id=host-settingsd role=settings-daemon critical=false status=healthy pid=673400 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:33+09:00 main env[673356]: service=watchdog op=report profile=host-wayland session_instance=linux-debian-host generation=2 sequence=1 healthy=4 unhealthy=0 inactive=0 timestamp=1794336393
+2026-11-11T03:46:33+09:00 main env[673356]: service=watchdog op=component_status id=broker-compd role=window-manager critical=true status=healthy pid=673476 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:33+09:00 main env[673356]: service=watchdog op=component_status id=host-shell role=shell critical=false status=healthy pid=673477 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:33+09:00 main env[673356]: service=watchdog op=component_status id=host-panel role=panel critical=false status=healthy pid=673478 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:33+09:00 main env[673356]: service=watchdog op=component_status id=host-settingsd role=settings-daemon critical=false status=healthy pid=673479 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:34+09:00 main env[673356]: service=watchdog op=report profile=host-wayland session_instance=linux-debian-host generation=3 sequence=1 healthy=4 unhealthy=0 inactive=0 timestamp=1794336394
+2026-11-11T03:46:34+09:00 main env[673356]: service=watchdog op=component_status id=broker-compd role=window-manager critical=true status=healthy pid=673556 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:34+09:00 main env[673356]: service=watchdog op=component_status id=host-shell role=shell critical=false status=healthy pid=673557 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:34+09:00 main env[673356]: service=watchdog op=component_status id=host-panel role=panel critical=false status=healthy pid=673558 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:34+09:00 main env[673356]: service=watchdog op=component_status id=host-settingsd role=settings-daemon critical=false status=healthy pid=673559 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:35+09:00 main env[673356]: service=watchdog op=report profile=host-wayland session_instance=linux-debian-host generation=4 sequence=1 healthy=4 unhealthy=0 inactive=0 timestamp=1794336395
+2026-11-11T03:46:35+09:00 main env[673356]: service=watchdog op=component_status id=broker-compd role=window-manager critical=true status=healthy pid=673622 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:35+09:00 main env[673356]: service=watchdog op=component_status id=host-shell role=shell critical=false status=healthy pid=673623 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:35+09:00 main env[673356]: service=watchdog op=component_status id=host-panel role=panel critical=false status=healthy pid=673624 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:35+09:00 main env[673356]: service=watchdog op=component_status id=host-settingsd role=settings-daemon critical=false status=healthy pid=673625 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:36+09:00 main env[673356]: service=watchdog op=report profile=host-wayland session_instance=linux-debian-host generation=5 sequence=1 healthy=4 unhealthy=0 inactive=0 timestamp=1794336396
+2026-11-11T03:46:36+09:00 main env[673356]: service=watchdog op=component_status id=broker-compd role=window-manager critical=true status=healthy pid=673710 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:36+09:00 main env[673356]: service=watchdog op=component_status id=host-shell role=shell critical=false status=healthy pid=673711 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:36+09:00 main env[673356]: service=watchdog op=component_status id=host-panel role=panel critical=false status=healthy pid=673712 crashes=0 action=none reason="component process is alive"
+2026-11-11T03:46:36+09:00 main env[673356]: service=watchdog op=component_status id=host-settingsd role=settings-daemon critical=false status=healthy pid=673713 crashes=0 action=none reason="component process is alive"
+---sessiond---
+2026-11-11T03:46:34+09:00 main env[673556]: service=compd op=accel_policy event=selected simd=Avx2 vulkan_enabled=true
+2026-11-11T03:46:34+09:00 main env[673556]: service=compd op=vulkan_init event=success compute_available=true driver=vulkan-ash-v1 device=AMD Radeon RX 7600 XT (RADV NAVI33)
+2026-11-11T03:46:34+09:00 main env[673556]: service=compd op=listen event=socket_bound path=/run/user/1000/tuff-xwin-ops-20261111/compd.sock
+2026-11-11T03:46:35+09:00 main systemd[1601]: Stopping tuff-xwin-current-session-sessiond.service - TUFF-Xwin current-session session supervisor...
+2026-11-11T03:46:35+09:00 main systemd[1601]: Stopped tuff-xwin-current-session-sessiond.service - TUFF-Xwin current-session session supervisor.
+2026-11-11T03:46:35+09:00 main systemd[1601]: Starting tuff-xwin-current-session-sessiond.service - TUFF-Xwin current-session session supervisor...
+2026-11-11T03:46:35+09:00 main env[673602]: waybroker service=sessiond responsibility=lid, idle, suspend, session policy, desktop profile manager
+2026-11-11T03:46:35+09:00 main env[673602]: service=sessiond op=load_profiles dir=/home/flux/.local/share/tuff-xwin/source-20261111/profiles count=10 session_instance_id=linux-debian-host
+2026-11-11T03:46:35+09:00 main env[673602]: service=sessiond op=binding_validation event=ok profile=host-wayland
+2026-11-11T03:46:35+09:00 main env[673602]: service=sessiond op=select_profile id=host-wayland protocol=wayland-native components=4
+2026-11-11T03:46:35+09:00 main env[673602]: service=sessiond op=write_active_profile path=/run/user/1000/tuff-xwin-ops-20261111/session-linux-debian-host-active-profile.json
+2026-11-11T03:46:35+09:00 main systemd[1601]: Started tuff-xwin-current-session-sessiond.service - TUFF-Xwin current-session session supervisor.
+2026-11-11T03:46:35+09:00 main env[673614]: waybroker service=sessiond responsibility=lid, idle, suspend, session policy, desktop profile manager
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=load_profiles dir=/home/flux/.local/share/tuff-xwin/source-20261111/profiles count=10 session_instance_id=linux-debian-host
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=profile_entry id=demo-wayland-compd-recovery protocol=wayland-native name="Demo Native Wayland Compd Recovery" summary="sessiond/watchdog から compd broker を restart し、displayd/waylandd snapshot で scene rebuild と selection handoff を行う。lock UI は broker-owned lockd に任せ、shell/panel/settings-daemon/applet を載せる Wayland native demo profile。"
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=profile_entry id=demo-x11 protocol=layer-x11 name="Demo Desktop on LeyerX11" summary="repo 内の mock component を使って launch / watchdog を確認する demo profile。"
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=profile_entry id=demo-x11-compd-binding-collision protocol=layer-x11 name="Demo Desktop with Compd Binding Collision" summary="compd に対して 2 つの binding を持たせ、衝突検出をテストする profile。"
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=profile_entry id=demo-x11-crashy protocol=layer-x11 name="Crashy Demo Desktop on LeyerX11" summary="critical component の再起動と crash-loop 判定を確認する demo profile。"
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=profile_entry id=demo-x11-degraded protocol=layer-x11 name="Degraded Demo Desktop on LeyerX11" summary="critical component が crash-loop に入った時の最小 fallback profile。"
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=profile_entry id=demo-x11-lockd-binding-collision protocol=layer-x11 name="Demo Desktop with Lockd Binding Collision" summary="lockd に対して 2 つの binding を持たせ、衝突検出をテストする profile。"
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=profile_entry id=demo-x11-lockd-recovery-optin protocol=layer-x11 name="Demo Desktop on LeyerX11 with Lockd Opt-in" summary="lockd の opt-in recovery execution をテストするための専用 demo profile。"
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=profile_entry id=host-wayland protocol=wayland-native name="Host Wayland Session on Waybroker" summary="major Linux distro 向けの Wayland native profile。broker 群は TUFF-Xwin が担い、GUI は明示的に選んだ場合だけ接続する。"
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=profile_entry id=openbox-x11 protocol=layer-x11 name="Openbox Minimal on LeyerX11" summary="最小構成の X11 desktop profile。rootless X11 と軽量 WM を組み合わせる。"
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=profile_entry id=xfce-x11 protocol=layer-x11 name="XFCE Classic on LeyerX11" summary="軽量な X11 desktop profile。x11bridge の上に xfwm4 と panel 群を載せる。"
+2026-11-11T03:46:35+09:00 main env[673614]: sessiond listening socket=/run/user/1000/tuff-xwin-ops-20261111/sessiond.sock
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=authority_restore event=recovered session_instance_id=linux-debian-host previous_profile=host-wayland previous_generation=3 previous_sequence=1 generation=4
+2026-11-11T03:46:35+09:00 main env[673614]: sessiond launch_state profile=host-wayland session_instance=linux-debian-host protocol=wayland-native generation=4 sequence=1 components=4
+2026-11-11T03:46:35+09:00 main env[673614]: sessiond launch component id=broker-compd role=window-manager critical=true state=spawned resolved=/home/flux/.local/share/tuff-xwin/bin/compd pid=673622 restarts=0 last_exit=none
+2026-11-11T03:46:35+09:00 main env[673614]: sessiond launch component id=host-shell role=shell critical=false state=spawned resolved=/bin/sh pid=673623 restarts=0 last_exit=none
+2026-11-11T03:46:35+09:00 main env[673614]: sessiond launch component id=host-panel role=panel critical=false state=spawned resolved=/bin/sh pid=673624 restarts=0 last_exit=none
+2026-11-11T03:46:35+09:00 main env[673614]: sessiond launch component id=host-settingsd role=settings-daemon critical=false state=spawned resolved=/bin/sh pid=673625 restarts=0 last_exit=none
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=snapshot event=managed_active_profile profile=host-wayland session_instance=linux-debian-host timestamp=1794336395
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=snapshot path=/run/user/1000/tuff-xwin-ops-20261111/session-linux-debian-host-launch-state.json
+2026-11-11T03:46:35+09:00 main env[673614]: service=sessiond op=authority_persist event=success path=/run/user/1000/tuff-xwin-ops-20261111/session-linux-debian-host-sessiond-state.json generation=4 sequence=1
+2026-11-11T03:46:35+09:00 main env[673614]: sessiond watchdog_stream profile=host-wayland healthy=4 unhealthy=0 inactive=0
+2026-11-11T03:46:35+09:00 main env[673622]: waybroker service=compd responsibility=scene, focus, composition policy
+2026-11-11T03:46:35+09:00 main env[673622]: service=compd op=accel_policy event=selected simd=Avx2 vulkan_enabled=true
+2026-11-11T03:46:35+09:00 main env[673622]: service=compd op=vulkan_init event=success compute_available=true driver=vulkan-ash-v1 device=AMD Radeon RX 7600 XT (RADV NAVI33)
+2026-11-11T03:46:35+09:00 main env[673622]: service=compd op=listen event=socket_bound path=/run/user/1000/tuff-xwin-ops-20261111/compd.sock
+2026-11-11T03:46:36+09:00 main systemd[1601]: Stopping tuff-xwin-current-session-sessiond.service - TUFF-Xwin current-session session supervisor...
+2026-11-11T03:46:36+09:00 main systemd[1601]: Stopped tuff-xwin-current-session-sessiond.service - TUFF-Xwin current-session session supervisor.
+2026-11-11T03:46:36+09:00 main systemd[1601]: Starting tuff-xwin-current-session-sessiond.service - TUFF-Xwin current-session session supervisor...
+2026-11-11T03:46:36+09:00 main env[673680]: waybroker service=sessiond responsibility=lid, idle, suspend, session policy, desktop profile manager
+2026-11-11T03:46:36+09:00 main env[673680]: service=sessiond op=load_profiles dir=/home/flux/.local/share/tuff-xwin/source-20261111/profiles count=10 session_instance_id=linux-debian-host
+2026-11-11T03:46:36+09:00 main env[673680]: service=sessiond op=binding_validation event=ok profile=host-wayland
+2026-11-11T03:46:36+09:00 main env[673680]: service=sessiond op=select_profile id=host-wayland protocol=wayland-native components=4
+2026-11-11T03:46:36+09:00 main env[673680]: service=sessiond op=write_active_profile path=/run/user/1000/tuff-xwin-ops-20261111/session-linux-debian-host-active-profile.json
+2026-11-11T03:46:36+09:00 main systemd[1601]: Started tuff-xwin-current-session-sessiond.service - TUFF-Xwin current-session session supervisor.
+2026-11-11T03:46:36+09:00 main env[673698]: waybroker service=sessiond responsibility=lid, idle, suspend, session policy, desktop profile manager
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=load_profiles dir=/home/flux/.local/share/tuff-xwin/source-20261111/profiles count=10 session_instance_id=linux-debian-host
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=profile_entry id=demo-wayland-compd-recovery protocol=wayland-native name="Demo Native Wayland Compd Recovery" summary="sessiond/watchdog から compd broker を restart し、displayd/waylandd snapshot で scene rebuild と selection handoff を行う。lock UI は broker-owned lockd に任せ、shell/panel/settings-daemon/applet を載せる Wayland native demo profile。"
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=profile_entry id=demo-x11 protocol=layer-x11 name="Demo Desktop on LeyerX11" summary="repo 内の mock component を使って launch / watchdog を確認する demo profile。"
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=profile_entry id=demo-x11-compd-binding-collision protocol=layer-x11 name="Demo Desktop with Compd Binding Collision" summary="compd に対して 2 つの binding を持たせ、衝突検出をテストする profile。"
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=profile_entry id=demo-x11-crashy protocol=layer-x11 name="Crashy Demo Desktop on LeyerX11" summary="critical component の再起動と crash-loop 判定を確認する demo profile。"
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=profile_entry id=demo-x11-degraded protocol=layer-x11 name="Degraded Demo Desktop on LeyerX11" summary="critical component が crash-loop に入った時の最小 fallback profile。"
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=profile_entry id=demo-x11-lockd-binding-collision protocol=layer-x11 name="Demo Desktop with Lockd Binding Collision" summary="lockd に対して 2 つの binding を持たせ、衝突検出をテストする profile。"
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=profile_entry id=demo-x11-lockd-recovery-optin protocol=layer-x11 name="Demo Desktop on LeyerX11 with Lockd Opt-in" summary="lockd の opt-in recovery execution をテストするための専用 demo profile。"
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=profile_entry id=host-wayland protocol=wayland-native name="Host Wayland Session on Waybroker" summary="major Linux distro 向けの Wayland native profile。broker 群は TUFF-Xwin が担い、GUI は明示的に選んだ場合だけ接続する。"
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=profile_entry id=openbox-x11 protocol=layer-x11 name="Openbox Minimal on LeyerX11" summary="最小構成の X11 desktop profile。rootless X11 と軽量 WM を組み合わせる。"
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=profile_entry id=xfce-x11 protocol=layer-x11 name="XFCE Classic on LeyerX11" summary="軽量な X11 desktop profile。x11bridge の上に xfwm4 と panel 群を載せる。"
+2026-11-11T03:46:36+09:00 main env[673698]: sessiond listening socket=/run/user/1000/tuff-xwin-ops-20261111/sessiond.sock
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=authority_restore event=recovered session_instance_id=linux-debian-host previous_profile=host-wayland previous_generation=4 previous_sequence=1 generation=5
+2026-11-11T03:46:36+09:00 main env[673698]: sessiond launch_state profile=host-wayland session_instance=linux-debian-host protocol=wayland-native generation=5 sequence=1 components=4
+2026-11-11T03:46:36+09:00 main env[673698]: sessiond launch component id=broker-compd role=window-manager critical=true state=spawned resolved=/home/flux/.local/share/tuff-xwin/bin/compd pid=673710 restarts=0 last_exit=none
+2026-11-11T03:46:36+09:00 main env[673698]: sessiond launch component id=host-shell role=shell critical=false state=spawned resolved=/bin/sh pid=673711 restarts=0 last_exit=none
+2026-11-11T03:46:36+09:00 main env[673698]: sessiond launch component id=host-panel role=panel critical=false state=spawned resolved=/bin/sh pid=673712 restarts=0 last_exit=none
+2026-11-11T03:46:36+09:00 main env[673698]: sessiond launch component id=host-settingsd role=settings-daemon critical=false state=spawned resolved=/bin/sh pid=673713 restarts=0 last_exit=none
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=snapshot event=managed_active_profile profile=host-wayland session_instance=linux-debian-host timestamp=1794336396
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=snapshot path=/run/user/1000/tuff-xwin-ops-20261111/session-linux-debian-host-launch-state.json
+2026-11-11T03:46:36+09:00 main env[673698]: service=sessiond op=authority_persist event=success path=/run/user/1000/tuff-xwin-ops-20261111/session-linux-debian-host-sessiond-state.json generation=5 sequence=1
+2026-11-11T03:46:36+09:00 main env[673698]: sessiond watchdog_stream profile=host-wayland healthy=4 unhealthy=0 inactive=0
+2026-11-11T03:46:36+09:00 main env[673710]: waybroker service=compd responsibility=scene, focus, composition policy
+2026-11-11T03:46:36+09:00 main env[673710]: service=compd op=accel_policy event=selected simd=Avx2 vulkan_enabled=true
+2026-11-11T03:46:36+09:00 main env[673710]: service=compd op=vulkan_init event=success compute_available=true driver=vulkan-ash-v1 device=AMD Radeon RX 7600 XT (RADV NAVI33)
+2026-11-11T03:46:36+09:00 main env[673710]: service=compd op=listen event=socket_bound path=/run/user/1000/tuff-xwin-ops-20261111/compd.sock
+2026-11-11T03:46:37+09:00 main systemd[1601]: Stopping tuff-xwin-current-session-sessiond.service - TUFF-Xwin current-session session supervisor...
+2026-11-11T03:46:37+09:00 main systemd[1601]: tuff-xwin-current-session-sessiond.service: Killing process 673732 (tokio-rt-worker) with signal SIGKILL.
+2026-11-11T03:46:37+09:00 main systemd[1601]: Stopped tuff-xwin-current-session-sessiond.service - TUFF-Xwin current-session session supervisor.
+2026-11-11T03:46:37+09:00 main systemd[1601]: Dependency failed for tuff-xwin-current-session-sessiond.service - TUFF-Xwin current-session session supervisor.
+2026-11-11T03:46:37+09:00 main systemd[1601]: tuff-xwin-current-session-sessiond.service: Job tuff-xwin-current-session-sessiond.service/start failed with result 'dependency'.

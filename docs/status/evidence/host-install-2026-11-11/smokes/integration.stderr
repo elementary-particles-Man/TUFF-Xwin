@@ -1,0 +1,6 @@
+   Compiling watchdog v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/watchdog)
+   Compiling lockd v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/lockd)
+   Compiling sessiond v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/sessiond)
+   Compiling x11bridge v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/LeyerX11/crates/x11bridge)
+   Compiling xwin-screenshot v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/apps/screenshot)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.48s

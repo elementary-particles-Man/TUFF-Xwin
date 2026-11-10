@@ -1,0 +1,7 @@
+Installed TUFF-Xwin into /home/flux/.local/share/tuff-xwin
+Linux socket: family=debian distro=debian package_manager=apt-get
+Session env: /home/flux/.config/tuff-xwin/session.env
+Start command: /home/flux/.local/bin/tuff-xwin-start
+Recover command: /home/flux/.local/bin/tuff-xwin-recover
+Login session command: /home/flux/.local/bin/tuff-xwin-login-session
+Current-session takeover command: /home/flux/.local/bin/tuff-xwin-current-session

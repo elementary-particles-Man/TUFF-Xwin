@@ -1,0 +1,4 @@
+sh -c journalctl --user --since '7 days ago' --no-pager -o short-iso | rg -i 'kwin_wayland|plasmashell|org.kde|crash|segfault|watchdog|oom'
+started=2026-11-11T03:48:41+09:00
+exit=0
+finished=2026-11-11T03:48:45+09:00

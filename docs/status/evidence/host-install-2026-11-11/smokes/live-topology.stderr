@@ -1,0 +1,4 @@
+   Compiling displayd v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/displayd)
+   Compiling waylandd v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/waylandd)
+   Compiling compd v0.1.0 (/home/flux/.local/share/tuff-xwin/source-20261111/crates/compd)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.08s

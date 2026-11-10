@@ -1,0 +1,4 @@
+command=bash scripts/dev-check.sh
+started=2026-11-11T03:45:34+09:00
+exit=0
+finished=2026-11-11T03:45:36+09:00

@@ -1,0 +1,4 @@
+command=cargo fmt --all -- --check
+started=2026-11-11T03:45:15+09:00
+exit=0
+finished=2026-11-11T03:45:15+09:00
