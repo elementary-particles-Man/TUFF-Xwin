@@ -1162,6 +1162,256 @@
       "collected_at": "2026-11-14T00:00:00+09:00",
       "redaction_count": 0,
       "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/01-baseline.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/01-baseline.txt",
+      "sha256": "f754ff3bca72a17d212a5f2c8af940a6a8333cc3d0f181cb04bee466707704f2",
+      "bytes": 154,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/02-start.exit",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/02-start.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "bytes": 2,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/02-start.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/02-start.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/02-start.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/02-start.stdout",
+      "sha256": "f3b55640432162af43add5b7c5416e9a3994f263a545399abdedfce855199257",
+      "bytes": 165,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/03-readiness.exit",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/03-readiness.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "bytes": 2,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/03-readiness.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/03-readiness.stderr",
+      "sha256": "80997cd16c851ae94584e79cdf5c0d8adc092027735041cac7dcb3cdcef34f25",
+      "bytes": 168,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/03-readiness.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/03-readiness.stdout",
+      "sha256": "132ab3d56e6c4431af8d6c43c2af015bde5e70fc4a264690c9fa73d607fcd102",
+      "bytes": 197,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/03-units.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/03-units.txt",
+      "sha256": "537cef7cb13db04464d1ec29119cf1f505e70e9384471668eba63359943882f3",
+      "bytes": 46,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/04-chrome.exit",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/04-chrome.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "bytes": 2,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/04-chrome.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/04-chrome.stderr",
+      "sha256": "5d1eb9ae267b78f28ad7bea2c3b784a2fd14b9c21320b2d579ccba288e6df694",
+      "bytes": 412,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/04-chrome.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/04-chrome.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/04-waylandd.log",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/04-waylandd.log",
+      "sha256": "712e52df0ec339eea690b467f9380c2b2b0309d60f65cef8c3c218a8c38f6a97",
+      "bytes": 1113,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/05-cleanup.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/05-cleanup.txt",
+      "sha256": "191ed8b9b505b38fca544236259f1e81f334b93ea6349305f0503344f7ea97f3",
+      "bytes": 2392,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/06-restart.exit",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/06-restart.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "bytes": 2,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/06-restart.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/06-restart.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/06-restart.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/06-restart.stdout",
+      "sha256": "f3b55640432162af43add5b7c5416e9a3994f263a545399abdedfce855199257",
+      "bytes": 165,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/07-units-after-retry.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/07-units-after-retry.txt",
+      "sha256": "91a70203a574351206f118baca0a55081897da7d047a514e0ec7960c13d262ec",
+      "bytes": 46,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/08-readiness.exit",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/08-readiness.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "bytes": 2,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/08-readiness.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/08-readiness.stderr",
+      "sha256": "80997cd16c851ae94584e79cdf5c0d8adc092027735041cac7dcb3cdcef34f25",
+      "bytes": 168,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/08-readiness.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/08-readiness.stdout",
+      "sha256": "132ab3d56e6c4431af8d6c43c2af015bde5e70fc4a264690c9fa73d607fcd102",
+      "bytes": 197,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/09-chrome.exit",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/09-chrome.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "bytes": 2,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/09-chrome.stderr",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/09-chrome.stderr",
+      "sha256": "05c31eff739b7df22bab87b94461034d7735829351fecf4b6a272e4e725e0c59",
+      "bytes": 434,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/09-chrome.stdout",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/09-chrome.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/10-waylandd.log",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/10-waylandd.log",
+      "sha256": "f8b54777eb9803da9aa7120cfc70aae8a43f12dbc5296b9235d3d45e890e90b0",
+      "bytes": 5772,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
+    },
+    {
+      "origin_relative_path": "fix-20261114/11-cleanup.txt",
+      "destination_relative_path": "docs/status/evidence/host-install-2026-11-11/fix-20261114/11-cleanup.txt",
+      "sha256": "04ef8f35eee0cc09bab3be80294289101a48fc886ac58b4086e6c06865f32f94",
+      "bytes": 2316,
+      "evidence_kind": "raw-log",
+      "collected_at": "2026-11-14T17:00:00+09:00",
+      "redaction_count": 0,
+      "status": "collected"
     }
   ],
   "missing": [

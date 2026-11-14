@@ -1,0 +1,5 @@
+qt.qpa.wayland: zxdg_output_v1.done received on version 3 or newer, this is most likely a bug in the compositor
+[2502996:2503108:1114/170444.351590:ERROR:content/browser/browser_main_loop.cc:288] GLib: g_main_context_pop_thread_default: assertion 'stack != NULL' failed
+qt.qpa.wayland: Failed to initialize EGL display 3001
+Warning: fallback to QtQuick software backend.
+Gdk-Message: 17:04:44.482: Error flushing display: Broken pipe
