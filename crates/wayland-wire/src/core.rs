@@ -575,7 +575,11 @@ impl HeadlessWireCore {
             ("wl_compositor", 1) => self.handle_create_region(message)?,
             ("wl_seat", 0) => self.handle_seat_get_pointer(message)?,
             ("wl_seat", 1) => self.handle_seat_get_keyboard(message)?,
+            ("wl_seat", 2) => self.handle_seat_get_touch(message)?,
+            ("wl_seat", 3) => self.handle_seat_release(message)?,
             ("wl_pointer", 1) => self.handle_wl_pointer_release(message)?,
+            ("wl_keyboard", 0) => self.handle_wl_keyboard_release(message)?,
+            ("wl_touch", 0) => self.handle_wl_touch_release(message)?,
             ("wl_surface", 0) => self.handle_surface_destroy(message)?,
             ("wl_surface", 1) => self.handle_surface_attach(message)?,
             ("wl_surface", 2) => self.handle_surface_damage(message)?,
@@ -975,9 +979,35 @@ impl HeadlessWireCore {
         self.input.get_keyboard(message.header.object_id, id)
     }
 
+    fn handle_seat_get_touch(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() != 4 {
+            return Err(WireError::ProtocolError("wl_seat.get_touch payload is invalid".into()));
+        }
+        let seat = self.registry.get_object(message.header.object_id)?;
+        if seat.interface != "wl_seat" || seat.version < 5 {
+            return Err(WireError::ProtocolError("wl_seat.get_touch requires version 5".into()));
+        }
+        let id = WaylandObjectId(LittleEndian::read_u32(&message.payload));
+        let version = seat.version.min(7);
+        self.registry.register_client_object(id, "wl_touch", version)?;
+        if let Err(error) = self.input.get_touch(message.header.object_id, id) {
+            let _ = self.registry.destroy_object(id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn handle_seat_release(&mut self, message: WaylandMessage) -> Result<()> {
+        if !message.payload.is_empty() {
+            return Err(WireError::ProtocolError("wl_seat.release payload is invalid".into()));
+        }
+        self.input.release_seat(message.header.object_id)?;
+        self.registry.destroy_object(message.header.object_id)
+    }
+
     fn send_seat_capabilities(&mut self, seat_id: WaylandObjectId) {
         let mut p = vec![0u8; 4];
-        LittleEndian::write_u32(&mut p, 7); // pointer | keyboard | touch
+        LittleEndian::write_u32(&mut p, 3); // pointer | keyboard
         self.events_out.push(WaylandMessage::new(seat_id, WaylandOpcode(0), p));
     }
 
@@ -1620,6 +1650,82 @@ mod tests {
         assert_eq!(res.events.len(), 2);
         assert_eq!(res.events[0].header.object_id.0, 13);
         assert_eq!(res.events[1].header.object_id.0, 12);
+    }
+
+    #[test]
+    fn wl_seat_touch_lifecycle_validates_version_and_delete_id() {
+        let mut core = HeadlessWireCore::default();
+        let seat = WaylandObjectId(40);
+        let touch = WaylandObjectId(41);
+        core.registry.register_client_object(seat, "wl_seat", 7).unwrap();
+        core.input.create_seat(seat, "seat0");
+        core.send_seat_capabilities(seat);
+        assert_eq!(LittleEndian::read_u32(&core.pop_event().unwrap().payload), 3);
+        core.handle_seat_get_touch(WaylandMessage::new(
+            seat,
+            WaylandOpcode(2),
+            touch.0.to_le_bytes().to_vec(),
+        ))
+        .unwrap();
+        assert_eq!(core.registry.get_object(touch).unwrap().interface, "wl_touch");
+        core.handle_wl_touch_release(WaylandMessage::new(touch, WaylandOpcode(0), vec![])).unwrap();
+        assert!(core.input.touches.is_empty());
+        let deleted = core.registry.take_delete_id_events();
+        assert_eq!(deleted, vec![touch]);
+        core.registry.acknowledge_delete_id(touch).unwrap();
+        core.registry.register_client_object(touch, "wl_touch", 7).unwrap();
+    }
+
+    #[test]
+    fn wl_seat_touch_rejects_old_version_and_malformed_or_duplicate_ids() {
+        let mut core = HeadlessWireCore::default();
+        let seat = WaylandObjectId(40);
+        let touch = WaylandObjectId(41);
+        core.registry.register_client_object(seat, "wl_seat", 4).unwrap();
+        core.input.create_seat(seat, "seat0");
+        assert!(core
+            .handle_seat_get_touch(WaylandMessage::new(
+                seat,
+                WaylandOpcode(2),
+                touch.0.to_le_bytes().to_vec()
+            ))
+            .is_err());
+        core.registry.destroy_object(seat).unwrap();
+        core.registry.acknowledge_delete_id(seat).unwrap();
+        core.registry.register_client_object(seat, "wl_seat", 7).unwrap();
+        core.input.create_seat(seat, "seat0");
+        assert!(core
+            .handle_seat_get_touch(WaylandMessage::new(seat, WaylandOpcode(2), vec![1, 2]))
+            .is_err());
+        core.registry.register_client_object(touch, "wl_pointer", 7).unwrap();
+        assert!(core
+            .handle_seat_get_touch(WaylandMessage::new(
+                seat,
+                WaylandOpcode(2),
+                touch.0.to_le_bytes().to_vec()
+            ))
+            .is_err());
+        assert!(core.input.touches.is_empty());
+    }
+
+    #[test]
+    fn seat_and_keyboard_release_do_not_remove_sibling_objects() {
+        let mut core = HeadlessWireCore::default();
+        let seat = WaylandObjectId(40);
+        let pointer = WaylandObjectId(41);
+        let keyboard = WaylandObjectId(42);
+        core.registry.register_client_object(seat, "wl_seat", 7).unwrap();
+        core.registry.register_client_object(pointer, "wl_pointer", 7).unwrap();
+        core.registry.register_client_object(keyboard, "wl_keyboard", 7).unwrap();
+        core.input.create_seat(seat, "seat0");
+        core.input.get_pointer(seat, pointer).unwrap();
+        core.input.get_keyboard(seat, keyboard).unwrap();
+        core.handle_wl_keyboard_release(WaylandMessage::new(keyboard, WaylandOpcode(0), vec![]))
+            .unwrap();
+        assert!(core.registry.get_object(pointer).is_ok());
+        core.handle_seat_release(WaylandMessage::new(seat, WaylandOpcode(3), vec![])).unwrap();
+        assert!(core.registry.get_object(pointer).is_ok());
+        assert!(core.input.pointers.contains_key(&pointer));
     }
 
     #[test]
@@ -2909,6 +3015,24 @@ impl HeadlessWireCore {
         }
         self.input.release_pointer(pointer_id)?;
         self.registry.destroy_object(pointer_id)
+    }
+
+    fn handle_wl_keyboard_release(&mut self, message: WaylandMessage) -> Result<()> {
+        if !message.payload.is_empty() {
+            return Err(WireError::ProtocolError("wl_keyboard.release payload is invalid".into()));
+        }
+        let keyboard_id = message.header.object_id;
+        self.input.release_keyboard(keyboard_id)?;
+        self.registry.destroy_object(keyboard_id)
+    }
+
+    fn handle_wl_touch_release(&mut self, message: WaylandMessage) -> Result<()> {
+        if !message.payload.is_empty() {
+            return Err(WireError::ProtocolError("wl_touch.release payload is invalid".into()));
+        }
+        let touch_id = message.header.object_id;
+        self.input.release_touch(touch_id)?;
+        self.registry.destroy_object(touch_id)
     }
 
     fn handle_get_layer_surface(&mut self, message: WaylandMessage) -> Result<()> {

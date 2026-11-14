@@ -1,0 +1,6 @@
+service=waylandd op=wayland_display event=production_listener_bound path=/run/user/1000/waybroker/wayland-tuff
+service=waylandd op=wayland_display event=client_connected path=/run/user/1000/waybroker/wayland-tuff mode=production
+service=waylandd op=dispatch event=failed client_id=1 object_id=27 opcode=1 size=24 payload=16 error=ProtocolError("unhandled opcode 1 for wl_region")
+service=waylandd op=wayland_display event=production_client_error path=/run/user/1000/waybroker/wayland-tuff reason=Protocol error: unhandled opcode 1 for wl_region
+Chrome log: Fatal Wayland communication error: Broken pipe.
+wl_seat opcode=2 unhandled: NOT OBSERVED after fix.

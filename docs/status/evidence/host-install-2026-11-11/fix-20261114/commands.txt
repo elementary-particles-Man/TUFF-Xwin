@@ -1,0 +1,26 @@
+revision=2026-11-14
+commit=9a4f1550901a9cc4aee9dc3168180ec8f95b7adc
+worktree=/mnt/thpdoc/Develop/.tuff-xwin-pr35-fix-20261114
+base_pr_head=536a6c3f134dbdcebd16325640b4b628a1a22700
+
+local_validation:
+cargo fmt --all --check => 0
+RUSTFLAGS='-D warnings' cargo check --all-targets => 0
+cargo test --all-targets => 0
+cargo clippy --all-targets --all-features -- -D warnings => 0
+bash scripts/dev-check.sh => 0
+run-waylandd-ipc-isolation-smoke.sh x10 => 0,0,0,0,0,0,0,0,0,0
+run-wayland-live-topology-epoch-smoke.sh => 0
+run-wayland-canonical-replay-isolation-smoke.sh => 0
+run-waylandd-displayd-reconnect-smoke.sh => 0
+run-integration-smoke.sh => 0
+
+install_and_runtime:
+bash scripts/install-user.sh => 0
+bash scripts/tuff-xwin-current-session.sh --profile host-wayland start => 0
+systemctl --user is-active tuff-xwin-current-session-waylandd.service => active
+socket=/run/user/1000/waybroker/wayland-tuff => present
+
+chrome:
+WAYLAND_DISPLAY=wayland-tuff XDG_RUNTIME_DIR=/run/user/1000/waybroker google-chrome-stable --ozone-platform=wayland --enable-features=UseOzonePlatform --user-data-dir=/tmp/tuff-xwin-chrome-profile.<temp> --no-first-run --no-default-browser-check about:blank
+=> connected; waylandd client_connected; wl_seat opcode=2 absent; wl_region opcode=1 unhandled; controlled exit 0
