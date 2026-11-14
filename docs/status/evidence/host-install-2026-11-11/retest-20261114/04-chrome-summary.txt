@@ -1,0 +1,19 @@
+---stderr---
+qt.qpa.wayland: zxdg_output_v1.done received on version 3 or newer, this is most likely a bug in the compositor
+[2422883:2422957:1114/152935.388867:ERROR:content/browser/browser_main_loop.cc:288] GLib: g_main_context_pop_thread_default: assertion 'stack != NULL' failed
+qt.qpa.wayland: Failed to initialize EGL display 3001
+Warning: fallback to QtQuick software backend.
+Gdk-Message: 15:29:35.669: Error flushing display: Broken pipe
+---socket---
+u_str LISTEN 0      4096                                        /run/user/1000/tuff-xwin-ops-20261111/wayland-tuff 11936413            * 0        users:(("waylandd",pid=2422519,fd=10))
+---errors---
+21:2026-11-14T15:29:22+09:00 main env[2422519]: service=waylandd op=wayland_display event=client_connected path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff mode=production
+28:2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=wayland_display event=client_connected path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff mode=production
+29:2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=dispatch event=failed client_id=2 object_id=6 opcode=2 size=12 payload=4 error=ProtocolError("unhandled opcode 2 for wl_seat")
+30:2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=wayland_display event=production_client_error path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff reason=Protocol error: unhandled opcode 2 for wl_seat
+31:2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=wayland_display event=client_connected path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff mode=production
+32:2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=dispatch event=failed client_id=3 object_id=13 opcode=2 size=12 payload=4 error=ProtocolError("unhandled opcode 2 for wl_seat")
+33:2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=wayland_display event=production_client_error path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff reason=Protocol error: unhandled opcode 2 for wl_seat
+34:2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=wayland_display event=client_connected path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff mode=production
+35:2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=dispatch event=failed client_id=4 object_id=6 opcode=2 size=12 payload=4 error=ProtocolError("unhandled opcode 2 for wl_seat")
+36:2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=wayland_display event=production_client_error path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff reason=Protocol error: unhandled opcode 2 for wl_seat

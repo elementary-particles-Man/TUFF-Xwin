@@ -3,6 +3,10 @@
 実行日: 2026-11-11 JST
 対象main: `954ffd1f5c421c24d4648c8e7fe9369d6386310e`
 
+追試日: 2026-11-14 JST（同一の永続source worktree）
+
+修正追試日: 2026-11-14 JST（IPC readiness待機修正）
+
 ## 結果
 
 - user-space release install: **PASS**。`~/.local/share/tuff-xwin` と `~/.local/bin` に実体を配置。
@@ -12,6 +16,21 @@
 - 指定software smoke: **PASS**。live-topology、canonical replay、displayd reconnect、IPC isolation、integration は全てexit 0。
 - KDE障害情報: 事実を採取。KWin main-thread hang、plasmashell QML binding loop / Qt警告、過去のplasmashell SIGABRTを確認。因果関係は断定していない。
 - cleanup: **PASS**。今回作成したTUFF current-sessionのみ停止・cleanup。KWin/Plasmaは継続稼働。
+
+## 2026-11-14 追試
+
+- 独立runtimeの6 unit、専用`wayland-tuff` socket、readinessは再度PASS。正しい`tuff-xwin-current-session.target`で確認した。
+- Chromeは専用endpointへ接続し`client_connected`を記録したが、`wl_seat opcode 2`未処理protocol errorでexit 1。ネイティブGUI PASSとは扱わない。
+- 指定5 smokeは全てexit 0。追試後はTUFF current-sessionのみ停止・runtime削除し、KWin/PlasmaのPID継続を確認。
+- KDEの7日分抽出とkernel/coredump照合を追試証跡へ追加。原因の断定はしていない。
+
+## 2026-11-14 IPC待機修正
+
+- `scripts/run-waylandd-ipc-isolation-smoke.sh` の通常起動と`--once`起動に、PID生存確認、`ECONNREFUSED`/`ENOENT`再接続、最大5秒の共通待機を適用。
+- 失敗時はcleanup前に`waylandd.log`/`waylandd-once.log`末尾をstderrへ出す。
+- IPC isolation smokeは10連続PASS。全指定Rust検証、dev-check、追加smokeもexit 0。
+- 実機再導入後、初回はdisplayd socket生成前の起動順競合でwaylanddが終了したが、TUFF専用targetのみ再起動して再成立。Chromeは再び接続後`wl_seat opcode 2`でexit 1。
+- 修正追試の詳細は [fix-20261114/](evidence/host-install-2026-11-11/fix-20261114/) に収録。
 
 ## 実コード変更
 
@@ -37,3 +56,5 @@
 - 収録対象: 76ファイル
 - redaction: 0件
 - 未収録: 91MBの未加工user journal全文のみ。関連KDE抽出は `evidence/kde/kde-user-filter.stdout` として収録。
+
+追試の一次証跡は [retest-20261114/](evidence/host-install-2026-11-11/retest-20261114/) に収録した。

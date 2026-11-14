@@ -1,0 +1,2 @@
+waybroker service=waylandd responsibility=wayland endpoint, client lifecycle, clipboard core
+service=waylandd op=readiness_check event=begin path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff

@@ -1,0 +1,4 @@
+scripts/run-waylandd-ipc-isolation-smoke.sh
+started=2026-11-14T15:29:51+09:00
+exit=0
+finished=2026-11-14T15:29:57+09:00

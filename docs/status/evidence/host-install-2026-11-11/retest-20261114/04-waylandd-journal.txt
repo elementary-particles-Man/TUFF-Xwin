@@ -1,0 +1,39 @@
+2026-11-14T15:29:12+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-14T15:29:12+09:00 main env[2422425]: waybroker service=waylandd responsibility=wayland endpoint, client lifecycle, clipboard core
+2026-11-14T15:29:12+09:00 main env[2422425]: service=waylandd op=surface_registry event=loaded generation=1 surfaces=2 clipboard_owner=konsole-1 primary_selection_owner=none timestamp=1794637752
+2026-11-14T15:29:12+09:00 main env[2422425]: Error: failed to query output inventory before serving IPC
+2026-11-14T15:29:12+09:00 main env[2422425]: Caused by:
+2026-11-14T15:29:12+09:00 main env[2422425]:     0: failed to connect to /run/user/1000/tuff-xwin-ops-20261111/displayd.sock
+2026-11-14T15:29:12+09:00 main env[2422425]:     1: No such file or directory (os error 2)
+2026-11-14T15:29:12+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-14T15:29:12+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Failed with result 'exit-code'.
+2026-11-14T15:29:13+09:00 main systemd[1601]: tuff-xwin-current-session-waylandd.service: Scheduled restart job, restart counter is at 1.
+2026-11-14T15:29:13+09:00 main systemd[1601]: Started tuff-xwin-current-session-waylandd.service - TUFF-Xwin current-session Wayland broker.
+2026-11-14T15:29:14+09:00 main env[2422519]: waybroker service=waylandd responsibility=wayland endpoint, client lifecycle, clipboard core
+2026-11-14T15:29:14+09:00 main env[2422519]: service=waylandd op=surface_registry event=loaded generation=1 surfaces=2 clipboard_owner=konsole-1 primary_selection_owner=none timestamp=1794637754
+2026-11-14T15:29:14+09:00 main env[2422519]: waylandd displayd_outputs=eDP-1:1920x1080@60Hz
+2026-11-14T15:29:14+09:00 main env[2422519]: service=waylandd op=topology event=reconnected epoch=1794637752906745646 sequence=0
+2026-11-14T15:29:14+09:00 main env[2422519]: service=waylandd op=wayland_display event=production_listener_bound path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff info="this listener handles real Wayland clients"
+2026-11-14T15:29:14+09:00 main env[2422519]: service=waylandd op=listen event=socket_bound path=/run/user/1000/tuff-xwin-ops-20261111/waylandd.sock
+2026-11-14T15:29:19+09:00 main env[2422519]: service=waylandd op=topology event=subscription_lost reason=failed to inspect IPC message prefix retry_ms=250
+2026-11-14T15:29:19+09:00 main env[2422519]: service=waylandd op=topology event=reconnect_pending reason=failed to inspect IPC message prefix
+2026-11-14T15:29:19+09:00 main env[2422519]: service=waylandd op=topology event=reconnected epoch=1794637752906745646 sequence=0
+2026-11-14T15:29:22+09:00 main env[2422519]: service=waylandd op=wayland_display event=client_connected path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff mode=production
+2026-11-14T15:29:24+09:00 main env[2422519]: service=waylandd op=topology event=subscription_lost reason=failed to inspect IPC message prefix retry_ms=250
+2026-11-14T15:29:24+09:00 main env[2422519]: service=waylandd op=topology event=reconnect_pending reason=failed to inspect IPC message prefix
+2026-11-14T15:29:24+09:00 main env[2422519]: service=waylandd op=topology event=reconnected epoch=1794637752906745646 sequence=0
+2026-11-14T15:29:29+09:00 main env[2422519]: service=waylandd op=topology event=subscription_lost reason=failed to inspect IPC message prefix retry_ms=250
+2026-11-14T15:29:29+09:00 main env[2422519]: service=waylandd op=topology event=reconnect_pending reason=failed to inspect IPC message prefix
+2026-11-14T15:29:30+09:00 main env[2422519]: service=waylandd op=topology event=reconnected epoch=1794637752906745646 sequence=0
+2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=wayland_display event=client_connected path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff mode=production
+2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=dispatch event=failed client_id=2 object_id=6 opcode=2 size=12 payload=4 error=ProtocolError("unhandled opcode 2 for wl_seat")
+2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=wayland_display event=production_client_error path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff reason=Protocol error: unhandled opcode 2 for wl_seat
+2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=wayland_display event=client_connected path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff mode=production
+2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=dispatch event=failed client_id=3 object_id=13 opcode=2 size=12 payload=4 error=ProtocolError("unhandled opcode 2 for wl_seat")
+2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=wayland_display event=production_client_error path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff reason=Protocol error: unhandled opcode 2 for wl_seat
+2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=wayland_display event=client_connected path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff mode=production
+2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=dispatch event=failed client_id=4 object_id=6 opcode=2 size=12 payload=4 error=ProtocolError("unhandled opcode 2 for wl_seat")
+2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=wayland_display event=production_client_error path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff reason=Protocol error: unhandled opcode 2 for wl_seat
+2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=topology event=subscription_lost reason=failed to inspect IPC message prefix retry_ms=250
+2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=topology event=reconnect_pending reason=failed to inspect IPC message prefix
+2026-11-14T15:29:35+09:00 main env[2422519]: service=waylandd op=topology event=reconnected epoch=1794637752906745646 sequence=0

@@ -6,6 +6,12 @@ runtime_dir="$(mktemp -d "${TMPDIR:-/tmp}/waybroker-waylandd-isolation.XXXXXX")"
 export WAYBROKER_RUNTIME_DIR="$runtime_dir"
 waylandd_pid=""
 cleanup() {
+  status=$?
+  if [[ $status -ne 0 ]]; then
+    for log in "$runtime_dir/waylandd.log" "$runtime_dir/waylandd-once.log"; do
+      if [[ -f "$log" ]]; then echo "--- ${log} (tail) ---" >&2; tail -n 80 "$log" >&2 || true; fi
+    done
+  fi
   if [[ -n "$waylandd_pid" ]] && kill -0 "$waylandd_pid" 2>/dev/null; then kill "$waylandd_pid" 2>/dev/null || true; wait "$waylandd_pid" 2>/dev/null || true; fi
   rm -rf "$runtime_dir"
 }
@@ -15,16 +21,38 @@ registry_source="$repo_root/examples/minimal-scene/surface-registry.json"
 cargo build -p waylandd >/dev/null
 "$target_dir/waylandd" --serve-ipc --no-vulkan --registry "$registry_source" >"$runtime_dir/waylandd.log" 2>&1 &
 waylandd_pid=$!
-for _ in $(seq 1 100); do [[ -S "$runtime_dir/waylandd.sock" ]] && break; sleep 0.05; done
-[[ -S "$runtime_dir/waylandd.sock" ]] && kill -0 "$waylandd_pid"
+python3 - "$runtime_dir/waylandd.sock" "$waylandd_pid" <<'PY'
+import errno, os, socket, sys, time
+path, pid = sys.argv[1], int(sys.argv[2])
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    if not os.path.exists(f"/proc/{pid}"): raise SystemExit("waylandd exited before socket readiness")
+    if os.path.exists(path):
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); sock.settimeout(.2); sock.connect(path); sock.close(); break
+        except OSError as exc:
+            if exc.errno not in (errno.ECONNREFUSED, errno.ENOENT): raise
+    time.sleep(.05)
+else: raise SystemExit("timed out waiting for waylandd socket readiness")
+PY
 python3 - "$runtime_dir/waylandd.sock" "$waylandd_pid" "$runtime_dir/session-default-single-session-surface-registry.json" <<'PY'
-import json, os, socket, sys, time
+import errno, json, os, socket, sys, time
 path, pid, artifact = sys.argv[1:]
 pid = int(pid)
 nl = bytes([10])
+def connect_ready():
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not os.path.exists(f"/proc/{pid}"): raise RuntimeError("waylandd exited before IPC connect")
+        try:
+            sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); sock.settimeout(2); sock.connect(path); return sock
+        except OSError as exc:
+            if exc.errno not in (errno.ECONNREFUSED, errno.ENOENT): raise
+            time.sleep(.05)
+    raise RuntimeError("timed out waiting for IPC connection")
 def request(payload, destination="waylandd"):
     msg = {"source":"compd", "destination":destination, "kind":{"kind":"wayland-command", "payload":payload}}
-    sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); sock.settimeout(8); sock.connect(path); sock.sendall(json.dumps(msg).encode()+nl); data=b""
+    sock=connect_ready(); sock.sendall(json.dumps(msg).encode()+nl); data=b""
     while nl not in data:
         chunk=sock.recv(65536)
         if not chunk: raise RuntimeError("closed")
@@ -36,9 +64,9 @@ def registry():
     return response["kind"]["payload"]["snapshot"]
 initial=registry()
 if initial["generation"] == 0 or not initial["surfaces"]: raise RuntimeError(initial)
-sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); sock.settimeout(2); sock.connect(path); sock.sendall(b"not-json"+nl); sock.close(); time.sleep(.05); os.kill(pid,0)
-sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); sock.settimeout(2); sock.connect(path); sock.close(); time.sleep(.05); os.kill(pid,0)
-sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); sock.settimeout(2); sock.connect(path); time.sleep(6)
+sock=connect_ready(); sock.sendall(b"not-json"+nl); sock.close(); time.sleep(.05); os.kill(pid,0)
+sock=connect_ready(); sock.close(); time.sleep(.05); os.kill(pid,0)
+sock=connect_ready(); time.sleep(6)
 if sock.recv(1): raise RuntimeError("idle response")
 sock.close(); os.kill(pid,0)
 rejected=request({"op":"get-surface-registry"},"displayd")
@@ -57,14 +85,23 @@ PY
 kill "$waylandd_pid"; wait "$waylandd_pid" 2>/dev/null || true; waylandd_pid=""
 "$target_dir/waylandd" --serve-ipc --once --no-vulkan --registry "$registry_source" >"$runtime_dir/waylandd-once.log" 2>&1 &
 waylandd_pid=$!
-for _ in $(seq 1 100); do [[ -S "$runtime_dir/waylandd.sock" ]] && break; sleep 0.05; done
 python3 - "$runtime_dir/waylandd.sock" "$waylandd_pid" <<'PY'
-import json, os, socket, sys, time
+import errno, json, os, socket, sys, time
 path, pid=sys.argv[1:]
 pid=int(pid); nl=bytes([10])
-sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); sock.settimeout(2); sock.connect(path); sock.sendall(b"not-json"+nl); sock.close(); time.sleep(.1); os.kill(pid,0)
+def connect_ready():
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not os.path.exists(f"/proc/{pid}"): raise RuntimeError("waylandd --once exited before IPC connect")
+        try:
+            sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); sock.settimeout(2); sock.connect(path); return sock
+        except OSError as exc:
+            if exc.errno not in (errno.ECONNREFUSED, errno.ENOENT): raise
+            time.sleep(.05)
+    raise RuntimeError("timed out waiting for --once IPC connection")
+sock=connect_ready(); sock.sendall(b"not-json"+nl); sock.close(); time.sleep(.1); os.kill(pid,0)
 msg={"source":"compd","destination":"waylandd","kind":{"kind":"wayland-command","payload":{"op":"get-surface-registry"}}}
-sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); sock.settimeout(8); sock.connect(path); sock.sendall(json.dumps(msg).encode()+nl); data=b""
+sock=connect_ready(); sock.sendall(json.dumps(msg).encode()+nl); data=b""
 while nl not in data:
     chunk=sock.recv(65536)
     if not chunk: raise RuntimeError("once closed")
