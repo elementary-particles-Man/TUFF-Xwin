@@ -49,6 +49,13 @@
 - portal実キャプチャ: 同意UIを自動承認せず、実キャプチャPASSにはしていない。
 - KDEの根因確定: ログ証跡のみで、設定変更・再起動・ドライバ変更は行っていない。
 
+## 2026-11-14 wl_seat修正追試
+
+- `9a4f1550901a9cc4aee9dc3168180ec8f95b7adc`で`wl_seat.get_touch`、各release、touch状態管理、capabilities=3を実装。
+- 修正版release binaryを`install-user.sh`で再導入し、専用current-sessionと`/run/user/1000/waybroker/wayland-tuff`を起動。
+- 実Chromeは専用endpointへ接続し、`wl_seat opcode=2`は再発しなかった。次に`wl_region opcode=1`が未対応として観測され、今回の対象外のためChrome GUI PASSとは扱わない。
+- IPC isolation smokeは10連続PASS。詳細は [fix-20261114/](evidence/host-install-2026-11-11/fix-20261114/) を参照。
+
 ## 一次証跡
 
 実行コマンド、終了コード、stdout/stderr、サービス状態、Chrome接続、KDE抽出は [EVIDENCE_INDEX.md](evidence/host-install-2026-11-11/EVIDENCE_INDEX.md) から参照できる。収録ファイルのSHA-256とサイズは [MANIFEST.json](evidence/host-install-2026-11-11/MANIFEST.json) に記録した。

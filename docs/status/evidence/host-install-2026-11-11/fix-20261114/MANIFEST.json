@@ -1,0 +1,13 @@
+{
+  "schema": "tuff-xwin/host-install-evidence-manifest/v1",
+  "collected_at": "2026-11-14",
+  "redactions": 0,
+  "files": [
+    {"destination_relative_path":"docs/status/evidence/host-install-2026-11-11/fix-20261114/README.md","sha256":"5a7d6480ba6f4dd1f5ef393e42d21378dd445db0a535e963e4b7270f9b5ba249","bytes":1873,"evidence_kind":"summary","status":"collected"},
+    {"destination_relative_path":"docs/status/evidence/host-install-2026-11-11/fix-20261114/commands.txt","sha256":"b63c612922943c31e6b26ccb62355f2d56baabc0be61952feaaafd33e838a27d","bytes":1293,"evidence_kind":"command-log","status":"collected"},
+    {"destination_relative_path":"docs/status/evidence/host-install-2026-11-11/fix-20261114/waylandd-journal.txt","sha256":"79efe1a224946099a9e2e310446c8efc2f9f155d3184152e881212e6518cba78","bytes":657,"evidence_kind":"runtime-log","status":"collected"},
+    {"destination_relative_path":"docs/status/evidence/host-install-2026-11-11/fix-20261114/EVIDENCE_INDEX.md","sha256":"9f22593386aa0885eba7af4d039304349032cddb328a08a8aeb9b47b99ba7921","bytes":502,"evidence_kind":"index","status":"collected"}
+  ],
+  "missing": [],
+  "redaction_notes": []
+}
