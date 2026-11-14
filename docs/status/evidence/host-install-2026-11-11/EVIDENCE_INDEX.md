@@ -14,6 +14,11 @@
 - [04-chrome-summary.txt](04-chrome-summary.txt): Chrome専用endpoint接続とexit 1の実証
 - [07-cleanup.txt](07-cleanup.txt): cleanup前後、KWin/Plasma継続確認
 
+## 2026-11-14 追試
+
+- [retest-20261114/](retest-20261114/): 独立runtime再起動、正しいunit状態、readiness、Chrome接続、5 smoke、KDE抽出、cleanupの一次ログ。
+- `retest-20261114/smokes/OVERALL.status` は `overall=0`。Chromeは`retest-20261114/04-waylandd-journal.txt`に`wl_seat opcode 2`エラーを記録。
+
 ## software
 
 - [software/](software/): fmt、check、test、Clippy、dev-checkの各command/stdout/stderr/status

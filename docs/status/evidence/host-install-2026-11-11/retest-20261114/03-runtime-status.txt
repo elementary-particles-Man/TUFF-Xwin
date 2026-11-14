@@ -1,0 +1,28 @@
+timestamp=2026-11-14T15:29:22+09:00
+tuff-xwin-current-session-target.target=inactive
+tuff-xwin-current-session-displayd.service=active
+tuff-xwin-current-session-waylandd.service=active
+tuff-xwin-current-session-lockd.service=active
+tuff-xwin-current-session-watchdog.service=active
+tuff-xwin-current-session-sessiond.service=active
+sockets
+compd.sock
+displayd.sock
+lockd.sock
+sessiond.sock
+watchdog.sock
+wayland-tuff
+waylandd.sock
+processes
+2422524 /home/flux/.local/share/tuff-xwin/bin/compd --serve-ipc --session-instance-id current-session
+2422651 /bin/bash -c sleep 3; run=/home/flux/.local/state/tuff-xwin-host-install-20261111; runtime=/run/user/1000/tuff-xwin-ops-20261111; export XDG_RUNTIME_DIR=/run/user/1000; {  echo timestamp=$(date -Is); for u in target displayd waylandd lockd watchdog sessiond; do unit=tuff-xwin-current-session-$u; [ "$u" = target ] && unit=$unit.target || unit=$unit.service; echo "$unit=$(systemctl --user is-active "$unit" 2>&1)"; done; echo sockets; find "$runtime" -maxdepth 1 -type s -printf '%f\n' | sort; echo processes; pgrep -a -f '/home/flux/.local/share/tuff-xwin/bin/(displayd|waylandd|compd|lockd|watchdog|sessiond)' || true; echo readiness; /home/flux/.local/share/tuff-xwin/bin/waylandd --check-readiness "$runtime/wayland-tuff" >"$run/evidence/retest-20261114/03-readiness.stdout" 2>"$run/evidence/retest-20261114/03-readiness.stderr"; echo exit=$?; cat "$run/evidence/retest-20261114/03-readiness.stdout"; cat "$run/evidence/retest-20261114/03-readiness.stderr"; echo kwin; pgrep -a kwin_wayland; echo plasma; pgrep -a plasmashell || true; } > "$run/evidence/retest-20261114/03-runtime-status.txt" 2>&1; cat "$run/evidence/retest-20261114/03-runtime-status.txt"
+readiness
+exit=0
+waybroker service=waylandd responsibility=wayland endpoint, client lifecycle, clipboard core
+service=waylandd op=readiness_check event=begin path=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff
+service=waylandd op=readiness_check event=success
+kwin
+1967 /usr/bin/kwin_wayland_wrapper --xwayland
+2016 /usr/bin/kwin_wayland --wayland-fd 7 --socket wayland-0 --xwayland-fd 8 --xwayland-fd 9 --xwayland-display :0 --xwayland-xauthority /run/user/1000/xauth_cgmgEc --xwayland
+plasma
+2707 /usr/bin/plasmashell --no-respawn

@@ -1,0 +1,4 @@
+scripts/run-wayland-canonical-replay-isolation-smoke.sh
+started=2026-11-14T15:29:45+09:00
+exit=0
+finished=2026-11-14T15:29:50+09:00

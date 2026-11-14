@@ -1,0 +1,4 @@
+==> stopping only compd with two native clients connected
+==> restarting compd and waiting for shared presentation callbacks
+canonical_replay retry_failures=6 callback_A=1 callback_B=1
+WAYLAND CANONICAL REPLAY ISOLATION SMOKE TEST PASSED
