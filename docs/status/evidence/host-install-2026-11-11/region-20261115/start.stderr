@@ -1,0 +1,16 @@
+usage: tuff-xwin-current-session.sh [options] <command>
+
+Commands:
+  start      Create transient user units and start TUFF-Xwin in this session
+  status     Show TUFF-Xwin and Plasma/KWin process state
+  takeover   Stop Plasma/KWin after TUFF-Xwin is active
+  unmask-plasma
+             Remove runtime Plasma/KWin masks created for takeover
+  stop       Stop the transient TUFF-Xwin current-session target
+  cleanup    Stop target, remove transient units, and daemon-reload
+
+Options:
+  --profile ID              Profile to select before start (default: host-wayland)
+  --session-instance-id ID  Session instance id (default: current-session)
+  --runtime-mask-plasma     During takeover, runtime-mask Plasma/KWin units too
+  -h, --help                Show this help
