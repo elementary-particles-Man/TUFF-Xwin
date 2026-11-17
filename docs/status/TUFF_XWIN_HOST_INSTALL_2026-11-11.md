@@ -5,6 +5,8 @@
 
 追試日: 2026-11-14 JST（同一の永続source worktree）
 
+wl_region追試日: 2026-11-17 JST（fix/wl-region-chrome-20261115）
+
 修正追試日: 2026-11-14 JST（IPC readiness待機修正）
 
 ## 結果
@@ -65,3 +67,5 @@
 - 未収録: 91MBの未加工user journal全文のみ。関連KDE抽出は `evidence/kde/kde-user-filter.stdout` として収録。
 
 追試の一次証跡は [retest-20261114/](evidence/host-install-2026-11-11/retest-20261114/) に収録した。
+
+2026-11-17の`wl_region`実装とChrome追試の一次証跡は [region-20261115/](evidence/host-install-2026-11-11/region-20261115/) に収録した。`wl_region` protocol errorは0件となったが、次の未実装要求は`xdg_toplevel` opcode 8であり、Chrome GUI描画・presentation・DRM/pageflipは未達と判定した。

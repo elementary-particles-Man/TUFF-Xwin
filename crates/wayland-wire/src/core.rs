@@ -573,6 +573,9 @@ impl HeadlessWireCore {
             ("wl_registry", 0) => self.handle_registry_bind(message)?,
             ("wl_compositor", 0) => self.handle_create_surface(message)?,
             ("wl_compositor", 1) => self.handle_create_region(message)?,
+            ("wl_region", 0) => self.handle_region_destroy(message)?,
+            ("wl_region", 1) => self.handle_region_add(message)?,
+            ("wl_region", 2) => self.handle_region_subtract(message)?,
             ("wl_seat", 0) => self.handle_seat_get_pointer(message)?,
             ("wl_seat", 1) => self.handle_seat_get_keyboard(message)?,
             ("wl_seat", 2) => self.handle_seat_get_touch(message)?,
@@ -584,6 +587,8 @@ impl HeadlessWireCore {
             ("wl_surface", 1) => self.handle_surface_attach(message)?,
             ("wl_surface", 2) => self.handle_surface_damage(message)?,
             ("wl_surface", 3) => self.handle_surface_frame(message)?,
+            ("wl_surface", 4) => self.handle_surface_set_opaque_region(message)?,
+            ("wl_surface", 5) => self.handle_surface_set_input_region(message)?,
             ("wl_surface", 6) => self.handle_surface_commit(message)?,
             ("wl_surface", 9) => self.handle_surface_damage(message)?,
             ("wl_shm", 0) => self.handle_shm_create_pool(message, fd_queue, &args)?,
@@ -1027,8 +1032,10 @@ impl HeadlessWireCore {
     }
 
     fn handle_create_region(&mut self, message: WaylandMessage) -> Result<()> {
-        if message.payload.len() < 4 {
-            return Err(WireError::Incomplete);
+        if message.payload.len() != 4 {
+            return Err(WireError::ProtocolError(
+                "wl_compositor.create_region payload is invalid".into(),
+            ));
         }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
         if !self.surfaces.regions.contains_key(&id)
@@ -1039,6 +1046,38 @@ impl HeadlessWireCore {
         self.registry.register_client_object(id, "wl_region", 1)?;
         self.surfaces.create_region(id);
         Ok(())
+    }
+
+    fn region_rect(message: &WaylandMessage) -> Result<crate::surface::Rect> {
+        if message.payload.len() != 16 {
+            return Err(WireError::ProtocolError("wl_region rectangle payload is invalid".into()));
+        }
+        let x = LittleEndian::read_i32(&message.payload[0..4]);
+        let y = LittleEndian::read_i32(&message.payload[4..8]);
+        let width = LittleEndian::read_i32(&message.payload[8..12]);
+        let height = LittleEndian::read_i32(&message.payload[12..16]);
+        crate::surface::Rect::validate_region_rect(x, y, width, height)
+    }
+
+    fn handle_region_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        if !message.payload.is_empty() {
+            return Err(WireError::ProtocolError("wl_region.destroy payload is invalid".into()));
+        }
+        self.surfaces
+            .regions
+            .remove(&message.header.object_id)
+            .ok_or(WireError::InvalidObjectId(message.header.object_id.0))?;
+        self.registry.destroy_object(message.header.object_id)
+    }
+
+    fn handle_region_add(&mut self, message: WaylandMessage) -> Result<()> {
+        let rect = Self::region_rect(&message)?;
+        self.surfaces.region_add(message.header.object_id, rect)
+    }
+
+    fn handle_region_subtract(&mut self, message: WaylandMessage) -> Result<()> {
+        let rect = Self::region_rect(&message)?;
+        self.surfaces.region_subtract(message.header.object_id, rect)
     }
 
     fn handle_surface_destroy(&mut self, message: WaylandMessage) -> Result<()> {
@@ -1106,6 +1145,45 @@ impl HeadlessWireCore {
             surface.pending.buffer_id = if buffer_id.0 == 0 { None } else { Some(buffer_id) };
             surface.pending.offset_x = x;
             surface.pending.offset_y = y;
+        }
+        Ok(())
+    }
+
+    fn surface_region_snapshot(&self, raw: u32) -> Result<Option<Vec<crate::surface::Rect>>> {
+        if raw == 0 {
+            return Ok(None);
+        }
+        let id = WaylandObjectId(raw);
+        let object = self.registry.get_object(id)?;
+        if object.interface != "wl_region" {
+            return Err(WireError::ProtocolError("surface region object is not wl_region".into()));
+        }
+        Ok(Some(self.surfaces.region_snapshot(id)?))
+    }
+
+    fn handle_surface_set_opaque_region(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() != 4 {
+            return Err(WireError::ProtocolError(
+                "wl_surface.set_opaque_region payload is invalid".into(),
+            ));
+        }
+        let region = self.surface_region_snapshot(LittleEndian::read_u32(&message.payload))?;
+        if let Some(surface) = self.surfaces.surfaces.get_mut(&message.header.object_id) {
+            surface.pending.opaque_region = Some(region.unwrap_or_default());
+        }
+        Ok(())
+    }
+
+    fn handle_surface_set_input_region(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() != 4 {
+            return Err(WireError::ProtocolError(
+                "wl_surface.set_input_region payload is invalid".into(),
+            ));
+        }
+        let raw = LittleEndian::read_u32(&message.payload);
+        let region = self.surface_region_snapshot(raw)?;
+        if let Some(surface) = self.surfaces.surfaces.get_mut(&message.header.object_id) {
+            surface.pending.input_region = if raw == 0 { None } else { region };
         }
         Ok(())
     }

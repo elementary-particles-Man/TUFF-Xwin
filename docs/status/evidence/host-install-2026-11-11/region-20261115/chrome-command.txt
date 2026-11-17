@@ -1,0 +1,1 @@
+timeout 12s env WAYLAND_DISPLAY=/run/user/1000/tuff-xwin-ops-20261111/wayland-tuff DISPLAY= google-chrome-stable --ozone-platform=wayland --no-first-run --disable-sync --disable-extensions --user-data-dir=/run/user/1000/tuff-xwin-ops-20261111/chrome-test-profile-region-20261115 about:blank

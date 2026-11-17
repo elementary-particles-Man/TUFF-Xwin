@@ -24,6 +24,10 @@
 - [fix-20261114/](fix-20261114/): 修正スクリプト、IPC 10連続PASS、全体検証、実機再導入、起動順競合の初回失敗と再起動後のChrome接続、cleanup。
 - `fix-20261114/04-waylandd.log` は再成立後の`client_connected`と`wl_seat opcode 2`を収録。`fix-20261114/06-restart.stderr`等は初回起動競合の終了記録。
 
+## 2026-11-17 wl_region
+
+- [region-20261115/](region-20261115/): wl_region実装、Rust検証、user-space再導入、Chrome接続、次の未実装要求、cleanupの一次証跡。
+
 ## software
 
 - [software/](software/): fmt、check、test、Clippy、dev-checkの各command/stdout/stderr/status
