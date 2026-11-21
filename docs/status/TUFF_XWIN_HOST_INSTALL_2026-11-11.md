@@ -69,3 +69,7 @@ wl_region追試日: 2026-11-17 JST（fix/wl-region-chrome-20261115）
 追試の一次証跡は [retest-20261114/](evidence/host-install-2026-11-11/retest-20261114/) に収録した。
 
 2026-11-17の`wl_region`実装とChrome追試の一次証跡は [region-20261115/](evidence/host-install-2026-11-11/region-20261115/) に収録した。`wl_region` protocol errorは0件となったが、次の未実装要求は`xdg_toplevel` opcode 8であり、Chrome GUI描画・presentation・DRM/pageflipは未達と判定した。
+
+2026-11-21の`xdg_toplevel` v6実装では、opcode 0–13、toplevel lifecycle、親循環、seat/serial、resize edge、min/max pending/current、fullscreen output、configure/wm_capabilitiesを追加した。実機Chromeの再試験と新証跡は今回のPRで追記する。PR37の既存region証跡は10ログを回収し、`build-and-tests.log`原本のみ欠落としてmanifestへ明記した。
+
+2026-11-22の実機再試験では、Chromeの専用endpoint接続とexit 0、xdg_toplevel未実装要求0件を確認した。`presentation rejected`とstale scene rejectionが残り、surface commit/presentation・GUI描画は未達とした。詳細は [xdg-toplevel-20261120/](evidence/host-install-2026-11-11/xdg-toplevel-20261120/)。

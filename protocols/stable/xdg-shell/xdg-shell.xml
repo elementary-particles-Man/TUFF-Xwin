@@ -79,12 +79,49 @@
     <request name="set_app_id">
       <arg name="app_id" type="string"/>
     </request>
+    <request name="show_window_menu">
+      <arg name="seat" type="object" interface="wl_seat"/>
+      <arg name="serial" type="uint"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+    <request name="move">
+      <arg name="seat" type="object" interface="wl_seat"/>
+      <arg name="serial" type="uint"/>
+    </request>
+    <request name="resize">
+      <arg name="seat" type="object" interface="wl_seat"/>
+      <arg name="serial" type="uint"/>
+      <arg name="edges" type="uint"/>
+    </request>
+    <request name="set_max_size">
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+    <request name="set_min_size">
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+    <request name="set_maximized"/>
+    <request name="unset_maximized"/>
+    <request name="set_fullscreen">
+      <arg name="output" type="object" interface="wl_output" allow-null="true"/>
+    </request>
+    <request name="unset_fullscreen"/>
+    <request name="set_minimized"/>
     <event name="configure">
       <arg name="width" type="int"/>
       <arg name="height" type="int"/>
       <arg name="states" type="array"/>
     </event>
     <event name="close"/>
+    <event name="configure_bounds">
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+    <event name="wm_capabilities">
+      <arg name="capabilities" type="array"/>
+    </event>
   </interface>
 
   <interface name="xdg_popup" version="6">

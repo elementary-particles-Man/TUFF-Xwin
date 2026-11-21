@@ -1,0 +1,97 @@
+{
+  "schema": "tuff-xwin/xdg-toplevel-evidence-manifest/v1",
+  "collected_at": "2026-11-22T00:10:00+09:00",
+  "redactions": 0,
+  "files": [
+    {
+      "path": "EVIDENCE_INDEX.md",
+      "sha256": "8b82bfd2b615d70607473820ce430613c8d5fdcc0a772d089d4905e0f230193b",
+      "bytes": 448
+    },
+    {
+      "path": "RESULT.json",
+      "sha256": "61e43e565d77d0ce92e845109066b6a990834839a4487408ab352297717bd44c",
+      "bytes": 430
+    },
+    {
+      "path": "RESULT.md",
+      "sha256": "fa677c420aa1d6f401a21b117d66cf06321518a509a9912919a1b25601c7f695",
+      "bytes": 974
+    },
+    {
+      "path": "commands.txt",
+      "sha256": "530cc3a729c12e1270effba0906bdeaae5196b4db31823d86e73bbcfc2f0bd68",
+      "bytes": 681
+    },
+    {
+      "path": "install.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "bytes": 2
+    },
+    {
+      "path": "install.stderr",
+      "sha256": "8411c01a19451a0182232edc5480c7da3a40038bb5838e8ed220766f132f60a5",
+      "bytes": 1604
+    },
+    {
+      "path": "install.stdout",
+      "sha256": "20e29e938c2dcb3385eaaa1ffad4da4a515fb89a4466c37bded56c7628c1f461",
+      "bytes": 440
+    },
+    {
+      "path": "installed-waylandd.sha256",
+      "sha256": "7e9f503bc845b55513ac1123dce3c1887529a59d4e2536a66eb00f8a91491ad5",
+      "bytes": 113
+    },
+    {
+      "path": "kwin-plasma-end.txt",
+      "sha256": "c6c4cce4eed774750f3edd8972448e8e6371285c432674964b9d1710c541d05f",
+      "bytes": 2621
+    },
+    {
+      "path": "kwin-plasma-start.txt",
+      "sha256": "327ff433aecd22870bcf1ac5a1d70673f0df3dd6f4fb1827575b9e31bd783f66",
+      "bytes": 3210
+    },
+    {
+      "path": "primary-end.status",
+      "sha256": "ab0e70c52737980082b8bcb29a1fcb963fd28b2a2fb9ecc84e71abd1b3adf12e",
+      "bytes": 243
+    },
+    {
+      "path": "primary-start.status",
+      "sha256": "ab0e70c52737980082b8bcb29a1fcb963fd28b2a2fb9ecc84e71abd1b3adf12e",
+      "bytes": 243
+    },
+    {
+      "path": "retry2-chrome-stderr.log",
+      "sha256": "d5c002593949607bce051db9c55197b63f5757ca357a077d0f48d752224c7046",
+      "bytes": 257
+    },
+    {
+      "path": "retry2-chrome-stdout.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "retry2-chrome.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "bytes": 2
+    },
+    {
+      "path": "retry2-cleanup.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "retry2-waylandd-journal.log",
+      "sha256": "d3e3d1d3aad461a31edc96d7dc386cca6449f1e73a38aba7e51907347bb291f6",
+      "bytes": 10560
+    },
+    {
+      "path": "runtime-status.log",
+      "sha256": "868b8921811fbfcefd92c12ee78ff8151b9bec960f7b9eb1edf0a01d4e418c91",
+      "bytes": 287
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+   Compiling waybroker-common v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/crates/waybroker-common)
+   Compiling libspa-sys v0.10.0
+   Compiling xwin-sec v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/crates/xwin-sec)
+   Compiling vulkan-backend v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/crates/vulkan-backend)
+   Compiling layerx11-common v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/LeyerX11/crates/layerx11-common)
+   Compiling wayland-wire v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/crates/wayland-wire)
+   Compiling xwin-screenshot v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/apps/screenshot)
+   Compiling watchdog v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/crates/watchdog)
+   Compiling x11bridge v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/LeyerX11/crates/x11bridge)
+   Compiling lockd v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/crates/lockd)
+   Compiling sessiond v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/crates/sessiond)
+   Compiling compd v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/crates/compd)
+   Compiling pipewire-sys v0.10.0
+   Compiling libspa v0.10.0
+   Compiling waylandd v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/crates/waylandd)
+   Compiling pipewire v0.10.0
+   Compiling displayd v0.1.0 (/home/flux/.local/share/tuff-xwin/xdg-toplevel-v6-chrome/crates/displayd)
+    Finished `release` profile [optimized] target(s) in 43.56s
