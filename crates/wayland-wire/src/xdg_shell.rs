@@ -9,6 +9,20 @@ pub struct XdgSurfaceState {
     pub window_geometry: Option<(i32, i32, i32, i32)>,
     pub title: Option<String>,
     pub app_id: Option<String>,
+    pub toplevel_id: Option<WaylandObjectId>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToplevelState {
+    pub xdg_surface_id: WaylandObjectId,
+    pub parent_id: Option<WaylandObjectId>,
+    pub pending_min_size: (i32, i32),
+    pub pending_max_size: (i32, i32),
+    pub current_min_size: (i32, i32),
+    pub current_max_size: (i32, i32),
+    pub maximized: bool,
+    pub fullscreen: bool,
+    pub minimized: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -32,6 +46,7 @@ pub struct PopupState {
 #[derive(Default)]
 pub struct XdgShellManager {
     pub surfaces: HashMap<WaylandObjectId, XdgSurfaceState>,
+    pub toplevels: HashMap<WaylandObjectId, ToplevelState>,
     pub positioners: HashMap<WaylandObjectId, PositionerState>,
     pub popups: HashMap<WaylandObjectId, PopupState>,
     next_serial: u32,
@@ -41,6 +56,7 @@ impl XdgShellManager {
     pub fn new() -> Self {
         Self {
             surfaces: HashMap::new(),
+            toplevels: HashMap::new(),
             positioners: HashMap::new(),
             popups: HashMap::new(),
             next_serial: 1,
@@ -71,6 +87,17 @@ impl XdgShellManager {
         self.popups.insert(id, PopupState { xdg_surface_id, parent_id, positioner });
         Ok(())
     }
+
+    pub fn commit_toplevel_for_surface(&mut self, wl_surface_id: WaylandObjectId) {
+        let Some((_, toplevel)) = self.toplevels.iter_mut().find(|(_, toplevel)| {
+            self.surfaces.get(&toplevel.xdg_surface_id).map(|surface| surface.wl_surface_id)
+                == Some(wl_surface_id)
+        }) else {
+            return;
+        };
+        toplevel.current_min_size = toplevel.pending_min_size;
+        toplevel.current_max_size = toplevel.pending_max_size;
+    }
 }
 
 impl XdgSurfaceState {
@@ -82,6 +109,7 @@ impl XdgSurfaceState {
             window_geometry: None,
             title: None,
             app_id: None,
+            toplevel_id: None,
         }
     }
 }

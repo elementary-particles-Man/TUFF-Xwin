@@ -1,0 +1,13 @@
+git fetch origin main
+cargo fmt --all --check
+RUSTFLAGS='-D warnings' cargo check --all-targets
+cargo test --all-targets
+cargo clippy --all-targets --all-features -- -D warnings
+bash scripts/dev-check.sh
+bash scripts/run-waylandd-ipc-isolation-smoke.sh
+bash scripts/run-wayland-live-topology-epoch-smoke.sh
+bash scripts/run-wayland-canonical-replay-isolation-smoke.sh
+bash scripts/run-waylandd-displayd-reconnect-smoke.sh
+bash scripts/run-integration-smoke.sh
+bash scripts/install-user.sh
+timeout 12s env WAYLAND_DISPLAY=<TUFF socket> DISPLAY= google-chrome-stable --ozone-platform=wayland --no-first-run --disable-sync --disable-extensions --user-data-dir=<temporary> about:blank

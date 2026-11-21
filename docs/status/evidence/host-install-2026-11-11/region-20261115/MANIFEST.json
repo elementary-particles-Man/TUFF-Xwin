@@ -1,12 +1,12 @@
 {
   "schema": "tuff-xwin/region-evidence-manifest/v1",
-  "collected_at": "2026-11-17T23:00:00+09:00",
+  "collected_at": "2026-11-21T23:00:00+09:00",
   "redactions": 0,
   "files": [
     {
       "path": "EVIDENCE_INDEX.md",
-      "sha256": "1c901ec2b4ad9a1e538febe7532b52467b7e01758ae39bf4f36164c51d73cdde",
-      "bytes": 453
+      "sha256": "637a0b502ffdff8b81e0df18019e4b2fae2777251331ae634328b708b58e0bf7",
+      "bytes": 763
     },
     {
       "path": "RESULT.json",
@@ -17,11 +17,6 @@
       "path": "RESULT.md",
       "sha256": "69eef4a4b2c90ffaa55926c327514026cf51284884888dc40a75161d1831e4c0",
       "bytes": 1337
-    },
-    {
-      "path": "build-and-tests.log",
-      "sha256": "20e29e938c2dcb3385eaaa1ffad4da4a515fb89a4466c37bded56c7628c1f461",
-      "bytes": 440
     },
     {
       "path": "chrome-command.txt",
@@ -160,8 +155,8 @@
     },
     {
       "path": "runtime-status.log",
-      "sha256": "fdbf9a7a8d0c4d5d210770a1fd3b18fa134630a0d207973fea0278f700d95ca8",
-      "bytes": 586
+      "sha256": "7d09a679e4b0ab30783e8af8945eca73926bb882e40fd91500348ea60fdf727a",
+      "bytes": 299
     },
     {
       "path": "start.exit",
@@ -182,6 +177,13 @@
       "path": "waylandd-journal.log",
       "sha256": "19c4e28b2f54ea8f217db4e622b0a5c758efa7b77ce2dc0394b6d159568c0b2e",
       "bytes": 17
+    }
+  ],
+  "missing": [
+    {
+      "path": "build-and-tests.log",
+      "status": "missing",
+      "reason": "指定名の原本はローカルstateにも現存せず、別ログで代替しない"
     }
   ]
 }

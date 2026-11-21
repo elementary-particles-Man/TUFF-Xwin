@@ -607,6 +607,16 @@ impl HeadlessWireCore {
             ("xdg_toplevel", 1) => self.handle_xdg_toplevel_set_parent(message)?,
             ("xdg_toplevel", 2) => self.handle_xdg_toplevel_set_title(message, &args)?,
             ("xdg_toplevel", 3) => self.handle_xdg_toplevel_set_app_id(message, &args)?,
+            ("xdg_toplevel", 4) => self.handle_xdg_toplevel_show_window_menu(message)?,
+            ("xdg_toplevel", 5) => self.handle_xdg_toplevel_move(message)?,
+            ("xdg_toplevel", 6) => self.handle_xdg_toplevel_resize(message)?,
+            ("xdg_toplevel", 7) => self.handle_xdg_toplevel_set_max_size(message)?,
+            ("xdg_toplevel", 8) => self.handle_xdg_toplevel_set_min_size(message)?,
+            ("xdg_toplevel", 9) => self.handle_xdg_toplevel_set_maximized(message)?,
+            ("xdg_toplevel", 10) => self.handle_xdg_toplevel_unset_maximized(message)?,
+            ("xdg_toplevel", 11) => self.handle_xdg_toplevel_set_fullscreen(message)?,
+            ("xdg_toplevel", 12) => self.handle_xdg_toplevel_unset_fullscreen(message)?,
+            ("xdg_toplevel", 13) => self.handle_xdg_toplevel_set_minimized(message)?,
             ("zwlr_layer_shell_v1", 0) => self.handle_get_layer_surface(message)?,
             ("zwlr_layer_shell_v1", 1) => self.handle_layer_shell_destroy(message)?,
             ("zwlr_layer_surface_v1", 0) => self.handle_layer_surface_set_size(message)?,
@@ -872,12 +882,24 @@ impl HeadlessWireCore {
 
     fn handle_xdg_surface_destroy(&mut self, message: WaylandMessage) -> Result<()> {
         if let Some(state) = self.xdg_shell.surfaces.remove(&message.header.object_id) {
+            if let Some(toplevel_id) = state.toplevel_id {
+                self.xdg_shell.toplevels.remove(&toplevel_id);
+                let _ = self.registry.destroy_object(toplevel_id);
+            }
             self.surfaces.release_role(state.wl_surface_id);
         }
         self.registry.destroy_object(message.header.object_id)
     }
 
     fn handle_xdg_toplevel_destroy(&mut self, message: WaylandMessage) -> Result<()> {
+        let state = self
+            .xdg_shell
+            .toplevels
+            .remove(&message.header.object_id)
+            .ok_or(WireError::InvalidObjectId(message.header.object_id.0))?;
+        if let Some(surface) = self.xdg_shell.surfaces.get_mut(&state.xdg_surface_id) {
+            surface.toplevel_id = None;
+        }
         self.registry.destroy_object(message.header.object_id)
     }
 
@@ -887,6 +909,22 @@ impl HeadlessWireCore {
         }
         let id = WaylandObjectId(LittleEndian::read_u32(&message.payload[0..4]));
         self.registry.register_client_object(id, "xdg_toplevel", 6)?;
+        let surface = self
+            .xdg_shell
+            .surfaces
+            .get_mut(&message.header.object_id)
+            .ok_or(WireError::InvalidObjectId(message.header.object_id.0))?;
+        if surface.toplevel_id.is_some() {
+            return Err(WireError::ProtocolError("xdg_surface already has a toplevel".into()));
+        }
+        surface.toplevel_id = Some(id);
+        self.xdg_shell.toplevels.insert(
+            id,
+            crate::xdg_shell::ToplevelState {
+                xdg_surface_id: message.header.object_id,
+                ..Default::default()
+            },
+        );
 
         // Emit configure events
         let serial = self.xdg_shell.get_next_serial();
@@ -899,6 +937,11 @@ impl HeadlessWireCore {
         LittleEndian::write_i32(&mut top_p[0..4], 0); // width
         LittleEndian::write_i32(&mut top_p[4..8], 0); // height
                                                       // states array empty
+        if self.registry.get_object(id)?.version >= 5 {
+            let mut capabilities = Vec::new();
+            crate::args::encode_array(&[], &mut capabilities);
+            self.events_out.push(WaylandMessage::new(id, WaylandOpcode(3), capabilities));
+        }
         self.events_out.push(WaylandMessage::new(id, WaylandOpcode(0), top_p));
 
         // xdg_surface.configure: serial
@@ -940,9 +983,17 @@ impl HeadlessWireCore {
         args: &[crate::WireArg],
     ) -> Result<()> {
         if let Some(crate::WireArg::String(title)) = args.first() {
-            if let Some(surf) = self.xdg_shell.surfaces.get_mut(&message.header.object_id) {
-                surf.title = Some(title.clone());
-            }
+            let surface_id = self
+                .xdg_shell
+                .toplevels
+                .get(&message.header.object_id)
+                .ok_or(WireError::InvalidObjectId(message.header.object_id.0))?
+                .xdg_surface_id;
+            self.xdg_shell
+                .surfaces
+                .get_mut(&surface_id)
+                .ok_or(WireError::InvalidObjectId(surface_id.0))?
+                .title = Some(title.clone());
         }
         Ok(())
     }
@@ -953,10 +1004,157 @@ impl HeadlessWireCore {
         args: &[crate::WireArg],
     ) -> Result<()> {
         if let Some(crate::WireArg::String(app_id)) = args.first() {
-            if let Some(surf) = self.xdg_shell.surfaces.get_mut(&message.header.object_id) {
-                surf.app_id = Some(app_id.clone());
+            let surface_id = self
+                .xdg_shell
+                .toplevels
+                .get(&message.header.object_id)
+                .ok_or(WireError::InvalidObjectId(message.header.object_id.0))?
+                .xdg_surface_id;
+            self.xdg_shell
+                .surfaces
+                .get_mut(&surface_id)
+                .ok_or(WireError::InvalidObjectId(surface_id.0))?
+                .app_id = Some(app_id.clone());
+        }
+        Ok(())
+    }
+
+    fn toplevel_surface_id(&self, id: WaylandObjectId) -> Result<WaylandObjectId> {
+        Ok(self
+            .xdg_shell
+            .toplevels
+            .get(&id)
+            .ok_or(WireError::InvalidObjectId(id.0))?
+            .xdg_surface_id)
+    }
+    fn validate_seat_serial(&self, payload: &[u8], bytes: usize) -> Result<()> {
+        if payload.len() != bytes {
+            return Err(WireError::ProtocolError("xdg_toplevel request payload is invalid".into()));
+        }
+        let seat = WaylandObjectId(LittleEndian::read_u32(payload));
+        let _ = self.registry.get_object(seat).and_then(|o| {
+            if o.interface == "wl_seat" {
+                Ok(o)
+            } else {
+                Err(WireError::ProtocolError("request seat is not wl_seat".into()))
+            }
+        })?;
+        if LittleEndian::read_u32(&payload[4..8]) == 0 {
+            return Err(WireError::ProtocolError("xdg_toplevel serial is invalid".into()));
+        }
+        Ok(())
+    }
+    fn handle_xdg_toplevel_show_window_menu(&mut self, message: WaylandMessage) -> Result<()> {
+        self.toplevel_surface_id(message.header.object_id)?;
+        self.validate_seat_serial(&message.payload, 16)
+    }
+    fn handle_xdg_toplevel_move(&mut self, message: WaylandMessage) -> Result<()> {
+        self.toplevel_surface_id(message.header.object_id)?;
+        self.validate_seat_serial(&message.payload, 8)
+    }
+    fn handle_xdg_toplevel_resize(&mut self, message: WaylandMessage) -> Result<()> {
+        self.toplevel_surface_id(message.header.object_id)?;
+        self.validate_seat_serial(&message.payload, 12)?;
+        if !matches!(
+            LittleEndian::read_u32(&message.payload[8..12]),
+            0 | 1 | 2 | 4 | 5 | 6 | 8 | 9 | 10
+        ) {
+            return Err(WireError::ProtocolError("xdg_toplevel.invalid_resize_edge".into()));
+        }
+        Ok(())
+    }
+    fn size_request(&mut self, message: WaylandMessage, min: bool) -> Result<()> {
+        if message.payload.len() != 8 {
+            return Err(WireError::ProtocolError("xdg_toplevel size payload is invalid".into()));
+        }
+        let w = LittleEndian::read_i32(&message.payload[0..4]);
+        let h = LittleEndian::read_i32(&message.payload[4..8]);
+        if w < 0 || h < 0 {
+            return Err(WireError::ProtocolError("xdg_toplevel.invalid_size".into()));
+        }
+        let state = self
+            .xdg_shell
+            .toplevels
+            .get(&message.header.object_id)
+            .ok_or(WireError::InvalidObjectId(message.header.object_id.0))?;
+        let (old_min, old_max) = (state.pending_min_size, state.pending_max_size);
+        let next = if min { ((w, h), old_max) } else { (old_min, (w, h)) };
+        if next.0 .0 != 0 && next.1 .0 != 0 && next.0 .0 > next.1 .0
+            || next.0 .1 != 0 && next.1 .1 != 0 && next.0 .1 > next.1 .1
+        {
+            return Err(WireError::ProtocolError("xdg_toplevel.invalid_size".into()));
+        }
+        let state = self.xdg_shell.toplevels.get_mut(&message.header.object_id).unwrap();
+        state.pending_min_size = next.0;
+        state.pending_max_size = next.1;
+        Ok(())
+    }
+    fn handle_xdg_toplevel_set_max_size(&mut self, message: WaylandMessage) -> Result<()> {
+        self.size_request(message, false)
+    }
+    fn handle_xdg_toplevel_set_min_size(&mut self, message: WaylandMessage) -> Result<()> {
+        self.size_request(message, true)
+    }
+    fn handle_xdg_toplevel_set_maximized(&mut self, message: WaylandMessage) -> Result<()> {
+        if !message.payload.is_empty() {
+            return Err(WireError::ProtocolError("invalid set_maximized payload".into()));
+        }
+        self.xdg_shell
+            .toplevels
+            .get_mut(&message.header.object_id)
+            .ok_or(WireError::InvalidObjectId(message.header.object_id.0))?
+            .maximized = true;
+        Ok(())
+    }
+    fn handle_xdg_toplevel_unset_maximized(&mut self, message: WaylandMessage) -> Result<()> {
+        if !message.payload.is_empty() {
+            return Err(WireError::ProtocolError("invalid unset_maximized payload".into()));
+        }
+        self.xdg_shell
+            .toplevels
+            .get_mut(&message.header.object_id)
+            .ok_or(WireError::InvalidObjectId(message.header.object_id.0))?
+            .maximized = false;
+        Ok(())
+    }
+    fn handle_xdg_toplevel_set_fullscreen(&mut self, message: WaylandMessage) -> Result<()> {
+        if message.payload.len() != 4 {
+            return Err(WireError::ProtocolError("invalid set_fullscreen payload".into()));
+        }
+        let raw = LittleEndian::read_u32(&message.payload);
+        if raw != 0 {
+            let o = self.registry.get_object(WaylandObjectId(raw))?;
+            if o.interface != "wl_output" {
+                return Err(WireError::ProtocolError("fullscreen object is not wl_output".into()));
             }
         }
+        self.xdg_shell
+            .toplevels
+            .get_mut(&message.header.object_id)
+            .ok_or(WireError::InvalidObjectId(message.header.object_id.0))?
+            .fullscreen = true;
+        Ok(())
+    }
+    fn handle_xdg_toplevel_unset_fullscreen(&mut self, message: WaylandMessage) -> Result<()> {
+        if !message.payload.is_empty() {
+            return Err(WireError::ProtocolError("invalid unset_fullscreen payload".into()));
+        }
+        self.xdg_shell
+            .toplevels
+            .get_mut(&message.header.object_id)
+            .ok_or(WireError::InvalidObjectId(message.header.object_id.0))?
+            .fullscreen = false;
+        Ok(())
+    }
+    fn handle_xdg_toplevel_set_minimized(&mut self, message: WaylandMessage) -> Result<()> {
+        if !message.payload.is_empty() {
+            return Err(WireError::ProtocolError("invalid set_minimized payload".into()));
+        }
+        self.xdg_shell
+            .toplevels
+            .get_mut(&message.header.object_id)
+            .ok_or(WireError::InvalidObjectId(message.header.object_id.0))?
+            .minimized = true;
         Ok(())
     }
 
@@ -1239,6 +1437,7 @@ impl HeadlessWireCore {
     fn handle_surface_commit(&mut self, message: WaylandMessage) -> Result<()> {
         let id = message.header.object_id;
         self.surfaces.commit(id);
+        self.xdg_shell.commit_toplevel_for_surface(id);
         self.viewport.commit(id);
         self.update_surface_output_membership(id)?;
 
@@ -1319,7 +1518,7 @@ impl HeadlessWireCore {
         for output_id in current.difference(&previous) {
             self.events_out.push(crate::codec::encode_event(
                 surface_id,
-                WaylandOpcode(4),
+                WaylandOpcode(0),
                 &[crate::WireArg::Object(output_id.0)],
                 &self.registry,
             )?);
@@ -1327,7 +1526,7 @@ impl HeadlessWireCore {
         for output_id in previous.difference(&current) {
             self.events_out.push(crate::codec::encode_event(
                 surface_id,
-                WaylandOpcode(5),
+                WaylandOpcode(1),
                 &[crate::WireArg::Object(output_id.0)],
                 &self.registry,
             )?);
@@ -1724,10 +1923,13 @@ mod tests {
         let res =
             core.dispatch(WaylandMessage::new(WaylandObjectId(12), WaylandOpcode(1), p2)).unwrap();
 
-        // Expect 2 events: toplevel.configure (id 13) then surface.configure (id 12)
-        assert_eq!(res.events.len(), 2);
+        // v5+ sends wm_capabilities before the initial configure pair.
+        assert_eq!(res.events.len(), 3);
         assert_eq!(res.events[0].header.object_id.0, 13);
-        assert_eq!(res.events[1].header.object_id.0, 12);
+        assert_eq!(res.events[0].header.opcode, WaylandOpcode(3));
+        assert_eq!(res.events[1].header.object_id.0, 13);
+        assert_eq!(res.events[1].header.opcode, WaylandOpcode(0));
+        assert_eq!(res.events[2].header.object_id.0, 12);
     }
 
     #[test]
@@ -2332,6 +2534,37 @@ impl HeadlessWireCore {
     }
 
     fn handle_xdg_toplevel_set_parent(&mut self, _message: WaylandMessage) -> Result<()> {
+        let message = _message;
+        if message.payload.len() != 4 {
+            return Err(WireError::ProtocolError(
+                "xdg_toplevel.set_parent payload is invalid".into(),
+            ));
+        }
+        let parent_raw = LittleEndian::read_u32(&message.payload);
+        let parent = if parent_raw == 0 { None } else { Some(WaylandObjectId(parent_raw)) };
+        let state = self
+            .xdg_shell
+            .toplevels
+            .get(&message.header.object_id)
+            .ok_or(WireError::InvalidObjectId(message.header.object_id.0))?
+            .clone();
+        if parent == Some(message.header.object_id) {
+            return Err(WireError::ProtocolError("xdg_toplevel parent cycle".into()));
+        }
+        if let Some(parent_id) = parent {
+            if !self.xdg_shell.toplevels.contains_key(&parent_id) {
+                return Err(WireError::InvalidObjectId(parent_id.0));
+            }
+            let mut cursor = Some(parent_id);
+            while let Some(id) = cursor {
+                if id == message.header.object_id {
+                    return Err(WireError::ProtocolError("xdg_toplevel parent cycle".into()));
+                }
+                cursor = self.xdg_shell.toplevels.get(&id).and_then(|t| t.parent_id);
+            }
+        }
+        self.xdg_shell.toplevels.get_mut(&message.header.object_id).unwrap().parent_id = parent;
+        let _ = state;
         Ok(())
     }
 }

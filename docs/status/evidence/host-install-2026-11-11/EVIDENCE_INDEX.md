@@ -28,6 +28,10 @@
 
 - [region-20261115/](region-20261115/): wl_region実装、Rust検証、user-space再導入、Chrome接続、次の未実装要求、cleanupの一次証跡。
 
+## 2026-11-22 xdg_toplevel v6
+
+- [xdg-toplevel-20261120/](xdg-toplevel-20261120/): xdg_toplevel実装、release install、Chrome接続、Waylandd journal、cleanup、primary保全。
+
 ## software
 
 - [software/](software/): fmt、check、test、Clippy、dev-checkの各command/stdout/stderr/status
